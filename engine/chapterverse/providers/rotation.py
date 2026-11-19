@@ -33,7 +33,7 @@ from chapterverse.contracts import (
     UnavailableKind,
 )
 from chapterverse.providers.breaker import CircuitBreaker
-from chapterverse.providers.ledger import InMemoryLedger, QuotaLedger
+from chapterverse.providers.ledger import InMemoryLedger, QuotaLedger, purpose_context
 from chapterverse.providers.openai_compat import (
     ProviderWarming,
     make_cloudflare,
@@ -294,44 +294,45 @@ class ProviderRotation:
     # ------------------------------------------------------------------ calls
 
     def complete(self, req: ChatRequest) -> ChatResult:
-        failures: list[ProviderUnavailable] = []
-        for name in self._orders[req.purpose]:
-            if not self.is_pinned(name):
-                failures.append(ProviderUnavailable(name, "model_changed", detail="unpinned"))
-                continue
-            if self.ledger is not None and not self.ledger.available(name):
-                failures.append(
-                    ProviderUnavailable(name, "quota", detail="local quota ledger refused")
-                )
-                continue
-            breaker = self._breakers[name]
-            if not breaker.allow():
-                with self._lock:
-                    kind = self._last_kind.get(name, "server")
-                failures.append(
-                    ProviderUnavailable(name, kind, breaker.retry_after_s(), "circuit open")
-                )
-                continue
-            try:
-                result = self._providers[name].complete(req)
-            except ProviderWarming as exc:
-                breaker.cancel()
-                failures.append(exc)
-                continue
-            except ProviderUnavailable as exc:
-                self._on_failure(name, exc)
-                failures.append(exc)
-                continue
-            except Exception as exc:  # noqa: BLE001 - a provider bug must not escape as a judge retry
-                unexpected = ProviderUnavailable(
-                    name, "server", detail=f"unexpected {type(exc).__name__}"
-                )
-                self._on_failure(name, unexpected)
-                failures.append(unexpected)
-                continue
-            breaker.record_success()
-            return result
-        raise AllProvidersUnavailable(failures)
+        with purpose_context(req.purpose):
+            failures: list[ProviderUnavailable] = []
+            for name in self._orders[req.purpose]:
+                if not self.is_pinned(name):
+                    failures.append(ProviderUnavailable(name, "model_changed", detail="unpinned"))
+                    continue
+                if self.ledger is not None and not self.ledger.available(name):
+                    failures.append(
+                        ProviderUnavailable(name, "quota", detail="local quota ledger refused")
+                    )
+                    continue
+                breaker = self._breakers[name]
+                if not breaker.allow():
+                    with self._lock:
+                        kind = self._last_kind.get(name, "server")
+                    failures.append(
+                        ProviderUnavailable(name, kind, breaker.retry_after_s(), "circuit open")
+                    )
+                    continue
+                try:
+                    result = self._providers[name].complete(req)
+                except ProviderWarming as exc:
+                    breaker.cancel()
+                    failures.append(exc)
+                    continue
+                except ProviderUnavailable as exc:
+                    self._on_failure(name, exc)
+                    failures.append(exc)
+                    continue
+                except Exception as exc:  # noqa: BLE001 - a provider bug must not escape as a judge retry
+                    unexpected = ProviderUnavailable(
+                        name, "server", detail=f"unexpected {type(exc).__name__}"
+                    )
+                    self._on_failure(name, unexpected)
+                    failures.append(unexpected)
+                    continue
+                breaker.record_success()
+                return result
+            raise AllProvidersUnavailable(failures)
 
     def _on_failure(self, name: str, exc: ProviderUnavailable) -> None:
         breaker = self._breakers[name]

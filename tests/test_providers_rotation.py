@@ -21,7 +21,7 @@ from chapterverse.contracts import (
     Rotation,
 )
 from chapterverse.providers import RotationJudgeChat
-from chapterverse.providers.ledger import InMemoryLedger
+from chapterverse.providers.ledger import JUDGE_OUTPUT_RESERVE, GroqLimits, InMemoryLedger
 from chapterverse.providers.openai_compat import ProviderWarming, make_cloudflare, make_groq
 from chapterverse.providers.pinning import (
     CANARY_PREFILL,
@@ -607,3 +607,92 @@ def test_generation_cards() -> None:
     assert (req_.purpose, req_.seed, req_.max_tokens) == ("judge", 0, 1024)
     gen = generation_request([{"role": "user", "content": "x"}], mode="synthesis", max_tokens=9)
     assert (gen.temperature, gen.top_p, gen.mode) == (1.0, 0.95, "synthesis")
+
+
+# ---------------------------------------------------------------------- judge reservation (R3)
+
+
+def test_rotation_judge_call_uses_judge_output_reserve_in_ledger() -> None:
+    clock = Clock()
+    ledger = InMemoryLedger(groq=GroqLimits(tokens_per_minute=500), clock=clock)
+    held_pending: list[float] = []
+
+    class MeteredProvider(Fake):
+        def complete(self, r: ChatRequest) -> ChatResult:
+            # When complete is called inside rot.complete(req), ledger reservation was made
+            # with purpose=r.purpose.
+            assert ledger.reserve(self.name, 100, max_output_tokens=r.max_tokens)
+            held_pending.append(ledger.snapshot()[self.name]["pending_tokens"])
+            from chapterverse.providers.ledger import CallUsage  # noqa: PLC0415
+
+            ledger.record(
+                CallUsage(
+                    provider=self.name,
+                    est_tokens=100,
+                    max_output_tokens=r.max_tokens,
+                    prompt_tokens=20,
+                    completion_tokens=10,
+                )
+            )
+            return super().complete(r)
+
+    groq = MeteredProvider("groq")
+    rot = ProviderRotation([groq], generate=["groq"], judge=["groq"], ledger=ledger)
+
+    # 1. Judge call sends max_tokens=1024, but purpose="judge" reserves only 100 + 64 = 164 tokens.
+    # If 1024 were reserved: 100 + 1024 = 1124 > 500 would have failed.
+    j_req = judge_request([{"role": "user", "content": "judge prompt"}])
+    assert j_req.max_tokens == 1024
+    assert j_req.purpose == "judge"
+
+    res = rot.complete(j_req)
+    assert res.provider == "groq"
+    assert held_pending[-1] == 100 + JUDGE_OUTPUT_RESERVE  # 164
+
+    # After completion, reservation is released and actual usage recorded (20 + 10 = 30)
+    snap = ledger.snapshot()["groq"]
+    assert snap["pending_tokens"] == 0
+    assert snap["tokens_minute"] == 30
+
+    # 2. Generation call with max_tokens=200 reserves 100 + 200 = 300 tokens
+    g_req = generation_request(
+        [{"role": "user", "content": "gen prompt"}], mode="short", max_tokens=200
+    )
+    assert g_req.purpose == "generate"
+    res2 = rot.complete(g_req)
+    assert res2.provider == "groq"
+    assert held_pending[-1] == 100 + 200  # 300
+
+
+@respx.mock
+def test_rotation_end_to_end_judge_burst_under_tpm_cap() -> None:
+    env = {**ENV, "CLOUDFLARE_ACCOUNT_ID": ACCOUNT, "JUDGE_PROVIDERS": "groq"}
+    cfg = RotationConfig.from_env(env)
+    ledger = InMemoryLedger(groq=GroqLimits(tokens_per_minute=1000))
+    rot = ProviderRotation.from_config(cfg, environ=env, ledger=ledger, sleep=lambda _s: None)
+
+    respx.post(f"{GROQ}/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"label":"supported"}'}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 15, "completion_tokens": 5},
+            },
+        )
+    )
+
+    # Each judge call sends max_tokens=1024.
+    # With prompt estimate ~20 tokens:
+    # Under old rule (20 + 1024 = 1044): call 1 would exceed TPM limit 1000 and fail immediately!
+    # Under new rule (20 + 64 = 84): each call easily reserves, finishes (using 20 actual tokens),
+    # releasing the reservation. 5 consecutive judge calls succeed without hitting TPM limit.
+    for _ in range(5):
+        j_req = judge_request([{"role": "user", "content": "is this supported"}])
+        result = rot.complete(j_req)
+        assert result.provider == "groq"
+
+    snap = ledger.snapshot()["groq"]
+    assert snap["pending_tokens"] == 0
+    assert snap["tokens_minute"] == 5 * 20  # 100 actual tokens

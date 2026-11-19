@@ -10,6 +10,7 @@ import pytest
 from chapterverse.contracts import ChatMessage
 from chapterverse.providers.breaker import CircuitBreaker
 from chapterverse.providers.ledger import (
+    JUDGE_OUTPUT_RESERVE,
     TOKENS_PER_CHAR,
     CallUsage,
     CloudflareLimits,
@@ -22,6 +23,7 @@ from chapterverse.providers.ledger import (
     parse_duration,
     parse_rate_headers,
     parse_retry_after,
+    purpose_context,
     seconds_to_utc_midnight,
 )
 
@@ -404,3 +406,104 @@ def test_breaker_thread_safety_smoke() -> None:
     for t in threads:
         t.join()
     assert b._failures == 4000  # no update lost
+
+
+# ---------------------------------------------------------------------- judge reservation (R3)
+
+
+def test_judge_reservation_uses_named_constant() -> None:
+    assert JUDGE_OUTPUT_RESERVE == 64
+    clock = Clock()
+    ledger = InMemoryLedger(groq=GroqLimits(tokens_per_minute=1000), clock=clock)
+
+    # A judge call requesting max_tokens=1024 reserves only est + 64 tokens (300 + 64 = 364).
+    # If it had reserved max_tokens 1024, 300 + 1024 = 1324 > 1000 would have failed.
+    assert ledger.reserve("groq", 300, max_output_tokens=1024, purpose="judge")
+    snap = ledger.snapshot()["groq"]
+    assert snap["pending_tokens"] == 364
+    assert snap["pending_requests"] == 1
+
+    # Also works when set via purpose_context
+    with purpose_context("judge"):
+        assert ledger.reserve("groq", 200, max_output_tokens=1024)
+    snap = ledger.snapshot()["groq"]
+    assert snap["pending_tokens"] == 364 + (200 + 64)
+    assert snap["pending_requests"] == 2
+
+
+def test_generation_reservation_unchanged() -> None:
+    clock = Clock()
+    ledger = InMemoryLedger(groq=GroqLimits(tokens_per_minute=1000), clock=clock)
+
+    # Generation call requesting max_tokens=1024 reserves est + 1024 tokens.
+    # 300 + 1024 = 1324 > 1000: must fail.
+    assert not ledger.reserve("groq", 300, max_output_tokens=1024, purpose="generate")
+    # Same without purpose (default is generate)
+    assert not ledger.reserve("groq", 300, max_output_tokens=1024)
+
+    # With higher limit, generation holds the full max_tokens
+    ledger2 = InMemoryLedger(groq=GroqLimits(tokens_per_minute=2000), clock=clock)
+    assert ledger2.reserve("groq", 300, max_output_tokens=1024, purpose="generate")
+    snap = ledger2.snapshot()["groq"]
+    assert snap["pending_tokens"] == 1324
+
+
+def test_reconcile_releases_difference() -> None:
+    clock = Clock()
+    ledger = InMemoryLedger(groq=GroqLimits(tokens_per_minute=2000), clock=clock)
+
+    assert ledger.reserve("groq", 300, max_output_tokens=1024, purpose="judge")
+    assert ledger.snapshot()["groq"]["pending_tokens"] == 364
+
+    # The call actually used 25 prompt tokens and 15 completion tokens (40 total)
+    ledger.record(
+        CallUsage(
+            provider="groq",
+            est_tokens=300,
+            max_output_tokens=1024,
+            purpose="judge",
+            prompt_tokens=25,
+            completion_tokens=15,
+        )
+    )
+
+    snap = ledger.snapshot()["groq"]
+    assert snap["pending_tokens"] == 0
+    assert snap["tokens_minute"] == 40
+    # Over-estimate (364 - 40 = 324) released; does not accumulate in pending or tokens_minute
+
+
+def test_burst_of_judge_calls_fits_minute_window() -> None:
+    clock = Clock()
+    ledger = InMemoryLedger(groq=GroqLimits(tokens_per_minute=8000), clock=clock)
+
+    # Prompt estimate 900 tokens + JUDGE_OUTPUT_RESERVE 64 = 964 tokens per judge call.
+    # 8 concurrent in-flight calls: 8 * 964 = 7712 <= 8000.
+    for _ in range(8):
+        assert ledger.reserve("groq", 900, max_output_tokens=1024, purpose="judge")
+
+    # 9th call: 7712 + 964 = 8676 > 8000: rejected.
+    assert not ledger.reserve("groq", 900, max_output_tokens=1024, purpose="judge")
+    assert ledger.snapshot()["groq"]["pending_tokens"] == 7712
+
+    # Under the old rule (900 + 1024 = 1924), only 4 calls fit (4 * 1924 = 7696, 5th = 9620 > 8000).
+    # Now simulate the 8 calls completing with 40 tokens actual usage each.
+    for _ in range(8):
+        ledger.record(
+            CallUsage(
+                provider="groq",
+                est_tokens=900,
+                max_output_tokens=1024,
+                purpose="judge",
+                prompt_tokens=25,
+                completion_tokens=15,
+            )
+        )
+
+    snap = ledger.snapshot()["groq"]
+    assert snap["pending_tokens"] == 0
+    assert snap["tokens_minute"] == 8 * 40  # 320 tokens
+
+    # Another burst of 7 judge calls fits immediately
+    for _ in range(7):
+        assert ledger.reserve("groq", 900, max_output_tokens=1024, purpose="judge")

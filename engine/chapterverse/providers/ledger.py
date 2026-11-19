@@ -25,15 +25,18 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Final, Protocol, runtime_checkable
 
-from chapterverse.contracts import ChatMessage
+from chapterverse.contracts import ChatMessage, Purpose
 
 __all__ = [
+    "JUDGE_OUTPUT_RESERVE",
     "TOKENS_PER_CHAR",
     "CallUsage",
     "CloudflareLimits",
@@ -46,8 +49,25 @@ __all__ = [
     "parse_duration",
     "parse_rate_headers",
     "parse_retry_after",
+    "purpose_context",
     "seconds_to_utc_midnight",
 ]
+
+JUDGE_OUTPUT_RESERVE: Final = 64
+"""Output tokens reserved for a judge call (purpose="judge") against per-minute limits."""
+
+_current_purpose: ContextVar[Purpose] = ContextVar("_current_purpose", default="generate")
+
+
+@contextmanager
+def purpose_context(purpose: Purpose) -> Iterator[None]:
+    """Context manager to set the ledger purpose for the current thread or task."""
+    token = _current_purpose.set(purpose)
+    try:
+        yield
+    finally:
+        _current_purpose.reset(token)
+
 
 TOKENS_PER_CHAR: Final = 1.5 / 4
 """Estimated tokens per character of message text: 4 characters a token, x1.5 margin."""
@@ -113,6 +133,7 @@ class CallUsage:
     usd: float | None = None
     headers: RateHeaders | None = None
     block_s: float | None = None
+    purpose: Purpose = "generate"
 
 
 @runtime_checkable
@@ -234,12 +255,21 @@ class InMemoryLedger:
 
     # ------------------------------------------------------------------ protocol
 
-    def reserve(self, provider: str, est_tokens: int, *, max_output_tokens: int = 0) -> bool:
+    def reserve(
+        self,
+        provider: str,
+        est_tokens: int,
+        *,
+        max_output_tokens: int = 0,
+        purpose: Purpose | None = None,
+    ) -> bool:
+        eff_purpose = purpose or _current_purpose.get()
+        eff_max_out = JUDGE_OUTPUT_RESERVE if eff_purpose == "judge" else max_output_tokens
         with self._lock:
             now = self._clock()
-            if not self._fits(provider, now, est_tokens, max_output_tokens):
+            if not self._fits(provider, now, est_tokens, eff_max_out):
                 return False
-            self._hold(provider, est_tokens, max_output_tokens, sign=1)
+            self._hold(provider, est_tokens, eff_max_out, sign=1)
             return True
 
     def available(self, provider: str) -> bool:
@@ -247,9 +277,11 @@ class InMemoryLedger:
             return self._fits(provider, self._clock(), 1, 0)
 
     def record(self, usage: CallUsage) -> None:
+        eff_purpose = usage.purpose if usage.purpose != "generate" else _current_purpose.get()
+        eff_max_out = JUDGE_OUTPUT_RESERVE if eff_purpose == "judge" else usage.max_output_tokens
         with self._lock:
             now = self._clock()
-            self._hold(usage.provider, usage.est_tokens, usage.max_output_tokens, sign=-1)
+            self._hold(usage.provider, usage.est_tokens, eff_max_out, sign=-1)
             if usage.provider == "groq":
                 self._record_groq(usage, now)
             elif usage.provider == "cloudflare":
