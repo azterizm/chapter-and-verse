@@ -165,7 +165,7 @@ Membership of the `docker` group is root-equivalent on the host. The `deploy` us
 
 ### Idle reclamation
 
-Oracle reclaims an Always Free A1 instance as idle when, over 7 days, all three of these hold: 95th percentile CPU under 20%, network under 20%, memory under 20%. The instance stays safe if any one of them is above 20%. Memory is the one this deployment keeps up: the router index, the concepts index and the text store (about 4 GB) are held resident by the engine, and Slice 3 adds the dense vectors. 4 GB of 24 GB is about 17%, which is under the line. After the first week, read the instance's memory utilisation metric in the OCI console. If it is under 25%, raise the resident set before the 7-day window can close.
+Oracle reclaims an Always Free A1 instance as idle when, over 7 days, all three of these hold: 95th percentile CPU under 20%, network under 20%, memory under 20%. The instance stays safe if any one of them is above 20%. Memory is the one this deployment keeps up: the decompressed text store (about 3.97 GB) is held in heap memory, and the router index (0.38 GB) and concepts index (0.57 GB) are held in tmpfs (/ram). Expected resident memory is about 5.8 GB (about 24% of 24 GB), which keeps usage above the 20% reclamation threshold. On the VM, read memory with `free -m` (the used column) or check the OCI Monitoring MemoryUtilization metric. Check it after the first week to verify the 7-day 95th percentile stays above 20%.
 
 ## 5. Worker (Command)
 
