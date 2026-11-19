@@ -8,14 +8,20 @@ hold the instrument record line and the provision's lines, and one ``json.loads`
 Rows are parsed with the standard library ``json``, as ``load_provision`` parses them, so the
 dicts are equal to its output by construction.
 
+In resident mode (``STORE_RESIDENT=1``), every frame is decompressed once into memory at open
+and shared by all worker threads; queries then slice directly from memory with no decompression.
+
 The store is immutable once open. The table and frame index are read-only maps, and each
-thread gets its own zstd decompressor, so one instance can serve every request thread.
+thread gets its own zstd decompressor (in mapped mode), so one instance can serve every request
+thread.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import mmap
+import os
 import re
 import sys
 import threading
@@ -30,7 +36,6 @@ import zstandard
 from legal_rag_router.table import SortedTable
 from legal_rag_verifier.corpus import instrument_coordinate
 
-from chapterverse.contracts import TextStore
 from chapterverse.store.format import (
     DICT_NAME,
     FRAMES_NAME,
@@ -42,10 +47,28 @@ from chapterverse.store.format import (
 )
 from chapterverse.store.manifest import StoreLoadError, corpus_id, read_manifest, verify_files
 
-__all__ = ["CompressedTextStore", "open_store"]
+__all__ = [
+    "DEFAULT_RESIDENT_MAX_BYTES",
+    "CompressedTextStore",
+    "clear_resident_cache",
+    "open_store",
+]
 
+log = logging.getLogger(__name__)
+
+DEFAULT_RESIDENT_MAX_BYTES: Final = 8 * (1 << 30)  # 8 GiB
 _U64: Final = "Q"
 _CONTROL: Final = re.compile(r"[\x00-\x1f]")
+_CHUNK: Final = 1 << 22  # 4 MiB
+
+_RESIDENT_CACHE: dict[str, bytes] = {}
+_RESIDENT_LOCK = threading.Lock()
+
+
+def clear_resident_cache() -> None:
+    """Clear the process-level cache of resident decompressed store buffers."""
+    with _RESIDENT_LOCK:
+        _RESIDENT_CACHE.clear()
 
 
 def _map(path: Path) -> mmap.mmap | bytes:
@@ -64,9 +87,15 @@ def _u64_view(raw: mmap.mmap | bytes) -> Sequence[int]:
 
 
 class CompressedTextStore:
-    """Read-only, memory-mapped, thread-safe text store. Use :func:`open_store`."""
+    """Read-only, memory-mapped or resident, thread-safe text store. Use :func:`open_store`."""
 
-    def __init__(self, directory: str | Path) -> None:
+    def __init__(
+        self,
+        directory: str | Path,
+        *,
+        resident: bool | None = None,
+        max_resident_bytes: int | None = None,
+    ) -> None:
         root = Path(directory)
         manifest = read_manifest(root)
         verify_files(root, manifest)
@@ -104,7 +133,34 @@ class CompressedTextStore:
         for name, (found, wanted) in expected.items():
             if found != wanted:
                 raise StoreLoadError(f"store inconsistent: {name} is {found}, expected {wanted}")
-        if self._frame_count:
+
+        if resident is None:
+            resident = os.environ.get("STORE_RESIDENT", "").strip() == "1"
+
+        if max_resident_bytes is None:
+            max_bytes_env = os.environ.get("STORE_RESIDENT_MAX_BYTES", "").strip()
+            max_resident_bytes = int(max_bytes_env) if max_bytes_env else DEFAULT_RESIDENT_MAX_BYTES
+
+        source_bytes = self._ustart[-1]
+        if resident and source_bytes > max_resident_bytes:
+            log.warning(
+                "decompressed store size %d bytes exceeds STORE_RESIDENT_MAX_BYTES "
+                "(%d bytes); staying mapped",
+                source_bytes,
+                max_resident_bytes,
+            )
+            resident = False
+
+        decompressed = None
+        if resident:
+            with _RESIDENT_LOCK:
+                decompressed = _RESIDENT_CACHE.get(self._corpus_id)
+                if decompressed is None:
+                    decompressed = self._decompress_all(root)
+                    _RESIDENT_CACHE[self._corpus_id] = decompressed
+        self._decompressed = decompressed
+
+        if self._frame_count and self._decompressed is None:
             # Decompress one frame on this thread: proves the dictionary loads, and builds
             # the shared decompression dictionary before any worker thread can race to.
             self._frame(0)
@@ -149,6 +205,11 @@ class CompressedTextStore:
     # ------------------------------------------------------------------ extras
 
     @property
+    def is_resident(self) -> bool:
+        """True when the store holds decompressed text resident in memory."""
+        return self._decompressed is not None
+
+    @property
     def manifest(self) -> Mapping[str, Any]:
         """The parsed ``corpus-manifest.json`` (read-only view)."""
         return self._manifest
@@ -186,6 +247,26 @@ class CompressedTextStore:
         base, head, size, has_text = decode_instrument(value)
         return instrument, base, head, size, has_text
 
+    def _decompress_all(self, root: Path) -> bytes:
+        if self._frame_count == 0:
+            return b""
+        dctx = zstandard.ZstdDecompressor(dict_data=self._dictionary)
+        text_path = root / TEXT_NAME
+        with text_path.open("rb") as fh:
+            reader = dctx.stream_reader(fh, read_across_frames=True)
+            chunks: list[bytes] = []
+            while True:
+                chunk = reader.read(_CHUNK)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            buf = b"".join(chunks)
+        if len(buf) != self._ustart[-1]:
+            raise StoreLoadError(
+                f"store inconsistent: decompressed {len(buf)} bytes, expected {self._ustart[-1]}"
+            )
+        return buf
+
     def _decompressor(self) -> zstandard.ZstdDecompressor:
         dctx: zstandard.ZstdDecompressor | None = getattr(self._local, "dctx", None)
         if dctx is None:
@@ -199,6 +280,11 @@ class CompressedTextStore:
 
     def _read(self, spans: Sequence[tuple[int, int]]) -> bytes:
         """The decompressed bytes of ``spans`` (stream offsets), joined in order."""
+        if self._decompressed is not None:
+            if len(spans) == 1:
+                begin, end = spans[0]
+                return self._decompressed[begin:end]
+            return b"".join(self._decompressed[begin:end] for begin, end in spans)
         ustart = self._ustart
         blocks: dict[int, bytes] = {}
         parts: list[bytes | memoryview] = []
@@ -225,11 +311,16 @@ class CompressedTextStore:
         return [json.loads(line.decode("utf-8")) for line in lines]
 
 
-def open_store(path: str | Path) -> TextStore:
+def open_store(
+    path: str | Path,
+    *,
+    resident: bool | None = None,
+    max_resident_bytes: int | None = None,
+) -> CompressedTextStore:
     """Open, verify and map the store at ``path``.
 
     Raises:
         StoreLoadError: the manifest is missing or of another format, or any file is missing
             or does not match its size and SHA-256.
     """
-    return CompressedTextStore(path)
+    return CompressedTextStore(path, resident=resident, max_resident_bytes=max_resident_bytes)

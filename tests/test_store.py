@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import random
 import shutil
@@ -22,7 +23,12 @@ from legal_rag_router.table import SortedTable, encode_table
 from legal_rag_verifier.corpus import instrument_coordinate, load_provision
 
 from chapterverse.contracts import TextStore
-from chapterverse.store import CompressedTextStore, StoreLoadError, open_store
+from chapterverse.store import (
+    CompressedTextStore,
+    StoreLoadError,
+    clear_resident_cache,
+    open_store,
+)
 from chapterverse.store.format import DICT_NAME, FRAMES_NAME, MANIFEST_NAME, TEXT_NAME
 
 REPO = Path(__file__).resolve().parents[1]
@@ -62,9 +68,14 @@ def stores(tmp_path_factory: pytest.TempPathFactory, fixture_data_root: Path) ->
     }
 
 
-@pytest.fixture(scope="module", params=sorted(VARIANTS))
+@pytest.fixture(
+    scope="module",
+    params=[(v, r) for v in sorted(VARIANTS) for r in (False, True)],
+    ids=[f"{v}-{'resident' if r else 'mapped'}" for v in sorted(VARIANTS) for r in (False, True)],
+)
 def store(request: pytest.FixtureRequest, stores: dict[str, Path]) -> CompressedTextStore:
-    return CompressedTextStore(stores[request.param])
+    variant, resident = request.param
+    return CompressedTextStore(stores[variant], resident=resident)
 
 
 @pytest.fixture(scope="module")
@@ -79,6 +90,12 @@ def test_open_store_returns_a_text_store(stores: dict[str, Path]) -> None:
     opened = open_store(stores["default"])
     assert isinstance(opened, TextStore)
     assert isinstance(opened, CompressedTextStore)
+    assert opened.is_resident is False
+
+    opened_res = open_store(stores["default"], resident=True)
+    assert isinstance(opened_res, TextStore)
+    assert isinstance(opened_res, CompressedTextStore)
+    assert opened_res.is_resident is True
 
 
 def test_get_equals_the_double_for_every_fixture_coordinate(
@@ -195,6 +212,84 @@ def test_many_threads_get_the_same_rows(store: CompressedTextStore, coordinates:
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(run, [work[i::8] for i in range(8)]))
     assert all(results)
+
+
+# ---------------------------------------------------------------------------- resident mode
+
+
+def test_env_store_resident_selects_mode(
+    stores: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = stores["default"]
+
+    monkeypatch.delenv("STORE_RESIDENT", raising=False)
+    s_default = open_store(path)
+    assert s_default.is_resident is False
+
+    monkeypatch.setenv("STORE_RESIDENT", "0")
+    s_off = open_store(path)
+    assert s_off.is_resident is False
+
+    monkeypatch.setenv("STORE_RESIDENT", "1")
+    s_on = open_store(path)
+    assert s_on.is_resident is True
+
+
+def test_store_resident_max_bytes_exceeded_stays_mapped(
+    stores: dict[str, Path], caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = stores["default"]
+    monkeypatch.setenv("STORE_RESIDENT", "1")
+    monkeypatch.setenv("STORE_RESIDENT_MAX_BYTES", "100")
+
+    with caplog.at_level(logging.WARNING):
+        s = open_store(path)
+
+    assert s.is_resident is False
+    assert "exceeds STORE_RESIDENT_MAX_BYTES" in caplog.text
+    assert "staying mapped" in caplog.text
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+    # Equivalence still holds via mapped fallback
+    assert s.get("uk/ukpga/1996/18/s124")[0]["record_type"] == "instrument"
+
+
+def test_store_resident_max_bytes_allows_resident(
+    stores: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = stores["default"]
+    monkeypatch.setenv("STORE_RESIDENT", "1")
+    monkeypatch.setenv("STORE_RESIDENT_MAX_BYTES", str(10 * 1024 * 1024))
+    s = open_store(path)
+    assert s.is_resident is True
+
+
+def test_resident_cache_shared_across_instances(stores: dict[str, Path]) -> None:
+    clear_resident_cache()
+    path = stores["default"]
+    s1 = open_store(path, resident=True)
+    s2 = open_store(path, resident=True)
+    assert s1.is_resident is True
+    assert s2.is_resident is True
+    assert s1._decompressed is s2._decompressed
+    clear_resident_cache()
+
+
+def test_resident_and_mapped_give_byte_identical_results(
+    stores: dict[str, Path], coordinates: list[str]
+) -> None:
+    path = stores["default"]
+    mapped = CompressedTextStore(path, resident=False)
+    resident = CompressedTextStore(path, resident=True)
+    assert mapped.is_resident is False
+    assert resident.is_resident is True
+
+    for c in coordinates:
+        assert mapped.get(c) == resident.get(c)
+        assert repr(mapped.get(c)) == repr(resident.get(c))
+        assert mapped.instrument(c) == resident.instrument(c)
+        assert mapped.has_text(instrument_coordinate(c)) is resident.has_text(
+            instrument_coordinate(c)
+        )
 
 
 # ---------------------------------------------------------------------------- format
