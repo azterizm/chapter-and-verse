@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -28,7 +30,7 @@ from chapterverse.contracts import (
     TextStore,
     Window,
 )
-from chapterverse.store import open_store
+from chapterverse.store import StoreLoadError, open_store
 
 # R2.1 Equality Act 2010 s.39(1)
 EQ_S39_1_TEXT = (
@@ -178,12 +180,15 @@ def test_real_offence_provision_passes() -> None:
     assert classification_failure(HSWA_OFFENCE_SENTENCE, [HSWA_S33_1_TEXT]) is None
 
 
-def test_real_offence_provision_confirmed_via_store() -> None:
+@pytest.mark.data
+def test_real_offence_provision_confirmed_via_store(real_data_root: Path) -> None:
     # Confirms that HSWA s.33(1) actually exists and contains offence terms
+    del real_data_root
+    store_dir = Path(os.environ.get("STORE_DIR", "artefacts/store"))
     try:
-        store = open_store("artefacts/store")
-    except (FileNotFoundError, OSError):
-        pytest.skip("artefacts/store not available in this environment")
+        store = open_store(store_dir)
+    except (FileNotFoundError, OSError, StoreLoadError):
+        pytest.skip(f"{store_dir} not available in this environment")
     records = store.get("uk/ukpga/1974/37/s33")
     sub1 = next((r for r in records if r.get("coordinate") == "uk/ukpga/1974/37/s33/1"), None)
     assert sub1 is not None

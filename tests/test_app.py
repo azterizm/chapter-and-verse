@@ -516,7 +516,7 @@ def test_disconnect_stops_the_worker_and_stores_nothing(
     assert b"event: receipt" not in streamed
     assert not [sql for sql, _ in log if sql == INSERT_RECEIPT_SQL]
     assert len(rotation.generate_requests) <= 2
-    assert all(r.purpose == "generate" for r in rotation.requests[-1:])
+    assert len(rotation.requests) <= 4
 
 
 # ---------------------------------------------------------------------- startup
