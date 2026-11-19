@@ -1,0 +1,19 @@
+Chapter & Verse: attribution notice
+
+The code of Chapter & Verse is licensed under AGPL-3.0-only (see LICENSE). The
+legislation text it shows, and the indexes derived from it, come from the
+source below.
+
+United Kingdom legislation
+  Source:      legislation.gov.uk (The National Archives)
+  Licence:     Open Government Licence v3.0
+               https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+  Attribution: Contains public sector information licensed under the Open
+               Government Licence v3.0. Source: legislation.gov.uk,
+               © Crown and database right.
+  Note:        OGL v3.0 except where otherwise stated. Material derived from
+               EUR-Lex is reused under Commission Decision 2011/833/EU.
+  Fair use:    https://www.legislation.gov.uk/fair-use-policy
+
+The test fixtures under tests/fixtures/data/ contain provision text from this
+source, under the same licence.

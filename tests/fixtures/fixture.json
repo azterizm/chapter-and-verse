@@ -1,0 +1,45 @@
+{
+  "era": {
+    "instrument": "uk/ukpga/1996/18",
+    "note": "reduced to the instrument record plus these sections and their descendants",
+    "sections": [
+      "s94",
+      "s98",
+      "s118",
+      "s119",
+      "s120",
+      "s121",
+      "s122",
+      "s123",
+      "s124",
+      "s124A",
+      "s125",
+      "s126"
+    ]
+  },
+  "prospective": {
+    "in_force_provision": "uk/ukpga/2018/11/s2",
+    "instrument": "uk/ukpga/2018/11",
+    "note": "instrument in force; s1 and its subsections carry prospective=true",
+    "provisions": [
+      "uk/ukpga/2018/11/s1"
+    ],
+    "title": "Secure Tenancies (Victims of Domestic Abuse) Act 2018"
+  },
+  "repealed": {
+    "in_force_provision": "uk/ukpga/2008/7/s3",
+    "instrument": "uk/ukpga/2008/7",
+    "note": "instrument in force; s4 and s5 carry repealed=true and dot-run text",
+    "provisions": [
+      "uk/ukpga/2008/7/s4",
+      "uk/ukpga/2008/7/s5"
+    ],
+    "title": "European Union (Amendment) Act 2008"
+  },
+  "snapshot": "2026-09-28",
+  "title_only": {
+    "instrument": "uk/ukpga/1980/15",
+    "note": "structure metadata_only, provision_count 0: an instrument record and no text",
+    "title": "National Health Service (Invalid Direction) Act 1980"
+  }
+}

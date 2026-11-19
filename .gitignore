@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+dist/
+*.egg-info/
+
+# Build outputs
+artefacts/
+
+# Secrets
+.env*
+*.key
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# OS
+.DS_Store

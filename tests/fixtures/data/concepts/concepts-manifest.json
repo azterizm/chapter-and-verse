@@ -1,0 +1,56 @@
+{
+  "average_lengths": [
+    2.5926,
+    0.4444,
+    0.0,
+    16.0741,
+    55.2593
+  ],
+  "body_terms": 200,
+  "counts": {
+    "docs": 27,
+    "instrument_docs": 4,
+    "postings": 1114,
+    "terms": 455
+  },
+  "fields": [
+    "heading",
+    "crossheading",
+    "structure",
+    "title",
+    "body"
+  ],
+  "files": {
+    "docs.off": {
+      "sha256": "07882e87a3b43dd6ca31fea55565441f172a1b277a33b0ac35e41f544ff6c580"
+    },
+    "docs.tbl": {
+      "sha256": "b98ef1b9c6749af3da0efa124025aae74b6a60438ec849e613309756d4581e46"
+    },
+    "lengths.bin": {
+      "sha256": "4aea4b25ab7ee59d3f70ae90195ff33801442bad03d7a71824d93f72435aade2"
+    },
+    "postings.doc": {
+      "sha256": "0b0836a1d3b02db721ae021127da694bba8352996148f61e8800c643642e73f2"
+    },
+    "postings.tf": {
+      "sha256": "da5d89794511f69c6887d1b65109223a00c44d354fe31bcff62c4e6b93d1cabb"
+    },
+    "priors.bin": {
+      "sha256": "a791cecfb37cd4838c5ef97dd1b9e6ec680c8925dd700dddeed7782e91e94209"
+    },
+    "terms.off": {
+      "sha256": "161e77093837bbe4b4875cb64413fe205e206741713c750fa145fbc757784104"
+    },
+    "terms.tbl": {
+      "sha256": "a109cee32a02506f74c41d7059516c5424f93d75df64998aed0aee96252b0adc"
+    },
+    "thesaurus.json": {
+      "sha256": "20a54b6aa74d184e013499abfd0465f0979312c9e52dc8fe8a0b9aa0e2b324b6"
+    }
+  },
+  "first_instrument_doc": 23,
+  "format_version": 1,
+  "snapshot": "2026-09-28",
+  "stemmer": "lrr-light-v1"
+}
