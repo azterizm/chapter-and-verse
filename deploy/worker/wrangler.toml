@@ -1,0 +1,52 @@
+# Chapter & Verse API Worker. Deploy from deploy/worker/:  npx wrangler deploy
+# Secrets (never in this file):
+#   npx wrangler secret put TURNSTILE_SECRET       Turnstile widget secret key
+#   npx wrangler secret put SESSION_SIGNING_KEY    32+ random characters (openssl rand -base64 48)
+#   npx wrangler secret put ACCESS_CLIENT_ID       Access service token Client ID (required)
+#   npx wrangler secret put ACCESS_CLIENT_SECRET   Access service token Client Secret (required)
+name = "chapter-and-verse-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+# No *.workers.dev URL: the API is reachable only on the route below, behind the same checks.
+workers_dev = false
+preview_urls = false
+send_metrics = false
+
+# Enable when the domain is on Cloudflare (domain not yet chosen; plan names chapterandverse.uk).
+# routes = [
+#   { pattern = "chapterandverse.uk/api/*", zone_name = "chapterandverse.uk" },
+# ]
+
+[vars]
+# Origin 1: the Oracle engine through Cloudflare Tunnel (a public hostname of the tunnel).
+# Slice 4 adds STANDBY_ORIGIN_URL (Hugging Face Space); see src/origins.ts.
+ORIGIN_URL = "https://origin.chapterandverse.uk"
+# Comma-separated. Include the site itself: browsers send Origin on same-origin POSTs.
+ALLOWED_ORIGINS = "https://chapterandverse.uk"
+ORIGIN_TIMEOUT_MS = "4000"
+# JSON body cap. The engine enforces MAX_QUERY_BYTES=4096 on the query itself.
+MAX_BODY_BYTES = "12288"
+SESSION_TTL_SECONDS = "7200"
+TURNSTILE_HOSTNAMES = "chapterandverse.uk"
+TURNSTILE_ACTION = "ask"
+
+# Workers Rate Limiting binding: per Cloudflare location, period 10 or 60 s only.
+# Keep in step with src/ratelimit.ts (the in-isolate fallback uses the same numbers).
+# namespace_id is any positive integer unique within the account.
+[[ratelimits]]
+name = "API_LIMITER"
+namespace_id = "41001"
+simple = { limit = 60, period = 60 }
+
+[[ratelimits]]
+name = "ASK_LIMITER"
+namespace_id = "41002"
+simple = { limit = 10, period = 60 }
+
+# Health ping every 3 hours (minute 17 to avoid the top of the hour).
+[triggers]
+crons = ["17 */3 * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1

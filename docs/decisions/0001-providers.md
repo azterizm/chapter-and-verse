@@ -81,11 +81,27 @@ Test: system "Reply in one sentence.", user "Name the capital of France.", final
 4. Modal request: the `qwen27-ar4` preset unchanged, on its own SGLang server.
 5. Judge sampling everywhere is the measured preset: temperature 0.7, top_p 0.8, top_k 20, min_p 0, presence_penalty 1.5, max_tokens 1024, seed 0, thinking off. On Groq the judge runs without top_k and min_p, and on Groq and Cloudflare with an undisclosed quantisation. The judge stays on Modal until each provider passes the held-out battery (plan §12 stop rule).
 6. Generation sampling in short mode is Qwen's non-thinking card (0.7, 0.8, 20, 0, 1.5); in synthesis mode the thinking card (1.0, 0.95, 20, 0, 0).
-7. `ChatContinuationGenerator` sends the verified prefix as a final assistant message on Groq and Cloudflare. It cuts the prefix at a sentence end only. On Groq it joins the continuation with one space when the continuation starts with neither whitespace nor punctuation. On Cloudflare it uses the text as returned. If the daily canary below fails on a provider, that provider falls back to the verified prefix in the user turn.
-8. The daily `/models` check adds one prefill canary per provider (the French test above) and one thinking-off canary. On failure the provider leaves the rotation.
+7. `ChatContinuationGenerator` sends the verified prefix as a final assistant message only on a provider whose native prefill is on. It cuts the prefix at a sentence end only. Native prefill is on by default for Cloudflare and off by default for Groq (Amendment 2026-11-19). A passed prefill canary turns it on for that provider; a failed one turns it off. With native prefill off, the provider gets the verified prefix in the user turn (`fold_prefill`). On Groq a native continuation is joined with one space when it starts with neither whitespace nor punctuation; on Cloudflare the text is used as returned.
+8. The daily `/models` check adds one prefill canary per provider (the French test above) and one thinking-off canary. If the model is not listed or the thinking-off canary fails, the provider leaves the rotation. A failed prefill canary does not remove the provider: it only switches that provider to the user-turn prefix (item 7).
 9. Quota ledger: Groq counts requests per day (1000) and tokens per minute (8000) from response headers, and holds 30 RPM and 200K TPD as unconfirmed ceilings. Cloudflare sums `usage.neurons` against 9,500 of the 10,000 daily Neurons.
 10. The UI states that answers are information about legislation, not legal advice, to meet Groq §4.3. One Groq organisation and one Cloudflare account; no extra accounts to stretch limits (Groq AUP).
 11. Modal: during the measured 406 s cold start the user gets the extractive answer, not 1 to 3 min as the plan states. Keep `startup_timeout=1800`, `max_containers=1`, `scaledown_window=120`.
+
+## Amendment 2026-11-19
+
+Checked 2026-11-19 (agent B3, live smoke through the provider clients, `max_tokens` 32). This amends the Groq prefill verdict above and decision items 7 and 8.
+
+| Fact | Value | Source | Checked |
+|---|---|---|---|
+| Groq prefill | Not a reliable continuation. Of 4 requests with the French prefix "La capitale de la France est", 1 replied "Paris" (2 tokens); 3 replied with a fresh answer ("The capital of France is Paris.", "Paris is the capital of France."), with and without `reasoning_effort: "none"` | live | 2026-11-19 |
+| Groq prompt tokens | 48 for each of the 4 prefill requests, against 28 for the same messages without the prefix: 20 more. That fits a closed assistant turn plus a new generation prompt, not a continued turn. The 2 short replies seen on 2026-11-18 may have been fresh short answers | live | 2026-11-19 |
+| Cloudflare prompt tokens | 34 with `continue_final_message: true`, `add_generation_prompt: false`, against 28 plain: 6 more; reply " Paris." (continued). Latency 14.3 s for this call | live | 2026-11-19 |
+
+Changes:
+
+1. Groq `supports_prefill` is false by default. Groq gets the verified prefix in the user turn (`fold_prefill`) until its prefill canary passes.
+2. The prefill canary passes only when the reply starts with "Paris" and its prompt costs at most 12 tokens more than the plain canary's prompt (`PREFILL_MAX_EXTRA_PROMPT_TOKENS`). The token test does not depend on sampling, so a fresh short "Paris" does not pass.
+3. A pass turns native prefill on for that provider; a failure turns it off. Neither removes the provider from the rotation. Model list and thinking-off failures still do.
 
 ## Open items for the user
 

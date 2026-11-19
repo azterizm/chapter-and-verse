@@ -1,0 +1,31 @@
+#cloud-config
+# Chapter & Verse: first boot of the Oracle Always Free A1 VM (Ubuntu 24.04 ARM64).
+# Paste into "Initialization script" (cloud-init) when creating the instance.
+# Before pasting, replace OWNER in REPO_URL with the GitHub owner of the public repository.
+#
+# This file holds no secrets. User-data is readable from the instance metadata service and in
+# the OCI console, so the tunnel token and engine.env are added after boot (deploy/README.md).
+# setup.sh is idempotent; the same command can be rerun by hand at any time.
+
+package_update: true
+package_upgrade: true
+packages:
+  - git
+  - ca-certificates
+  - curl
+
+runcmd:
+  - - bash
+    - -c
+    - |
+      set -euo pipefail
+      REPO_URL=https://github.com/OWNER/chapter-and-verse.git
+      REPO_REF=main
+      BOOT=/var/lib/chapter-and-verse-bootstrap
+      if [ ! -d "$BOOT/.git" ]; then git clone --quiet "$REPO_URL" "$BOOT"; fi
+      git -C "$BOOT" fetch --quiet origin "$REPO_REF"
+      git -C "$BOOT" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+      REPO_URL="$REPO_URL" REPO_REF="$REPO_REF" bash "$BOOT/deploy/oracle/setup.sh" \
+        2>&1 | tee -a /var/log/chapter-and-verse-setup.log
+
+final_message: "cloud-init done after $UPTIME s; setup log in /var/log/chapter-and-verse-setup.log"

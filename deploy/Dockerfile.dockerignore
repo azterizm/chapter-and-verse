@@ -1,0 +1,17 @@
+# Ignore file for deploy/Dockerfile with the repository root as build context.
+# BuildKit reads <Dockerfile>.dockerignore next to the Dockerfile in preference to a root
+# .dockerignore, so this file applies to: docker build -f deploy/Dockerfile .
+# Allow-list: send only what the image needs. Never artefacts, tests, secrets or node_modules.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!NOTICE
+!engine
+!deploy/entrypoint.sh
+!deploy/fetch_artefacts.py
+**/__pycache__
+**/*.py[cod]
+**/.env*
+**/*.key
