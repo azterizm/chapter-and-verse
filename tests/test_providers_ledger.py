@@ -25,6 +25,7 @@ from chapterverse.providers.ledger import (
     parse_retry_after,
     purpose_context,
     seconds_to_utc_midnight,
+    seconds_to_utc_month,
 )
 
 
@@ -507,3 +508,93 @@ def test_burst_of_judge_calls_fits_minute_window() -> None:
     # Another burst of 7 judge calls fits immediately
     for _ in range(7):
         assert ledger.reserve("groq", 900, max_output_tokens=1024, purpose="judge")
+
+
+# ------------------------------------------------------------------------ window wait (R1.4)
+
+
+def test_seconds_to_utc_month() -> None:
+    now = utc("2026-11-19T12:00:00")
+    next_month = utc("2026-12-01T00:00:00")
+    assert seconds_to_utc_month(now) == pytest.approx(next_month - now)
+    dec = utc("2026-12-31T23:59:00")
+    jan = utc("2027-01-01T00:00:00")
+    assert seconds_to_utc_month(dec) == pytest.approx(jan - dec)
+
+
+def test_window_wait_fits_returns_none() -> None:
+    clock = Clock(1000.0)
+    ledger = InMemoryLedger(clock=clock)
+    assert ledger.window_wait("groq", 100) is None
+    assert ledger.refusal("groq", 100) is None
+
+
+def test_window_wait_minute_tokens_frees_in_3s() -> None:
+    clock = Clock(1000.0)
+    ledger = InMemoryLedger(groq=GroqLimits(tokens_per_minute=1000), clock=clock)
+    # Record 800 tokens at t=1000.0
+    ledger.record(CallUsage(provider="groq", est_tokens=800))
+    # At t=1057.0 (3s before entry expires at t=1060.0), request 300 tokens:
+    clock.now = 1057.0
+    res = ledger.window_wait("groq", 300)
+    assert res is not None
+    assert res[0] == "minute"
+    assert res[1] == pytest.approx(3.0)
+
+
+def test_window_wait_minute_requests() -> None:
+    clock = Clock(1000.0)
+    ledger = InMemoryLedger(groq=GroqLimits(requests_per_minute=2), clock=clock)
+    assert call(ledger, "groq")
+    clock.now = 1010.0
+    assert call(ledger, "groq")
+    # 2 requests recorded at 1000.0 and 1010.0. At 1050.0, 3rd request needs 1st to expire at 1060.0
+    clock.now = 1050.0
+    res = ledger.window_wait("groq")
+    assert res is not None
+    assert res[0] == "minute"
+    assert res[1] == pytest.approx(10.0)
+
+
+def test_window_wait_rate_headers_tokens() -> None:
+    clock = Clock(1000.0)
+    ledger = InMemoryLedger(clock=clock)
+    headers = RateHeaders(limit_tokens=8000, remaining_tokens=100, reset_tokens_s=4.0)
+    ledger.record(CallUsage(provider="groq", est_tokens=0, sent=False, headers=headers))
+    res = ledger.window_wait("groq", 500)
+    assert res is not None
+    assert res[0] == "minute"
+    assert res[1] == pytest.approx(4.0)
+
+
+def test_window_wait_daily_refusal() -> None:
+    clock = Clock(1000.0)
+    ledger = InMemoryLedger(groq=GroqLimits(requests_per_day=1), clock=clock)
+    assert call(ledger, "groq")
+    clock.now = 1010.0
+    res = ledger.window_wait("groq")
+    assert res is not None
+    assert res[0] == "day"
+    assert res[1] == pytest.approx(86400.0 - 10.0)
+
+
+def test_window_wait_cloudflare_daily() -> None:
+    now = utc("2026-11-19T23:59:00")
+    clock = Clock(now)
+    ledger = InMemoryLedger(cloudflare=CloudflareLimits(neurons_per_day=10.0), clock=clock)
+    ledger.record(CallUsage(provider="cloudflare", est_tokens=0, neurons=10.0))
+    res = ledger.window_wait("cloudflare", 100)
+    assert res is not None
+    assert res[0] == "day"
+    assert res[1] == pytest.approx(60.0)
+
+
+def test_window_wait_modal_monthly() -> None:
+    now = utc("2026-11-30T23:59:00")
+    clock = Clock(now)
+    ledger = InMemoryLedger(modal=ModalLimits(usd_per_month=10.0), clock=clock)
+    ledger.record(CallUsage(provider="modal", est_tokens=0, usd=10.0))
+    res = ledger.window_wait("modal", 0)
+    assert res is not None
+    assert res[0] == "month"
+    assert res[1] == pytest.approx(60.0)

@@ -252,6 +252,37 @@ def test_open_persistence_with_a_database_is_lazy(tmp_path: Path) -> None:
     opened.close()
 
 
+def test_postgres_ledger_window_wait_unit() -> None:
+    # 1. When shared day totals in database refuse, returns ("day", wait_s)
+    rows = [("groq", "day", 1000, 5000, 1000, 0, 0)]
+    log: list[tuple[str, Any]] = []
+    ledger = PostgresLedger(fake_db(log, rows), wall_clock=NOW.timestamp)
+    wait = ledger.window_wait("groq", 100)
+    assert wait is not None
+    assert wait[0] == "day"
+    assert wait[1] > 0
+
+    # 2. When shared limits pass, but inner per-minute window refuses:
+    empty_log: list[tuple[str, Any]] = []
+    clock_now = [1000.0]
+    inner = InMemoryLedger(clock=lambda: clock_now[0])
+    inner.record(
+        CallUsage(
+            "groq",
+            0,
+            headers=RateHeaders(limit_tokens=8000, remaining_tokens=100, reset_tokens_s=3.0),
+        )
+    )
+    ledger2 = PostgresLedger(fake_db(empty_log, []), inner=inner, wall_clock=NOW.timestamp)
+    wait2 = ledger2.window_wait("groq", 500)
+    assert wait2 is not None
+    assert wait2[0] == "minute"
+    assert wait2[1] == pytest.approx(3.0)
+
+    # 3. When everything fits:
+    assert ledger2.window_wait("groq", 50) is None
+
+
 # ---------------------------------------------------------------------- real Postgres
 
 

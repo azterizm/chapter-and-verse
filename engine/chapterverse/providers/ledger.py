@@ -51,6 +51,7 @@ __all__ = [
     "parse_retry_after",
     "purpose_context",
     "seconds_to_utc_midnight",
+    "seconds_to_utc_month",
 ]
 
 JUDGE_OUTPUT_RESERVE: Final = 64
@@ -84,6 +85,23 @@ def seconds_to_utc_midnight(now: float) -> float:
     current = datetime.fromtimestamp(now, UTC)
     midnight = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return (midnight - current).total_seconds()
+
+
+_DECEMBER: Final = 12
+
+
+def seconds_to_utc_month(now: float) -> float:
+    """Seconds from epoch time ``now`` to the first 00:00 UTC of the next month."""
+    current = datetime.fromtimestamp(now, UTC)
+    if current.month == _DECEMBER:
+        next_month = current.replace(
+            year=current.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+    else:
+        next_month = current.replace(
+            month=current.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+    return (next_month - current).total_seconds()
 
 
 def _utc_day(now: float) -> str:
@@ -150,6 +168,19 @@ class QuotaLedger(Protocol):
 
     def available(self, provider: str) -> bool:
         """Whether a minimal call could be reserved now (holds nothing)."""
+        ...
+
+    def window_wait(
+        self,
+        provider: str,
+        est_tokens: int = 1,
+        *,
+        max_output_tokens: int = 0,
+    ) -> tuple[str, float] | None:
+        """For a refusal, the window kind ("minute", "day", "month") and seconds until it frees.
+
+        Returns None if the requested reservation fits right now.
+        """
         ...
 
 
@@ -276,6 +307,24 @@ class InMemoryLedger:
         with self._lock:
             return self._fits(provider, self._clock(), 1, 0)
 
+    def window_wait(
+        self,
+        provider: str,
+        est_tokens: int = 1,
+        *,
+        max_output_tokens: int = 0,
+        purpose: Purpose | None = None,
+    ) -> tuple[str, float] | None:
+        eff_purpose = purpose or _current_purpose.get()
+        eff_max_out = JUDGE_OUTPUT_RESERVE if eff_purpose == "judge" else max_output_tokens
+        with self._lock:
+            now = self._clock()
+            if self._fits(provider, now, est_tokens, eff_max_out):
+                return None
+            return self._window_wait_locked(provider, now, est_tokens, eff_max_out)
+
+    refusal = window_wait
+
     def record(self, usage: CallUsage) -> None:
         eff_purpose = usage.purpose if usage.purpose != "generate" else _current_purpose.get()
         eff_max_out = JUDGE_OUTPUT_RESERVE if eff_purpose == "judge" else usage.max_output_tokens
@@ -353,6 +402,92 @@ class InMemoryLedger:
                 lim.usd_per_session
             )
         return True
+
+    def _window_wait_locked(
+        self, provider: str, now: float, est: int, max_out: int
+    ) -> tuple[str, float]:
+        blockable = self._blockable(provider)
+        if now < blockable.blocked_until:
+            return ("day", max(0.0, blockable.blocked_until - now))
+        if provider == "groq":
+            return self._groq_window_wait(now, est + max_out)
+        if provider == "cloudflare":
+            self._roll_cf(now)
+            return ("day", seconds_to_utc_midnight(now))
+        if provider == "modal":
+            self._roll_modal(now)
+            return ("month", seconds_to_utc_month(now))
+        return ("day", 86400.0)
+
+    def _groq_window_wait(self, now: float, tokens: int) -> tuple[str, float]:
+        self._prune_groq(now)
+        g, lim = self._groq, self.groq_limits
+        requests_minute = len(g.minute) + g.pending_requests + 1
+        requests_day = len(g.day) + g.pending_requests + 1
+        tokens_minute = sum(t for _, t in g.minute) + g.pending_tokens + tokens
+        tokens_day = sum(t for _, t in g.day) + g.pending_tokens + tokens
+
+        if requests_day > self._groq_rpd:
+            excess = requests_day - self._groq_rpd
+            wait_s = (
+                max(0.0, (g.day[excess - 1][0] + 86400.0) - now)
+                if excess <= len(g.day)
+                else 86400.0
+            )
+            return ("day", wait_s)
+        if tokens_day > lim.tokens_per_day:
+            excess = tokens_day - lim.tokens_per_day
+            freed = 0
+            wait_s = 86400.0
+            for ts, tok in g.day:
+                freed += tok
+                if freed >= excess:
+                    wait_s = max(0.0, (ts + 86400.0) - now)
+                    break
+            return ("day", wait_s)
+        if (
+            g.hdr_requests is not None
+            and now < g.hdr_requests_until
+            and g.hdr_requests - g.pending_requests < 1
+        ):
+            return ("day", max(0.0, g.hdr_requests_until - now))
+
+        minute_wait = 0.0
+        is_minute = False
+
+        if requests_minute > lim.requests_per_minute:
+            is_minute = True
+            excess = requests_minute - lim.requests_per_minute
+            req_wait = (
+                max(0.0, (g.minute[excess - 1][0] + 60.0) - now)
+                if excess <= len(g.minute)
+                else 60.0
+            )
+            minute_wait = max(minute_wait, req_wait)
+
+        if tokens_minute > self._groq_tpm:
+            is_minute = True
+            excess = tokens_minute - self._groq_tpm
+            freed = 0
+            tok_wait = 60.0
+            for ts, tok in g.minute:
+                freed += tok
+                if freed >= excess:
+                    tok_wait = max(0.0, (ts + 60.0) - now)
+                    break
+            minute_wait = max(minute_wait, tok_wait)
+
+        if (
+            g.hdr_tokens is not None
+            and now < g.hdr_tokens_until
+            and g.hdr_tokens - g.pending_tokens < tokens
+        ):
+            is_minute = True
+            minute_wait = max(minute_wait, 0.0, g.hdr_tokens_until - now)
+
+        if is_minute:
+            return ("minute", minute_wait)
+        return ("minute", 60.0)
 
     def _hold(self, provider: str, est: int, max_out: int, *, sign: int) -> None:
         if provider == "groq":

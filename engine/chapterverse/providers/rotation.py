@@ -14,10 +14,13 @@ battery (decision 0001, item 5). :meth:`RotationConfig.from_env` reads ``GEN_PRO
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -33,7 +36,13 @@ from chapterverse.contracts import (
     UnavailableKind,
 )
 from chapterverse.providers.breaker import CircuitBreaker
-from chapterverse.providers.ledger import InMemoryLedger, QuotaLedger, purpose_context
+from chapterverse.providers.ledger import (
+    JUDGE_OUTPUT_RESERVE,
+    InMemoryLedger,
+    QuotaLedger,
+    estimate_tokens,
+    purpose_context,
+)
 from chapterverse.providers.openai_compat import (
     ProviderWarming,
     make_cloudflare,
@@ -44,13 +53,37 @@ from chapterverse.providers.openai_compat import (
 __all__ = [
     "DEFAULT_GENERATE",
     "DEFAULT_JUDGE",
+    "REQUEST_WAIT_BUDGET_S",
+    "WINDOW_WAIT_MAX_S",
     "ProviderRotation",
     "RotationConfig",
+    "request_wait_budget",
 ]
+
+log = logging.getLogger(__name__)
 
 DEFAULT_GENERATE: Final = ("groq", "cloudflare", "modal")
 DEFAULT_JUDGE: Final = ("modal",)
 _MAX_TRIP_S: Final = 86400.0
+WINDOW_WAIT_MAX_S: Final = 8.0
+REQUEST_WAIT_BUDGET_S: Final = 20.0
+
+_request_wait_spent: ContextVar[list[float] | None] = ContextVar(
+    "_request_wait_spent", default=None
+)
+_request_wait_budget: ContextVar[float | None] = ContextVar("_request_wait_budget", default=None)
+
+
+@contextmanager
+def request_wait_budget(budget: float = REQUEST_WAIT_BUDGET_S) -> Iterator[None]:
+    """Scope wait budget across multiple calls for one request."""
+    token_spent = _request_wait_spent.set([0.0])
+    token_budget = _request_wait_budget.set(budget)
+    try:
+        yield
+    finally:
+        _request_wait_spent.reset(token_spent)
+        _request_wait_budget.reset(token_budget)
 
 
 def _parse_order(text: str | None, var: str, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -163,6 +196,9 @@ class ProviderRotation:
         failure_threshold: int = 3,
         cooldown_s: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        window_wait_max_s: float = WINDOW_WAIT_MAX_S,
+        request_wait_budget_s: float = REQUEST_WAIT_BUDGET_S,
     ) -> None:
         self._providers: dict[str, ChatProvider] = {}
         for provider in providers:
@@ -190,6 +226,18 @@ class ProviderRotation:
         self._lock = threading.Lock()
         self._pinned: dict[str, bool] = dict.fromkeys(self._providers, True)
         self._last_kind: dict[str, UnavailableKind] = {}
+        self._sleep = sleep
+        self._clock = clock
+        self.window_wait_max_s = window_wait_max_s
+        self.request_wait_budget_s = request_wait_budget_s
+        self._wait_spent: float = 0.0
+
+    def reset_wait_budget(self) -> None:
+        with self._lock:
+            self._wait_spent = 0.0
+        tracker = _request_wait_spent.get()
+        if tracker is not None:
+            tracker[0] = 0.0
 
     def __repr__(self) -> str:
         return (
@@ -205,23 +253,27 @@ class ProviderRotation:
         ledger: QuotaLedger | None = None,
         failure_threshold: int = 3,
         cooldown_s: float = 30.0,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        window_wait_max_s: float = WINDOW_WAIT_MAX_S,
+        request_wait_budget_s: float = REQUEST_WAIT_BUDGET_S,
         **provider_kwargs: Any,
     ) -> ProviderRotation:
         """Build the providers ``config`` names, sharing one ledger (default in memory)."""
         shared = ledger if ledger is not None else InMemoryLedger()
+        kw = dict(provider_kwargs)
+        kw.setdefault("sleep", sleep)
         built: list[ChatProvider] = []
         for name in config.providers:
             if name == "groq":
-                built.append(
-                    make_groq(key_env=config.groq_key_env, ledger=shared, **provider_kwargs)
-                )
+                built.append(make_groq(key_env=config.groq_key_env, ledger=shared, **kw))
             elif name == "cloudflare" and config.cloudflare_account_id:
                 built.append(
                     make_cloudflare(
                         config.cloudflare_account_id,
                         key_env=config.cloudflare_token_env,
                         ledger=shared,
-                        **provider_kwargs,
+                        **kw,
                     )
                 )
             elif name == "modal" and config.modal_url:
@@ -230,7 +282,7 @@ class ProviderRotation:
                         config.modal_url,
                         key_env=config.modal_key_env,
                         ledger=shared,
-                        **provider_kwargs,
+                        **kw,
                     )
                 )
         present = {p.name for p in built}
@@ -241,6 +293,10 @@ class ProviderRotation:
             ledger=shared,
             failure_threshold=failure_threshold,
             cooldown_s=cooldown_s,
+            clock=clock,
+            sleep=sleep,
+            window_wait_max_s=window_wait_max_s,
+            request_wait_budget_s=request_wait_budget_s,
         )
 
     # ------------------------------------------------------------------ state
@@ -293,45 +349,101 @@ class ProviderRotation:
 
     # ------------------------------------------------------------------ calls
 
+    def _can_wait(self, kind: str, wait_s: float) -> bool:
+        if kind != "minute" or wait_s > self.window_wait_max_s:
+            return False
+        with self._lock:
+            tracker = _request_wait_spent.get()
+            spent = tracker[0] if tracker is not None else self._wait_spent
+            budget = _request_wait_budget.get()
+            effective_budget = self.request_wait_budget_s if budget is None else budget
+            return spent + wait_s <= effective_budget
+
+    def _record_wait(self, wait_s: float, name: str, kind: str) -> None:
+        with self._lock:
+            tracker = _request_wait_spent.get()
+            if tracker is not None:
+                tracker[0] += wait_s
+            self._wait_spent += wait_s
+        log.info("waiting %gs for %s %s window", wait_s, name, kind)
+        self._sleep(wait_s)
+
+    def _try_provider(
+        self, name: str, req: ChatRequest, est: int, max_out: int
+    ) -> tuple[ChatResult | None, ProviderUnavailable | None]:
+        waited = False
+        while True:
+            if self.ledger is not None:
+                wait_fn = getattr(self.ledger, "window_wait", None)
+                info = (
+                    wait_fn(name, est, max_output_tokens=max_out)
+                    if callable(wait_fn)
+                    else (None if self.ledger.available(name) else ("day", 86400.0))
+                )
+                if info is not None:
+                    kind, wait_s = info
+                    if not waited and self._can_wait(kind, wait_s):
+                        self._record_wait(wait_s, name, kind)
+                        waited = True
+                        continue
+                    return None, ProviderUnavailable(
+                        name, "quota", detail="local quota ledger refused"
+                    )
+
+            breaker = self._breakers[name]
+            if not breaker.allow():
+                with self._lock:
+                    kind = self._last_kind.get(name, "server")
+                return None, ProviderUnavailable(
+                    name, kind, breaker.retry_after_s(), "circuit open"
+                )
+
+            try:
+                result = self._providers[name].complete(req)
+            except ProviderWarming as exc:
+                breaker.cancel()
+                return None, exc
+            except ProviderUnavailable as exc:
+                if (
+                    not waited
+                    and exc.kind == "quota"
+                    and "local quota ledger refused" in exc.detail
+                    and self.ledger is not None
+                ):
+                    wait_fn = getattr(self.ledger, "window_wait", None)
+                    info = (
+                        wait_fn(name, est, max_output_tokens=max_out) if callable(wait_fn) else None
+                    )
+                    if info is not None and self._can_wait(info[0], info[1]):
+                        self._record_wait(info[1], name, info[0])
+                        waited = True
+                        continue
+                self._on_failure(name, exc)
+                return None, exc
+            except Exception as exc:  # noqa: BLE001 - a provider bug must not escape as a judge retry
+                unexpected = ProviderUnavailable(
+                    name, "server", detail=f"unexpected {type(exc).__name__}"
+                )
+                self._on_failure(name, unexpected)
+                return None, unexpected
+            else:
+                breaker.record_success()
+                return result, None
+
     def complete(self, req: ChatRequest) -> ChatResult:
         with purpose_context(req.purpose):
             failures: list[ProviderUnavailable] = []
+            est = estimate_tokens(req.messages, req.prefill)
+            max_out = JUDGE_OUTPUT_RESERVE if req.purpose == "judge" else req.max_tokens
             for name in self._orders[req.purpose]:
                 if not self.is_pinned(name):
                     failures.append(ProviderUnavailable(name, "model_changed", detail="unpinned"))
                     continue
-                if self.ledger is not None and not self.ledger.available(name):
-                    failures.append(
-                        ProviderUnavailable(name, "quota", detail="local quota ledger refused")
-                    )
-                    continue
-                breaker = self._breakers[name]
-                if not breaker.allow():
-                    with self._lock:
-                        kind = self._last_kind.get(name, "server")
-                    failures.append(
-                        ProviderUnavailable(name, kind, breaker.retry_after_s(), "circuit open")
-                    )
-                    continue
-                try:
-                    result = self._providers[name].complete(req)
-                except ProviderWarming as exc:
-                    breaker.cancel()
-                    failures.append(exc)
-                    continue
-                except ProviderUnavailable as exc:
-                    self._on_failure(name, exc)
-                    failures.append(exc)
-                    continue
-                except Exception as exc:  # noqa: BLE001 - a provider bug must not escape as a judge retry
-                    unexpected = ProviderUnavailable(
-                        name, "server", detail=f"unexpected {type(exc).__name__}"
-                    )
-                    self._on_failure(name, unexpected)
-                    failures.append(unexpected)
-                    continue
-                breaker.record_success()
-                return result
+                result, failure = self._try_provider(name, req, est, max_out)
+                if result is not None:
+                    return result
+                if failure is not None:
+                    failures.append(failure)
             raise AllProvidersUnavailable(failures)
 
     def _on_failure(self, name: str, exc: ProviderUnavailable) -> None:

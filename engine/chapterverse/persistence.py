@@ -40,8 +40,15 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
 from chapterverse.config import Settings
-from chapterverse.contracts import AnswerFactObject, canonical_json
-from chapterverse.providers.ledger import CallUsage, InMemoryLedger, QuotaLedger
+from chapterverse.contracts import AnswerFactObject, Purpose, canonical_json
+from chapterverse.providers.ledger import (
+    JUDGE_OUTPUT_RESERVE,
+    CallUsage,
+    InMemoryLedger,
+    QuotaLedger,
+    seconds_to_utc_midnight,
+    seconds_to_utc_month,
+)
 
 __all__ = [
     "INSERT_RECEIPT_SQL",
@@ -453,6 +460,26 @@ class PostgresLedger:
 
     def available(self, provider: str) -> bool:
         return self.inner.available(provider) and self._shared_fits(provider, 1, 0)
+
+    def window_wait(
+        self,
+        provider: str,
+        est_tokens: int = 1,
+        *,
+        max_output_tokens: int = 0,
+        purpose: Purpose | None = None,
+    ) -> tuple[str, float] | None:
+        eff_max_out = JUDGE_OUTPUT_RESERVE if purpose == "judge" else max_output_tokens
+        if not self._shared_fits(provider, est_tokens, eff_max_out):
+            now_wall = self._wall()
+            if provider == "modal":
+                return ("month", seconds_to_utc_month(now_wall))
+            return ("day", seconds_to_utc_midnight(now_wall))
+        return self.inner.window_wait(
+            provider, est_tokens, max_output_tokens=max_output_tokens, purpose=purpose
+        )
+
+    refusal = window_wait
 
     def record(self, usage: CallUsage) -> None:
         with self._record_lock:  # the snapshot diff must be this call's alone

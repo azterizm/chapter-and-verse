@@ -21,7 +21,13 @@ from chapterverse.contracts import (
     Rotation,
 )
 from chapterverse.providers import RotationJudgeChat
-from chapterverse.providers.ledger import JUDGE_OUTPUT_RESERVE, GroqLimits, InMemoryLedger
+from chapterverse.providers.ledger import (
+    JUDGE_OUTPUT_RESERVE,
+    CallUsage,
+    GroqLimits,
+    InMemoryLedger,
+    RateHeaders,
+)
 from chapterverse.providers.openai_compat import ProviderWarming, make_cloudflare, make_groq
 from chapterverse.providers.pinning import (
     CANARY_PREFILL,
@@ -44,7 +50,13 @@ from chapterverse.providers.presets import (
     judge_request,
     request_settings,
 )
-from chapterverse.providers.rotation import ProviderRotation, RotationConfig
+from chapterverse.providers.rotation import (
+    REQUEST_WAIT_BUDGET_S,
+    WINDOW_WAIT_MAX_S,
+    ProviderRotation,
+    RotationConfig,
+    request_wait_budget,
+)
 
 ACCOUNT = "0123456789abcdef0123456789abcdef"
 ENV = {"GROQ_API_KEY": "gsk_TESTSECRET", "CLOUDFLARE_AI_WORKER_TOKEN": "cf-TESTSECRET"}
@@ -696,3 +708,154 @@ def test_rotation_end_to_end_judge_burst_under_tpm_cap() -> None:
     snap = ledger.snapshot()["groq"]
     assert snap["pending_tokens"] == 0
     assert snap["tokens_minute"] == 5 * 20  # 100 actual tokens
+
+
+# ---------------------------------------------------------------------- window wait (R2)
+
+
+def test_r2_1_per_minute_wait_3s_serves(caplog: pytest.LogCaptureFixture) -> None:
+    clock = Clock(1000.0)
+    slept: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        slept.append(s)
+        clock.now += s
+
+    ledger = InMemoryLedger(groq=GroqLimits(tokens_per_minute=1000), clock=clock)
+    # Record 800 tokens at t=1000.0
+    ledger.record(CallUsage(provider="groq", est_tokens=800))
+    # At t=1057.0 (3s before entry expires at t=1060.0), a request of ~300 tokens arrives
+    clock.now = 1057.0
+
+    groq = Fake("groq", "ok")
+    cf = Fake("cloudflare", "ok")
+    rot = ProviderRotation([groq, cf], ledger=ledger, clock=clock, sleep=fake_sleep)
+
+    query_text = "how much redundancy pay"
+    # request: 400 chars -> estimate_tokens is 150 + 4 = 154, max_tokens=146 -> 300 tokens
+    req_ = ChatRequest(
+        messages=(ChatMessage(role="user", content=query_text + "x" * (400 - len(query_text))),),
+        max_tokens=146,
+        temperature=0.7,
+        top_p=0.8,
+    )
+
+    with caplog.at_level("INFO"):
+        result = rot.complete(req_)
+
+    assert result.provider == "groq"
+    assert slept == [pytest.approx(3.0)]
+    assert clock.now == pytest.approx(1060.0)
+    assert groq.calls == 1
+
+    # R1.6: Each wait SHALL be logged once with provider, window kind and seconds (no query text)
+    wait_logs = [r.getMessage() for r in caplog.records if "waiting" in r.getMessage()]
+    assert len(wait_logs) == 1
+    assert "waiting 3s for groq minute window" in wait_logs[0]
+    assert query_text not in wait_logs[0]
+
+
+def test_r2_2_frees_in_30s_falls_through() -> None:
+    clock = Clock(1000.0)
+    slept: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        slept.append(s)
+        clock.now += s
+
+    ledger = InMemoryLedger(groq=GroqLimits(tokens_per_minute=1000), clock=clock)
+    ledger.record(CallUsage(provider="groq", est_tokens=800))
+    # At t=1030.0 (30s before expiry at 1060.0): 30s > WINDOW_WAIT_MAX_S (8s)
+    clock.now = 1030.0
+
+    groq = Fake("groq", "ok")
+    cf = Fake("cloudflare", "ok")
+    rot = ProviderRotation([groq, cf], ledger=ledger, clock=clock, sleep=fake_sleep)
+
+    req_ = ChatRequest(
+        messages=(ChatMessage(role="user", content="x" * 400),),
+        max_tokens=146,
+        temperature=0.7,
+        top_p=0.8,
+    )
+    result = rot.complete(req_)
+    assert result.provider == "cloudflare"
+    assert slept == []  # no wait!
+    assert groq.calls == 0
+
+
+def test_r2_3_daily_refusal_no_wait() -> None:
+    clock = Clock(1000.0)
+    slept: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        slept.append(s)
+        clock.now += s
+
+    ledger = InMemoryLedger(groq=GroqLimits(requests_per_day=1), clock=clock)
+    ledger.record(CallUsage(provider="groq", est_tokens=10))
+
+    groq = Fake("groq", "ok")
+    cf = Fake("cloudflare", "ok")
+    rot = ProviderRotation([groq, cf], ledger=ledger, clock=clock, sleep=fake_sleep)
+
+    result = rot.complete(req())
+    assert result.provider == "cloudflare"
+    assert slept == []  # no wait!
+    assert groq.calls == 0
+
+
+def test_r2_4_budget_stops_at_cap() -> None:
+    assert REQUEST_WAIT_BUDGET_S == 20.0
+    assert WINDOW_WAIT_MAX_S == 8.0
+
+    clock = Clock(1000.0)
+    slept: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        slept.append(s)
+        clock.now += s
+
+    ledger = InMemoryLedger(clock=clock)
+    groq = Fake("groq", "ok")
+    cf = Fake("cloudflare", "ok")
+    rot = ProviderRotation([groq, cf], ledger=ledger, clock=clock, sleep=fake_sleep)
+
+    # We make 3 calls, each time setting rate headers on groq that require an 8s wait
+    with request_wait_budget(budget=20.0):
+        # Call 1: needs 8s wait -> waits 8s (spent=8s <= 20s), groq serves
+        ledger.record(
+            CallUsage(
+                provider="groq",
+                est_tokens=0,
+                headers=RateHeaders(limit_tokens=8000, remaining_tokens=0, reset_tokens_s=8.0),
+            )
+        )
+        res1 = rot.complete(req())
+        assert res1.provider == "groq"
+        assert slept == [pytest.approx(8.0)]
+
+        # Call 2: needs 8s wait -> waits 8s (spent=16s <= 20s), groq serves
+        ledger.record(
+            CallUsage(
+                provider="groq",
+                est_tokens=0,
+                headers=RateHeaders(limit_tokens=8000, remaining_tokens=0, reset_tokens_s=8.0),
+            )
+        )
+        res2 = rot.complete(req())
+        assert res2.provider == "groq"
+        assert slept == [pytest.approx(8.0), pytest.approx(8.0)]
+
+        # Call 3: needs 8s wait. 16s + 8s = 24s > 20s budget! Past the cap: falls through at once!
+        ledger.record(
+            CallUsage(
+                provider="groq",
+                est_tokens=0,
+                headers=RateHeaders(limit_tokens=8000, remaining_tokens=0, reset_tokens_s=8.0),
+            )
+        )
+        res3 = rot.complete(req())
+        assert res3.provider == "cloudflare"
+        # Total slept remains 16s, exactly capped
+        assert slept == [pytest.approx(8.0), pytest.approx(8.0)]
