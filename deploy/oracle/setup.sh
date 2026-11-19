@@ -145,8 +145,16 @@ configure_firewall() {
       echo "COMMIT"
     } > "$rules.tmp"
     mv "$rules.tmp" "$rules"
-    if systemctl is-enabled --quiet netfilter-persistent 2>/dev/null; then
-      systemctl restart netfilter-persistent
+  fi
+
+  if [[ -f "$rules" ]] && grep -q "^$MARKER" "$rules"; then
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+      netfilter-persistent reload
+    else
+      iptables-restore < /etc/iptables/rules.v4
+    fi
+    if iptables -S INPUT | grep -q REJECT; then
+      die "Oracle REJECT rules still present in INPUT chain"
     fi
     if systemctl is-active --quiet docker 2>/dev/null; then
       systemctl restart docker
