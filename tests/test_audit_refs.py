@@ -255,3 +255,199 @@ def test_audit_verifier_passes_grounded_reference(fixture_text_store: object) ->
         premise, "Under section 100 the compensatory award limit does not apply [P3]."
     )
     assert not any("MODEL_CITATION" in str(d) for d in v_good.details)
+
+
+# ============================================================================
+# Self references tests (specs/self-refs/requirements.md R1.1 - R1.4, R2.1)
+# ============================================================================
+
+ERA_S100_1_TEXT = (
+    "(1) An employee who is dismissed shall be regarded for the purposes of this Part as "
+    "unfairly dismissed if the reason (or, if more than one, the principal reason) for the "
+    "dismissal is that— (a) having been designated by the employer to carry out activities in "
+    "connection with preventing or reducing risks to health and safety at work, the employee "
+    "carried out (or proposed to carry out) any such activities, (b) being a representative of "
+    "workers on matters of health and safety at work or member of a safety committee— (i) in "
+    "accordance with arrangements established under or by virtue of any enactment, or (ii) by "
+    "reason of being acknowledged as such by the employer, the employee performed (or proposed "
+    "to perform) any functions as such a representative or a member of such a committee, (c) "
+    "being an employee at a place where— (i) there was no such representative or safety "
+    "committee, or (ii) there was such a representative or safety committee but it was not "
+    "reasonably practicable for the employee to raise the matter by those means, he brought to his "
+    "employer's attention, by reasonable means, circumstances connected with his work which he "
+    "reasonably believed were harmful or potentially harmful to health or safety, (d) in "
+    "circumstances of danger which the employee reasonably believed to be serious and imminent "
+    "and which he could not reasonably have been expected to avert, he left (or proposed to "
+    "leave) or (while the danger persisted) refused to return to his place of work or any "
+    "dangerous part of his place of work, or (e) in circumstances of danger which the employee "
+    "reasonably believed to be serious and imminent, he took (or proposed to take) appropriate "
+    "steps to protect himself or other persons from the danger."
+)
+ERA_S100_2_TEXT = (
+    "(2) For the purposes of subsection (1)(e) whether steps which an employee took (or "
+    "proposed to take) were appropriate is to be judged by reference to all the circumstances "
+    "including, in particular, his knowledge and the facilities and advice available to him at "
+    "the time."
+)
+ERA_S100_COORDS = {
+    "P1": "uk/ukpga/1996/18/s100/1",
+    "P2": "uk/ukpga/1996/18/s100/2",
+}
+ERA_S100_TEXTS = {
+    "P1": ERA_S100_1_TEXT,
+    "P2": ERA_S100_2_TEXT,
+}
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Under section 100, an employee who is dismissed is regarded as unfairly dismissed [P1].",
+        "Under subsection (1), the employee is regarded as unfairly dismissed [P1].",
+        "An employee is regarded as unfairly dismissed if the reason is one of those set out [P1].",
+    ],
+)
+def test_self_reference_repro_three_sentences_pass(sentence: str) -> None:
+    check = check_refs(
+        sentence,
+        KNOWN,
+        cited_texts=ERA_S100_TEXTS,
+        cited_coordinates=ERA_S100_COORDS,
+    )
+    assert check.ok
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Under section 100(1), the employee is regarded as unfairly dismissed [P1].",
+        "Under s.100, the employee is regarded as unfairly dismissed [P1].",
+        "Under s 100, the employee is regarded as unfairly dismissed [P1].",
+        "Under subsection (1), the employee is regarded as unfairly dismissed [P1].",
+    ],
+)
+def test_self_reference_cited_provision_and_ancestors_pass(sentence: str) -> None:
+    check = check_refs(
+        sentence,
+        KNOWN,
+        cited_texts=ERA_S100_TEXTS,
+        cited_coordinates=ERA_S100_COORDS,
+    )
+    assert check.ok
+
+
+@pytest.mark.parametrize(
+    ("sentence", "failure_snippet"),
+    [
+        (
+            "Under subsection (2), the employee is regarded as unfairly dismissed [P1].",
+            "subsection (2)",
+        ),
+        (
+            "Under section 100(2), the employee is regarded as unfairly dismissed [P1].",
+            "section 100(2)",
+        ),
+        (
+            "Under paragraph (a), the employee carried out activities [P1].",
+            "paragraph (a)",
+        ),
+    ],
+)
+def test_sibling_or_descendant_fails(sentence: str, failure_snippet: str) -> None:
+    # Citing only P1 (s100(1))
+    check = check_refs(
+        sentence,
+        KNOWN,
+        cited_texts={"P1": ERA_S100_1_TEXT},
+        cited_coordinates={"P1": "uk/ukpga/1996/18/s100/1"},
+    )
+    assert not check.ok
+    assert any(f.code == MODEL_CITATION and failure_snippet in f.detail for f in check.failures)
+
+
+def test_cited_sibling_passes() -> None:
+    # When P2 (s100(2)) is cited, subsection (2) passes
+    check = check_refs(
+        "Under subsection (2), appropriateness is judged by all the circumstances [P2].",
+        KNOWN,
+        cited_texts=ERA_S100_TEXTS,
+        cited_coordinates=ERA_S100_COORDS,
+    )
+    assert check.ok
+
+
+@pytest.mark.parametrize(
+    ("sentence", "failure_snippet"),
+    [
+        (
+            (
+                "Under section 98, an employee who is dismissed is regarded as unfairly "
+                "dismissed [P1]."
+            ),
+            "section 98",
+        ),
+        (
+            "Under section 94, an employee has the right not to be unfairly dismissed [P1].",
+            "section 94",
+        ),
+    ],
+)
+def test_different_section_fails(sentence: str, failure_snippet: str) -> None:
+    check = check_refs(
+        sentence,
+        KNOWN,
+        cited_texts=ERA_S100_TEXTS,
+        cited_coordinates=ERA_S100_COORDS,
+    )
+    assert not check.ok
+    assert any(f.code == MODEL_CITATION and failure_snippet in f.detail for f in check.failures)
+
+
+def test_relative_references_resolve_against_cited_section() -> None:
+    # P2 is s.105(3). Subsection (1) cannot resolve against s.100 when only P2 is cited.
+    coords = {"P1": "uk/ukpga/1996/18/s100/1", "P2": "uk/ukpga/1996/18/s105/3"}
+    texts = {"P1": ERA_S100_1_TEXT, "P2": "Text of section 105(3)."}
+    check = check_refs(
+        "Under subsection (1), the employee is regarded as unfairly dismissed [P2].",
+        KNOWN,
+        cited_texts=texts,
+        cited_coordinates=coords,
+    )
+    assert not check.ok
+    assert any(f.code == MODEL_CITATION and "subsection (1)" in f.detail for f in check.failures)
+
+    # Relative reference in sentence cannot resolve against un-cited section 98 mentioned in prose
+    check_other = check_refs(
+        "Under section 98, subsection (1) applies [P1].",
+        KNOWN,
+        cited_texts=texts,
+        cited_coordinates=coords,
+    )
+    assert not check_other.ok
+    assert any(f.code == MODEL_CITATION and "section 98" in f.detail for f in check_other.failures)
+
+
+def test_audit_verifier_passes_self_reference(fixture_text_store: object) -> None:
+    assert isinstance(fixture_text_store, TextStore)
+    records = fixture_text_store.get("uk/ukpga/1996/18/s124")
+    premise = Premise.from_records(records)
+
+    class DummyChat:
+        model = "dummy"
+
+        def __call__(self, messages: list[dict[str, str]]) -> dict[str, object]:
+            return {"content": "{}", "ms": 1.0, "tokens": 1, "finish": "stop"}
+
+    verifier = AuditVerifier(
+        Judge(DummyChat()), ["P1", "P2", "P3", "P4", "P5", "P6"], STRICT_FIGURES
+    )
+    # P1 is s.124(1)
+    v_s124 = verifier.check_sentence(premise, "Under section 124 the award is capped [P1].")
+    assert not any("MODEL_CITATION" in str(d) for d in v_s124.details)
+
+    v_sub1 = verifier.check_sentence(premise, "Under subsection (1) the award is capped [P1].")
+    assert not any("MODEL_CITATION" in str(d) for d in v_sub1.details)
+
+    # Subsection (2) does not exist in s.124 (only (1), (1ZA), (1A), etc.)
+    v_sub2 = verifier.check_sentence(premise, "Under subsection (2) the award is capped [P1].")
+    assert any("MODEL_CITATION: subsection (2)" in str(d) for d in v_sub2.details)

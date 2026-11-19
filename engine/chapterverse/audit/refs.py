@@ -36,12 +36,17 @@ All checks are deterministic and run before the judge, so a failed sentence cost
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
 from legal_rag_router.identifiers import scan_identifiers
-from legal_rag_verifier.citations import find_citations
+from legal_rag_verifier.citations import (
+    coordinate_tail,
+    find_citations,
+    is_relative,
+    resolve_relative,
+)
 from legal_rag_verifier.claims import ClaimKind, extract_claims
 from legal_rag_verifier.deontic import find_deontics
 
@@ -131,15 +136,66 @@ def is_checkable(text: str) -> bool:
     return bool(extract_claims(text)) or bool(find_deontics(text))
 
 
+def _grounded_citations(
+    ids: Sequence[str],
+    cited_texts: Mapping[str, str] | None,
+    cited_coordinates: Mapping[str, str] | None,
+) -> set[str]:
+    grounded: set[str] = set()
+    if cited_texts is not None:
+        for pid in ids:
+            if pid in cited_texts:
+                pt = cited_texts[pid]
+                base = (
+                    coordinate_tail(cited_coordinates[pid])
+                    if cited_coordinates is not None and pid in cited_coordinates
+                    else ""
+                )
+                for match in find_citations(pt):
+                    grounded.add(match.canonical)
+                    if base and is_relative(match.canonical):
+                        grounded.add(resolve_relative(match.canonical, base))
+    if cited_coordinates is not None:
+        for pid in ids:
+            if pid in cited_coordinates:
+                tail = coordinate_tail(cited_coordinates[pid])
+                if tail:
+                    parts = tail.split("/")
+                    for i in range(1, len(parts) + 1):
+                        grounded.add("/".join(parts[:i]))
+    return grounded
+
+
+def _citation_grounded(
+    claim_val: str,
+    ids: Sequence[str],
+    grounded: set[str],
+    cited_coordinates: Mapping[str, str] | None,
+) -> bool:
+    if not is_relative(claim_val):
+        return claim_val in grounded
+    if cited_coordinates is not None:
+        for pid in ids:
+            if pid in cited_coordinates:
+                base = coordinate_tail(cited_coordinates[pid])
+                if base and resolve_relative(claim_val, base) in grounded:
+                    return True
+    return claim_val in grounded
+
+
 def check_refs(
     sentence: str,
     known_ids: Collection[str],
     cited_texts: Mapping[str, str] | None = None,
+    cited_coordinates: Mapping[str, str] | None = None,
 ) -> RefCheck:
     """Strip and check the passage references of one sentence (rules in the module docstring).
 
     When ``cited_texts`` is provided (mapping passage id to text), a model-written provision
     reference that appears in the text of a passage the sentence cites is grounded and passes.
+    When ``cited_coordinates`` is provided (mapping passage id to coordinate), a reference to
+    the cited provision itself or an ancestor of it within the same instrument is also grounded.
+    Relative references resolve against the cited passage's section.
     """
     text, ids = split_refs(sentence)
     failures: list[RefFailure] = []
@@ -149,15 +205,14 @@ def check_refs(
     leftover = _LEFTOVER.search(text)
     if leftover is not None:
         failures.append(RefFailure(MALFORMED_REF, text[leftover.start() : leftover.end() + 8]))
-    if cited_texts is None:
+    if cited_texts is None and cited_coordinates is None:
         cited = model_citations(text)
     else:
-        cited_passage_texts = [cited_texts[pid] for pid in ids if pid in cited_texts]
-        grounded = {c.canonical for pt in cited_passage_texts for c in find_citations(pt)}
+        grounded = _grounded_citations(ids, cited_texts, cited_coordinates)
         found: list[str] = []
         for c in extract_claims(text):
             if c.kind is ClaimKind.CITATION:
-                if c.value not in grounded:
+                if not _citation_grounded(c.value, ids, grounded, cited_coordinates):
                     found.append(c.text)
             elif c.kind is ClaimKind.INSTRUMENT and c.value.startswith("si:"):
                 found.append(c.text)

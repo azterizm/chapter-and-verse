@@ -98,7 +98,8 @@ class AuditVerifier(JudgedVerifier):
     ) -> SentenceVerdict:
         by_id = passages_by_id(premise)
         passage_texts = {pid: p.text for pid, p in by_id.items()}
-        refs = check_refs(sentence, self.passage_ids, passage_texts)
+        passage_coords = {pid: p.coordinate for pid, p in by_id.items() if p.coordinate}
+        refs = check_refs(sentence, self.passage_ids, passage_texts, passage_coords)
         if refs.failures:
             return SentenceVerdict(
                 refs.text,

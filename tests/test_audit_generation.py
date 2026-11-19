@@ -58,7 +58,7 @@ GOOD1 = (
 )
 GOOD2 = "The limit does not apply in some unfair dismissal cases [P3]."
 WRONG = "The compensatory award cannot exceed £105,707 [P2]."
-CITED = "Under section 124(1ZA) the award cannot exceed £123,543 [P2]."
+CITED = "Under section 98 the award cannot exceed £123,543 [P2]."  # s.98: not P2, not in its text
 UNKNOWN = GOOD1.replace("[P2]", "[P9]")
 TEXT1 = GOOD1.replace(" [P2]", "")
 TEXT2 = GOOD2.replace(" [P3]", "")
