@@ -76,15 +76,16 @@ def test_s124_prompt_numbers_passages_and_states_the_rules(windows: tuple[Window
     assert content.index("[P1] ") < content.index("[P2] ") < content.index("[P6] ")
     assert "using only the numbered passages" in content
     assert "[P1]" in content
-    assert "Never write a section, subsection, regulation, article or SI number" in content
+    assert "You may name a section, subsection or paragraph only when the passage" in content
+    assert "Never write an SI number" in content
     assert "do not answer the question, say so plainly" in content
     assert MODE_RULES["short"] in content
 
 
 def test_s124_prompt_is_lean(windows: tuple[Window, ...]) -> None:
     prompt = build_prompt(QUERY, windows)
-    assert prompt.chars == 3076
-    assert prompt.estimated_tokens == 769  # 3076 characters at 4 a token
+    assert prompt.chars == 3102
+    assert prompt.estimated_tokens == 776  # 3102 characters at 4 a token
     assert prompt.estimated_tokens < 1000
 
 

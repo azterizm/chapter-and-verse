@@ -96,7 +96,9 @@ class AuditVerifier(JudgedVerifier):
     def check_sentence(
         self, premise: Premise, sentence: str, *, query: str | None = None
     ) -> SentenceVerdict:
-        refs = check_refs(sentence, self.passage_ids)
+        by_id = passages_by_id(premise)
+        passage_texts = {pid: p.text for pid, p in by_id.items()}
+        refs = check_refs(sentence, self.passage_ids, passage_texts)
         if refs.failures:
             return SentenceVerdict(
                 refs.text,
@@ -108,7 +110,6 @@ class AuditVerifier(JudgedVerifier):
                 repair=Repair("ban", 0),
                 details=tuple(str(f) for f in refs.failures),
             )
-        by_id = passages_by_id(premise)
         passage_to_pos = {p: i for i, p in enumerate(premise.passages)}
         cited_texts: list[str] = []
         aligned: list[int] = []

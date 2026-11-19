@@ -7,7 +7,8 @@ marked with ``…``. Session state and the last turns are optional and are given
 coordinates (Slice 7 fills them); they resolve references and are never evidence.
 
 The instructions say: answer only from the passages; cite by passage id as ``[P1]`` before the
-full stop; never write a section, regulation or SI number (citations are rendered by the system
+full stop; name a section, subsection or paragraph only when the passage it cites names it, and
+must still cite with ``[P#]``; never write an SI number (citations are rendered by the system
 from the ids); say plainly when the passages do not answer the question.
 
 Every fixed string that shapes what the model reads (the templates, the mode rules, the margin,
@@ -77,8 +78,8 @@ SYSTEM_TEMPLATE: Final = (
     "- Use only the passages, never your own knowledge.\n"
     "- End each sentence that states something from a passage with the ids of the passages it "
     'comes from, before the full stop: "... four weeks [P1]." or "... [P1, P3]."\n'
-    "- Never write a section, subsection, regulation, article or SI number, or any other "
-    "citation. Citations are added for you from the passage ids.\n"
+    "- You may name a section, subsection or paragraph only when the passage it cites names it, "
+    "and must still cite with [P#]. Never write an SI number or any other citation.\n"
     "- State figures, dates and conditions exactly as the passages give them.\n"
     "- If the passages do not answer the question, say so plainly in one sentence.\n"
     "- {mode_rule}\n\n"
