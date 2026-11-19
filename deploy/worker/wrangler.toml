@@ -28,6 +28,10 @@ MAX_BODY_BYTES = "12288"
 SESSION_TTL_SECONDS = "7200"
 TURNSTILE_HOSTNAMES = "chapterandverse.memonsystems.com"
 TURNSTILE_ACTION = "ask"
+# Network-aware limits (POST /api/ask)
+HOSTING_ASN_PER_MINUTE = "6"
+HOSTING_IP_PER_MINUTE = "2"
+OTHER_ASN_PER_MINUTE = "120"
 
 # Workers Rate Limiting binding: per Cloudflare location, period 10 or 60 s only.
 # Keep in step with src/ratelimit.ts (the in-isolate fallback uses the same numbers).
@@ -41,6 +45,21 @@ simple = { limit = 60, period = 60 }
 name = "ASK_LIMITER"
 namespace_id = "41002"
 simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "HOSTING_ASN_LIMITER"
+namespace_id = "41003"
+simple = { limit = 6, period = 60 }
+
+[[ratelimits]]
+name = "HOSTING_IP_LIMITER"
+namespace_id = "41004"
+simple = { limit = 2, period = 60 }
+
+[[ratelimits]]
+name = "OTHER_ASN_LIMITER"
+namespace_id = "41005"
+simple = { limit = 120, period = 60 }
 
 # Health ping every 3 hours (minute 17 to avoid the top of the hour).
 [triggers]

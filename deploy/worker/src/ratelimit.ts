@@ -21,6 +21,18 @@ export interface Limit {
 
 export const API_LIMIT: Limit = { limit: 60, periodSeconds: 60 };
 export const ASK_LIMIT: Limit = { limit: 10, periodSeconds: 60 };
+export const HOSTING_ASN_LIMIT: Limit = { limit: 6, periodSeconds: 60 };
+export const HOSTING_IP_LIMIT: Limit = { limit: 2, periodSeconds: 60 };
+export const OTHER_ASN_LIMIT: Limit = { limit: 120, periodSeconds: 60 };
+
+/**
+ * The rate-limit key for an Autonomous System Number (ASN).
+ * Unknown, non-integer, or non-positive values map to "unknown".
+ */
+export function asnKey(asn: number | null | undefined): string {
+  if (typeof asn !== "number" || !Number.isInteger(asn) || asn <= 0) return "unknown";
+  return `asn:${asn}`;
+}
 
 /**
  * The rate-limit key for a client IP. IPv6 clients are keyed by their /64, since one subscriber

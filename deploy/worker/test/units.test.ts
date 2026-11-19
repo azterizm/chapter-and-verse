@@ -2,9 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 
 import { readCapped, isJsonContentType } from "../src/body";
 import { intVar, list, readConfig } from "../src/config";
+import { buildUpstreamHeaders } from "../src/headers";
+import { classifyNetwork, networkFromRequest, HOSTING_ASNS, HOSTING_KEYWORDS } from "../src/hostingAsns";
 import { parseOrigin, upstreamUrl } from "../src/origins";
 import { forward, pingAll } from "../src/proxy";
-import { TokenBucket, allow, clientKey, expandIPv6 } from "../src/ratelimit";
+import {
+  HOSTING_ASN_LIMIT,
+  HOSTING_IP_LIMIT,
+  OTHER_ASN_LIMIT,
+  TokenBucket,
+  allow,
+  asnKey,
+  clientKey,
+  expandIPv6,
+} from "../src/ratelimit";
 import { b64url, fromB64url, mintSession, verifySession } from "../src/session";
 import { SITEVERIFY_URL, verifyTurnstile } from "../src/turnstile";
 
@@ -27,6 +38,116 @@ describe("clientKey", () => {
     for (const bad of [null, "", "not-an-ip", "1:2:3", "1::2::3", "12345::", "::ffff:300.1.1.1"]) {
       expect(clientKey(bad)).toBe("unknown");
     }
+  });
+});
+
+describe("asnKey", () => {
+  it("keys valid ASNs", () => {
+    expect(asnKey(16509)).toBe("asn:16509");
+    expect(asnKey(13335)).toBe("asn:13335");
+  });
+  it("maps null, undefined, non-positive numbers, and non-integers to unknown", () => {
+    for (const bad of [null, undefined, 0, -1, NaN, 1.5]) {
+      expect(asnKey(bad as unknown as number)).toBe("unknown");
+    }
+  });
+});
+
+describe("classifyNetwork", () => {
+  it("classifies major cloud and VPN providers by bundled ASN list", () => {
+    for (const entry of HOSTING_ASNS) {
+      expect(classifyNetwork(entry.asn, "Unknown ISP")).toBe("hosting");
+    }
+  });
+  it("classifies by asOrganization keyword match (case-insensitive)", () => {
+    const samples = [
+      "DigitalOcean Cloud Services",
+      "OVH Hosting",
+      "Equinix Datacenter",
+      "Interxion Data Center",
+      "Dedicated Server Provider",
+      "Linode VPS Hosting",
+      "Nord VPN Exit",
+      "Bright Data Proxy Service",
+      "GLOBAL CLOUD PLATFORM",
+      "My-Hosting-Company",
+    ];
+    for (const org of samples) {
+      expect(classifyNetwork(999999, org)).toBe("hosting");
+    }
+  });
+  it("classifies residential, mobile, and enterprise ISPs as other", () => {
+    const others = [
+      { asn: 7922, org: "Comcast Cable Communications, LLC" },
+      { asn: 2856, org: "British Telecommunications PLC" },
+      { asn: 7018, org: "AT&T Services, Inc." },
+      { asn: 3320, org: "Deutsche Telekom AG" },
+    ];
+    for (const { asn, org } of others) {
+      expect(classifyNetwork(asn, org)).toBe("other");
+    }
+  });
+  it("classifies missing or empty ASN and asOrganization as other", () => {
+    expect(classifyNetwork(null, null)).toBe("other");
+    expect(classifyNetwork(undefined, undefined)).toBe("other");
+    expect(classifyNetwork(undefined, "")).toBe("other");
+  });
+  it("extracts network info from Request.cf", () => {
+    const req1 = new Request("https://x/api/ask");
+    Object.defineProperty(req1, "cf", { value: { asn: 16509, asOrganization: "Amazon.com" } });
+    expect(networkFromRequest(req1)).toEqual({
+      netClass: "hosting",
+      asn: 16509,
+      asOrganization: "Amazon.com",
+    });
+
+    const req2 = new Request("https://x/api/ask");
+    expect(networkFromRequest(req2)).toEqual({
+      netClass: "other",
+      asn: null,
+      asOrganization: null,
+    });
+  });
+});
+
+describe("buildUpstreamHeaders", () => {
+  const access = { "CF-Access-Client-Id": "id", "CF-Access-Client-Secret": "secret" };
+  it("forwards network class and ASN with Access headers", () => {
+    const req = new Request("https://x/api/ask", {
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+    });
+    const h = buildUpstreamHeaders(req, access, "session-1", "203.0.113.1", "hosting", 16509);
+    expect(h.get("X-CV-Net-Class")).toBe("hosting");
+    expect(h.get("X-CV-ASN")).toBe("16509");
+    expect(h.get("X-CV-Session-Id")).toBe("session-1");
+    expect(h.get("X-CV-Client-IP")).toBe("203.0.113.1");
+    expect(h.get("CF-Access-Client-Id")).toBe("id");
+  });
+  it("overwrites client-sent network and security headers", () => {
+    const req = new Request("https://x/api/ask", {
+      headers: {
+        "X-CV-Net-Class": "forged-class",
+        "X-CV-ASN": "999999",
+        "X-CV-Client-IP": "1.1.1.1",
+        "X-CV-Session-Id": "forged-sid",
+        "CF-Access-Client-Id": "forged-access",
+      },
+    });
+    const h = buildUpstreamHeaders(req, access, "real-sid", "203.0.113.1", "other", 7922);
+    expect(h.get("X-CV-Net-Class")).toBe("other");
+    expect(h.get("X-CV-ASN")).toBe("7922");
+    expect(h.get("X-CV-Client-IP")).toBe("203.0.113.1");
+    expect(h.get("X-CV-Session-Id")).toBe("real-sid");
+    expect(h.get("CF-Access-Client-Id")).toBe("id");
+  });
+  it("does not attach net headers when Access headers are missing", () => {
+    const req = new Request("https://x/api/ask", {
+      headers: { "Content-Type": "application/json" },
+    });
+    const h = buildUpstreamHeaders(req, null, "session-1", "203.0.113.1", "hosting", 16509);
+    expect(h.get("X-CV-Net-Class")).toBeNull();
+    expect(h.get("X-CV-ASN")).toBeNull();
+    expect(h.get("CF-Access-Client-Id")).toBeNull();
   });
 });
 
@@ -112,6 +233,32 @@ describe("config and origins", () => {
     expect(intVar("abc", 7, 1, 10)).toBe(7);
     expect(intVar("50", 7, 1, 10)).toBe(7);
     expect(intVar("5", 7, 1, 10)).toBe(5);
+  });
+  it("parses network limits config with defaults and bounds", () => {
+    const def = readConfig({ ORIGIN_URL: "" });
+    expect(def.hostingAsnPerMinute).toBe(6);
+    expect(def.hostingIpPerMinute).toBe(2);
+    expect(def.otherAsnPerMinute).toBe(120);
+
+    const custom = readConfig({
+      ORIGIN_URL: "",
+      HOSTING_ASN_PER_MINUTE: "10",
+      HOSTING_IP_PER_MINUTE: "4",
+      OTHER_ASN_PER_MINUTE: "200",
+    });
+    expect(custom.hostingAsnPerMinute).toBe(10);
+    expect(custom.hostingIpPerMinute).toBe(4);
+    expect(custom.otherAsnPerMinute).toBe(200);
+
+    const invalid = readConfig({
+      ORIGIN_URL: "",
+      HOSTING_ASN_PER_MINUTE: "-5",
+      HOSTING_IP_PER_MINUTE: "0",
+      OTHER_ASN_PER_MINUTE: "not-a-number",
+    });
+    expect(invalid.hostingAsnPerMinute).toBe(6);
+    expect(invalid.hostingIpPerMinute).toBe(2);
+    expect(invalid.otherAsnPerMinute).toBe(120);
   });
   it("treats a short signing key as unset", () => {
     expect(readConfig({ ORIGIN_URL: "", SESSION_SIGNING_KEY: "short" }).sessionKey).toBeNull();

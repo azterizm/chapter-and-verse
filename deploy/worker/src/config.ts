@@ -18,6 +18,10 @@ export interface Env {
   SESSION_TTL_SECONDS?: string;
   TURNSTILE_HOSTNAMES?: string;
   TURNSTILE_ACTION?: string;
+  // Network rate limit vars (wrangler.toml [vars])
+  HOSTING_ASN_PER_MINUTE?: string;
+  HOSTING_IP_PER_MINUTE?: string;
+  OTHER_ASN_PER_MINUTE?: string;
   // Secrets
   TURNSTILE_SECRET?: string;
   SESSION_SIGNING_KEY?: string;
@@ -26,6 +30,9 @@ export interface Env {
   // Rate Limiting bindings ([[ratelimits]] in wrangler.toml)
   ASK_LIMITER?: RateLimiter;
   API_LIMITER?: RateLimiter;
+  HOSTING_ASN_LIMITER?: RateLimiter;
+  HOSTING_IP_LIMITER?: RateLimiter;
+  OTHER_ASN_LIMITER?: RateLimiter;
 }
 
 export interface Config {
@@ -39,6 +46,9 @@ export interface Config {
   sessionKey: string | null;
   /** CF-Access-Client-Id and -Secret for every origin request; null when either is unset. */
   accessHeaders: Readonly<Record<string, string>> | null;
+  hostingAsnPerMinute: number;
+  hostingIpPerMinute: number;
+  otherAsnPerMinute: number;
 }
 
 export const DEFAULTS = {
@@ -47,6 +57,9 @@ export const DEFAULTS = {
   // engine enforces on the query itself.
   maxBodyBytes: 12288,
   sessionTtlSeconds: 7200,
+  hostingAsnPerMinute: 6,
+  hostingIpPerMinute: 2,
+  otherAsnPerMinute: 120,
 } as const;
 
 /** Minimum length of SESSION_SIGNING_KEY; shorter keys are treated as unset (fail closed). */
@@ -81,5 +94,8 @@ export function readConfig(env: Env): Config {
     turnstileSecret: env.TURNSTILE_SECRET?.trim() || null,
     sessionKey: key.length >= MIN_SESSION_KEY_LENGTH ? key : null,
     accessHeaders,
+    hostingAsnPerMinute: intVar(env.HOSTING_ASN_PER_MINUTE, DEFAULTS.hostingAsnPerMinute, 1, 10000),
+    hostingIpPerMinute: intVar(env.HOSTING_IP_PER_MINUTE, DEFAULTS.hostingIpPerMinute, 1, 10000),
+    otherAsnPerMinute: intVar(env.OTHER_ASN_PER_MINUTE, DEFAULTS.otherAsnPerMinute, 1, 10000),
   };
 }

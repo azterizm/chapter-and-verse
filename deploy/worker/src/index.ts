@@ -22,6 +22,9 @@ import {
   TURNSTILE_HEADER,
   UPSTREAM_CLIENT_IP_HEADER,
   UPSTREAM_SESSION_HEADER,
+  UPSTREAM_NET_CLASS_HEADER,
+  UPSTREAM_ASN_HEADER,
+  buildUpstreamHeaders,
   corsHeaders,
   isAllowedOrigin,
   jsonError,
@@ -29,9 +32,20 @@ import {
   responseHeaders,
   SECURITY_HEADERS,
 } from "./headers";
+import { networkFromRequest } from "./hostingAsns";
 import { originsFromEnv } from "./origins";
 import { forward, pingAll } from "./proxy";
-import { API_LIMIT, ASK_LIMIT, TokenBucket, allow, clientKey } from "./ratelimit";
+import {
+  API_LIMIT,
+  ASK_LIMIT,
+  HOSTING_ASN_LIMIT,
+  HOSTING_IP_LIMIT,
+  OTHER_ASN_LIMIT,
+  TokenBucket,
+  allow,
+  asnKey,
+  clientKey,
+} from "./ratelimit";
 import { mintSession, verifySession } from "./session";
 import { verifyTurnstile } from "./turnstile";
 
@@ -42,6 +56,9 @@ export interface Deps {
   now: () => number;
   apiBucket: TokenBucket;
   askBucket: TokenBucket;
+  hostingAsnBucket?: TokenBucket;
+  hostingIpBucket?: TokenBucket;
+  otherAsnBucket?: TokenBucket;
 }
 
 const SITEVERIFY_TIMEOUT_MS = 5000;
@@ -49,10 +66,13 @@ const HEALTH_TIMEOUT_MS = 10000;
 const ASK_PATH = "/api/ask";
 
 // Per-isolate fallback buckets, shared by requests served by this isolate.
-const isolateDeps: Omit<Deps, "fetch"> = {
+const isolateDeps = {
   now: () => Date.now(),
   apiBucket: new TokenBucket(API_LIMIT),
   askBucket: new TokenBucket(ASK_LIMIT),
+  hostingAsnBucket: new TokenBucket(HOSTING_ASN_LIMIT),
+  hostingIpBucket: new TokenBucket(HOSTING_IP_LIMIT),
+  otherAsnBucket: new TokenBucket(OTHER_ASN_LIMIT),
 };
 
 export async function handle(request: Request, env: Env, deps: Deps): Promise<Response> {
@@ -98,6 +118,27 @@ export async function handle(request: Request, env: Env, deps: Deps): Promise<Re
     return jsonError(429, "rate_limited", "Too many questions. Try again in a minute.", limited);
   }
 
+  // Network-aware limits for POST /api/ask.
+  const { netClass, asn } = networkFromRequest(request);
+  if (method === "POST" && url.pathname === ASK_PATH) {
+    const aKey = asnKey(asn);
+    if (netClass === "hosting") {
+      const hipBucket = deps.hostingIpBucket ?? isolateDeps.hostingIpBucket;
+      if (!(await allow(env.HOSTING_IP_LIMITER, hipBucket, key, nowMs))) {
+        return jsonError(429, "rate_limited", "Too many questions. Try again in a minute.", limited);
+      }
+      const hasnBucket = deps.hostingAsnBucket ?? isolateDeps.hostingAsnBucket;
+      if (!(await allow(env.HOSTING_ASN_LIMITER, hasnBucket, aKey, nowMs))) {
+        return jsonError(429, "rate_limited", "Too many questions. Try again in a minute.", limited);
+      }
+    } else {
+      const oasnBucket = deps.otherAsnBucket ?? isolateDeps.otherAsnBucket;
+      if (!(await allow(env.OTHER_ASN_LIMITER, oasnBucket, aKey, nowMs))) {
+        return jsonError(429, "rate_limited", "Too many questions. Try again in a minute.", limited);
+      }
+    }
+  }
+
   // 3 and 4. Body cap and session, POST only.
   let body: Uint8Array | null = null;
   let sessionId: string | null = null;
@@ -119,14 +160,14 @@ export async function handle(request: Request, env: Env, deps: Deps): Promise<Re
   }
 
   // 5. Forward.
-  const upstreamHeaders = new Headers();
-  for (const name of FORWARDED_REQUEST_HEADERS) {
-    const value = request.headers.get(name);
-    if (value !== null) upstreamHeaders.set(name, value);
-  }
-  for (const [k, v] of Object.entries(config.accessHeaders)) upstreamHeaders.set(k, v);
-  if (sessionId !== null) upstreamHeaders.set(UPSTREAM_SESSION_HEADER, sessionId);
-  if (ip !== null && ip.trim() !== "") upstreamHeaders.set(UPSTREAM_CLIENT_IP_HEADER, ip.trim());
+  const upstreamHeaders = buildUpstreamHeaders(
+    request,
+    config.accessHeaders,
+    sessionId,
+    ip,
+    netClass,
+    asn,
+  );
 
   const result = await forward(
     deps.fetch,

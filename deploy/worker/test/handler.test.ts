@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import worker, { handle, healthCron, type Deps, type Env } from "../src/index";
-import { API_LIMIT, ASK_LIMIT, TokenBucket } from "../src/ratelimit";
+import {
+  API_LIMIT,
+  ASK_LIMIT,
+  HOSTING_ASN_LIMIT,
+  HOSTING_IP_LIMIT,
+  OTHER_ASN_LIMIT,
+  TokenBucket,
+} from "../src/ratelimit";
 import { SITEVERIFY_URL } from "../src/turnstile";
 
 const SITE = "https://site.example";
@@ -16,6 +23,9 @@ const ENV: Env = {
   SESSION_SIGNING_KEY: "s".repeat(48),
   ACCESS_CLIENT_ID: "access-id.access",
   ACCESS_CLIENT_SECRET: "access-secret-value-0123456789",
+  HOSTING_ASN_PER_MINUTE: "6",
+  HOSTING_IP_PER_MINUTE: "2",
+  OTHER_ASN_PER_MINUTE: "120",
 };
 
 type Call = { url: string; init: RequestInit };
@@ -45,6 +55,9 @@ function makeDeps(origin: (url: string, init: RequestInit) => Promise<Response>,
     now: () => 1_700_000_000_000,
     apiBucket: new TokenBucket(API_LIMIT),
     askBucket: new TokenBucket(ASK_LIMIT),
+    hostingAsnBucket: new TokenBucket(HOSTING_ASN_LIMIT),
+    hostingIpBucket: new TokenBucket(HOSTING_IP_LIMIT),
+    otherAsnBucket: new TokenBucket(OTHER_ASN_LIMIT),
   };
   return { deps, calls };
 }
@@ -54,12 +67,21 @@ const okOrigin = async () =>
     headers: { "Content-Type": "application/json", "Set-Cookie": "x=1", Server: "uvicorn", "Access-Control-Allow-Origin": "*" },
   });
 
-function ask(headers: Record<string, string> = {}, body = '{"query":"s.124 ERA 1996"}', ip = "203.0.113.9"): Request {
-  return new Request(`${SITE}/api/ask`, {
+function ask(
+  headers: Record<string, string> = {},
+  body = '{"query":"s.124 ERA 1996"}',
+  ip = "203.0.113.9",
+  cf?: { asn?: number; asOrganization?: string },
+): Request {
+  const req = new Request(`${SITE}/api/ask`, {
     method: "POST",
     body,
     headers: { "Content-Type": "application/json", Origin: SITE, "CF-Connecting-IP": ip, ...headers },
   });
+  if (cf !== undefined) {
+    Object.defineProperty(req, "cf", { value: cf, configurable: true });
+  }
+  return req;
 }
 
 describe("routing and CORS", () => {
@@ -199,6 +221,42 @@ describe("questions", () => {
     expect(headers.get("X-CV-Client-IP")).toBe("203.0.113.5");
     expect(headers.get("CF-Connecting-IP")).toBeNull();
   });
+  it("forwards network class and ASN on upstream requests, overwriting client copy", async () => {
+    const { deps, calls } = makeDeps(okOrigin);
+    await handle(
+      ask(
+        {
+          "X-Turnstile-Token": "good",
+          "X-CV-Net-Class": "forged-class",
+          "X-CV-ASN": "999999",
+        },
+        undefined,
+        "203.0.113.5",
+        { asn: 16509, asOrganization: "Amazon Technologies Inc." },
+      ),
+      ENV,
+      deps,
+    );
+    const headers = calls[1]!.init.headers as Headers;
+    expect(headers.get("X-CV-Net-Class")).toBe("hosting");
+    expect(headers.get("X-CV-ASN")).toBe("16509");
+  });
+  it("forwards other class for residential networks without client tampering", async () => {
+    const { deps, calls } = makeDeps(okOrigin);
+    await handle(
+      ask(
+        { "X-Turnstile-Token": "good" },
+        undefined,
+        "198.51.100.1",
+        { asn: 7922, asOrganization: "Comcast Cable Communications, LLC" },
+      ),
+      ENV,
+      deps,
+    );
+    const headers = calls[1]!.init.headers as Headers;
+    expect(headers.get("X-CV-Net-Class")).toBe("other");
+    expect(headers.get("X-CV-ASN")).toBe("7922");
+  });
   it("sends no client IP header when Cloudflare gave none", async () => {
     const { deps, calls } = makeDeps(okOrigin);
     const r = new Request(`${SITE}/api/health`, { headers: { Origin: SITE, "X-CV-Client-IP": "198.51.100.66" } });
@@ -253,6 +311,87 @@ describe("questions", () => {
     const env = { ...ENV, API_LIMITER: { limit: vi.fn().mockResolvedValue({ success: false }) } };
     expect((await handle(new Request(`${SITE}/api/health`), env, deps)).status).toBe(429);
     expect(env.API_LIMITER.limit).toHaveBeenCalledWith({ key: "unknown" });
+  });
+  it("limits hosting questions per IP (default 2/min)", async () => {
+    const { deps } = makeDeps(okOrigin);
+    const cf = { asn: 16509, asOrganization: "Amazon Technologies Inc." };
+    const r1 = await handle(ask({ "X-Turnstile-Token": "good-1" }, undefined, "203.0.113.10", cf), ENV, deps);
+    expect(r1.status).toBe(200);
+    const r2 = await handle(ask({ "X-Turnstile-Token": "good-2" }, undefined, "203.0.113.10", cf), ENV, deps);
+    expect(r2.status).toBe(200);
+    const r3 = await handle(ask({ "X-Turnstile-Token": "good-3" }, undefined, "203.0.113.10", cf), ENV, deps);
+    expect(r3.status).toBe(429);
+    expect(r3.headers.get("Retry-After")).toBe("60");
+  });
+  it("limits hosting questions per ASN (default 6/min) across multiple IPs", async () => {
+    const { deps } = makeDeps(okOrigin);
+    const cf = { asn: 16509, asOrganization: "Amazon Technologies Inc." };
+    // 3 IPs x 2 requests = 6 requests (hits the 6/min ASN cap)
+    for (let ip = 1; ip <= 3; ip++) {
+      for (let req = 1; req <= 2; req++) {
+        const r = await handle(
+          ask({ "X-Turnstile-Token": `tok-${ip}-${req}` }, undefined, `203.0.113.${ip}`, cf),
+          ENV,
+          deps,
+        );
+        expect(r.status).toBe(200);
+      }
+    }
+    // 4th IP sends 1st request -> blocked by ASN limit (6), even though its IP count is 0
+    const blocked = await handle(
+      ask({ "X-Turnstile-Token": "tok-4-1" }, undefined, "203.0.113.4", cf),
+      ENV,
+      deps,
+    );
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("Retry-After")).toBe("60");
+  });
+  it("allows residential ISP questions beyond the hosting ASN limit", async () => {
+    const { deps } = makeDeps(okOrigin);
+    const cf = { asn: 7922, asOrganization: "Comcast Cable Communications, LLC" };
+    // 4 IPs x 2 requests = 8 requests (would exceed hosting 6 cap, but within other 120 cap)
+    for (let ip = 1; ip <= 4; ip++) {
+      for (let req = 1; req <= 2; req++) {
+        const r = await handle(
+          ask({ "X-Turnstile-Token": `tok-comcast-${ip}-${req}` }, undefined, `198.51.100.${ip}`, cf),
+          ENV,
+          deps,
+        );
+        expect(r.status).toBe(200);
+      }
+    }
+  });
+  it("uses network Rate Limiting bindings when bound", async () => {
+    const { deps } = makeDeps(okOrigin);
+    const hostingCf = { asn: 16509, asOrganization: "Amazon Technologies Inc." };
+    const otherCf = { asn: 7922, asOrganization: "Comcast" };
+
+    // HOSTING_IP_LIMITER
+    const envIp = {
+      ...ENV,
+      HOSTING_IP_LIMITER: { limit: vi.fn().mockResolvedValue({ success: false }) },
+    };
+    const rIp = await handle(ask({ "X-Turnstile-Token": "good" }, undefined, "203.0.113.9", hostingCf), envIp, deps);
+    expect(rIp.status).toBe(429);
+    expect(envIp.HOSTING_IP_LIMITER.limit).toHaveBeenCalledWith({ key: "v4:203.0.113.9" });
+
+    // HOSTING_ASN_LIMITER
+    const envAsn = {
+      ...ENV,
+      HOSTING_ASN_LIMITER: { limit: vi.fn().mockResolvedValue({ success: false }) },
+    };
+    const rAsn = await handle(ask({ "X-Turnstile-Token": "good" }, undefined, "203.0.113.9", hostingCf), envAsn, deps);
+    expect(rAsn.status).toBe(429);
+    expect(envAsn.HOSTING_ASN_LIMITER.limit).toHaveBeenCalledWith({ key: "asn:16509" });
+
+    // OTHER_ASN_LIMITER
+    const envOther = {
+      ...ENV,
+      OTHER_ASN_LIMITER: { limit: vi.fn().mockResolvedValue({ success: false }) },
+    };
+    const rOther = await handle(ask({ "X-Turnstile-Token": "good" }, undefined, "198.51.100.9", otherCf), envOther, deps);
+    expect(rOther.status).toBe(429);
+    expect(envOther.OTHER_ASN_LIMITER.limit).toHaveBeenCalledWith({ key: "asn:7922" });
   });
 });
 

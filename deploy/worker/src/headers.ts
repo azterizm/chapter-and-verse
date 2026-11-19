@@ -20,12 +20,44 @@ export const UPSTREAM_SESSION_HEADER = "X-CV-Session-Id";
  * forwarded. The engine trusts it only on a request that passed its Access-header check.
  */
 export const UPSTREAM_CLIENT_IP_HEADER = "X-CV-Client-IP";
+/** Network class (hosting | other) for engine quota/budget, trusted only with Access headers. */
+export const UPSTREAM_NET_CLASS_HEADER = "X-CV-Net-Class";
+/** Client ASN for engine logging/accounting, trusted only with Access headers. */
+export const UPSTREAM_ASN_HEADER = "X-CV-ASN";
 
 const ALLOW_HEADERS = ["Content-Type", "Last-Event-ID", SESSION_HEADER, TURNSTILE_HEADER].join(", ");
 const EXPOSE_HEADERS = [SESSION_HEADER, "Retry-After"].join(", ");
 
 /** Request headers copied to the origin. Everything else (cookies, IPs, client hints) is dropped. */
 export const FORWARDED_REQUEST_HEADERS = ["accept", "content-type", "last-event-id"] as const;
+
+/** Builds the header set sent to an origin. Never forwards client-sent identity or net headers. */
+export function buildUpstreamHeaders(
+  request: Request,
+  accessHeaders: Readonly<Record<string, string>> | null,
+  sessionId: string | null,
+  ip: string | null,
+  netClass?: string | null,
+  asn?: number | null,
+): Headers {
+  const out = new Headers();
+  for (const name of FORWARDED_REQUEST_HEADERS) {
+    const value = request.headers.get(name);
+    if (value !== null) out.set(name, value);
+  }
+  if (accessHeaders !== null) {
+    for (const [k, v] of Object.entries(accessHeaders)) out.set(k, v);
+    if (netClass !== null && netClass !== undefined) {
+      out.set(UPSTREAM_NET_CLASS_HEADER, netClass);
+    }
+    if (asn !== null && asn !== undefined) {
+      out.set(UPSTREAM_ASN_HEADER, String(asn));
+    }
+  }
+  if (sessionId !== null) out.set(UPSTREAM_SESSION_HEADER, sessionId);
+  if (ip !== null && ip.trim() !== "") out.set(UPSTREAM_CLIENT_IP_HEADER, ip.trim());
+  return out;
+}
 
 /** Response headers never passed back from the origin. */
 const DROPPED_RESPONSE_HEADERS = new Set([
