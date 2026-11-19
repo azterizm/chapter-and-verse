@@ -33,6 +33,21 @@ export const EXTRACTIVE_REASON: Record<ExtractiveReason, string> = {
     "The provision text is shown instead, with the relevant words marked. Ask again in a minute for a written answer.",
 };
 
+/** A short title shown before each notice's message, by notice code. */
+export const NOTICE_TITLE: Record<string, string> = {
+  corrections_applied: "Spelling corrected",
+  provider_fallback: "Backup model used",
+  provider_warming: "Model starting",
+  status_excluded: "Part not answered",
+  current_text_only: "Current text only",
+  providers_unavailable: "Answer cut short",
+  no_text: "No text to answer from",
+};
+
+/** The title for a notice code, or null for a code this page does not know. */
+export const noticeTitle = (code: string): string | null =>
+  Object.prototype.hasOwnProperty.call(NOTICE_TITLE, code) ? (NOTICE_TITLE[code] ?? null) : null;
+
 export const EXAMPLES: readonly string[] = [
   "What is the limit of the compensatory award under s.124 ERA 1996?",
   "What does section 3 of the Marchwood Commercial Arbitration Act 1996 say?",

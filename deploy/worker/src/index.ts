@@ -18,6 +18,7 @@ import {
   FORWARDED_REQUEST_HEADERS,
   SESSION_HEADER,
   TURNSTILE_HEADER,
+  UPSTREAM_CLIENT_IP_HEADER,
   UPSTREAM_SESSION_HEADER,
   corsHeaders,
   isAllowedOrigin,
@@ -123,6 +124,7 @@ export async function handle(request: Request, env: Env, deps: Deps): Promise<Re
   }
   for (const [k, v] of Object.entries(config.accessHeaders)) upstreamHeaders.set(k, v);
   if (sessionId !== null) upstreamHeaders.set(UPSTREAM_SESSION_HEADER, sessionId);
+  if (ip !== null && ip.trim() !== "") upstreamHeaders.set(UPSTREAM_CLIENT_IP_HEADER, ip.trim());
 
   const result = await forward(
     deps.fetch,

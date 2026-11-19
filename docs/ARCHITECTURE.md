@@ -416,7 +416,9 @@ used for this, because its reasons mean "no model".
 `{status, corpus_id, snapshot}`. Edge rules run before routing and answer with an HTTP status and
 `{"error", "message"}`: 403 `access_required` (when `REQUIRE_ACCESS_HEADERS=1` and the Cloudflare
 Access headers are absent; health exempt), 429 `rate_limited` with `Retry-After` (per-client
-token bucket, keyed by `CF-Connecting-IP` only when the Access headers show the Worker sent it),
+token bucket, keyed by the Worker's `X-CV-Client-IP` only when `REQUIRE_ACCESS_HEADERS=1` and the
+Access headers are present, else by the socket peer; the Worker sets the header from
+`CF-Connecting-IP` and drops any client copy),
 413 `body_too_large` / `query_too_long` (`MAX_QUERY_BYTES` on the UTF-8 query), 400 `bad_request`.
 
 Startup opens the store, router and concepts once and refuses to start when the store and router
@@ -436,7 +438,10 @@ Modal KV path: the serialised mask from `MODAL_MASK_PROCESSOR` (the file
 `serve.py::get_mask_processor --out` writes) and the pinned revision's `tokenizer.json`
 (`MODAL_TOKENIZER_JSON`, else downloaded once from Hugging Face), loaded with `tokenizers` behind
 `QwenChatTokenizer` (Qwen3 chat template, thinking off). Either failing logs why and leaves Modal
-serving chat and the judge only.
+serving chat and the judge only. Every KV-path `/generate` call goes through `MeteredPost`: the pin,
+the Modal circuit breaker and a ledger reservation (dollars a month, hard cap) are checked
+first, usage and outcome recorded after, with the rotation's rules. A refusal raises
+`AllProvidersUnavailable`, so Modal is unavailable for that request.
 
 Persistence: `PostgresLedger` layers the in-memory ledger (reservations, minute windows, rate
 headers) under shared day and month totals in `provider_quota` (cached 10 s), written by one
@@ -446,3 +451,12 @@ request; it is logged once per outage. No `DATABASE_URL`: in-memory ledger, no r
 
 Logs: one `ask {...}` JSON line per answer (query sha256, route status, mode, counts, provider
 calls, timings). The query is never logged.
+
+Open items (as of Slice 1, C1):
+- The mask processor is read from a file (`MODAL_MASK_PROCESSOR`), not fetched from Modal at
+  startup: the engine host has no Modal SDK or Modal token, only the SGLang bearer key. The
+  operator writes the file once with `serve.py::get_mask_processor --out`.
+- `tokenizers` brings `huggingface-hub` and its tree (`httpx2`, `hf-xet`, `fsspec`, `filelock`,
+  `tqdm`, `click`) into the image. With `httpx2` installed, Starlette's `TestClient` uses it.
+- The Postgres ledger shares day and month totals across origins; per-minute limits (Groq's
+  8,000 tokens a minute) stay local to each origin, corrected by Groq's own headers.

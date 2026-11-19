@@ -16,8 +16,8 @@ web client reads the status of a response that is not an event stream):
    behind Access itself; ``/api/health`` is exempt (it holds nothing private, and the container
    health check calls it).
 2. 429 ``rate_limited`` with ``Retry-After`` from :class:`~chapterverse.ratelimit.TokenBucket`,
-   keyed by ``CF-Connecting-IP`` when the request came through the Worker (it carries the Access
-   headers), else by the peer address.
+   keyed by the Worker's ``X-CV-Client-IP`` when the request passed the Access-header check
+   (``REQUIRE_ACCESS_HEADERS=1``), else by the socket peer.
 3. 413 ``body_too_large`` / ``query_too_long``: the body cap, then ``MAX_QUERY_BYTES`` on the
    query's UTF-8 bytes. 400 ``bad_request`` for a body that is not the shape above.
 
@@ -74,7 +74,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Final
+from typing import Any, Final, NoReturn
 
 import anyio
 import httpx
@@ -86,10 +86,17 @@ from starlette.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 from tokenizers import Tokenizer
 
-from chapterverse.audit.modal_path import ModalSGLangBackend
+from chapterverse.audit.modal_path import BearerPost, ModalSGLangBackend
 from chapterverse.audit.policy import build_policy
 from chapterverse.config import ConfigError, Settings
-from chapterverse.contracts import Event, ProviderUnavailable, TextStore, encode_sse
+from chapterverse.contracts import (
+    AllProvidersUnavailable,
+    Event,
+    ProviderUnavailable,
+    TextStore,
+    UnavailableKind,
+    encode_sse,
+)
 from chapterverse.persistence import ReceiptStore, open_persistence
 from chapterverse.pipeline import (
     MAX_CONTEXT_COORDINATES,
@@ -98,6 +105,7 @@ from chapterverse.pipeline import (
     Pipeline,
     StreamClosed,
 )
+from chapterverse.providers.ledger import CallUsage
 from chapterverse.providers.openai_compat import OpenAICompatProvider
 from chapterverse.providers.pinning import PinCheck, apply_checks, check_provider, is_conclusive
 from chapterverse.providers.presets import JUDGE_PRESET, JUDGE_PRESET_NAME, MODAL_MODEL_ID
@@ -106,6 +114,7 @@ from chapterverse.ratelimit import TokenBucket
 from chapterverse.store import open_store
 
 __all__ = [
+    "MeteredPost",
     "Runtime",
     "app",
     "build_runtime",
@@ -127,6 +136,8 @@ PURGE_INTERVAL_S: Final = 3_600.0
 ACCESS_JWT: Final = "cf-access-jwt-assertion"
 ACCESS_ID: Final = "cf-access-client-id"
 ACCESS_SECRET: Final = "cf-access-client-secret"  # noqa: S105 - a header name
+CLIENT_IP_HEADER: Final = "x-cv-client-ip"
+"""Set by the Worker from ``CF-Connecting-IP``; any client-sent copy is dropped there."""
 SSE_HEADERS: Final = {"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"}
 HF_RESOLVE: Final = "https://huggingface.co/{model}/resolve/{revision}/{name}"
 
@@ -335,6 +346,90 @@ def load_tokenizer(
             http.close()
 
 
+class MeteredPost:
+    """The KV path's ``/generate`` POST, accounted exactly like the rotation's chat calls.
+
+    Before each call: the provider must be pinned, its circuit breaker must allow the call, and
+    the quota ledger must reserve it (Modal: dollars a month against the hard cap). Any refusal
+    raises :class:`~chapterverse.contracts.AllProvidersUnavailable`, so Modal is unavailable for
+    that request (extractive before the first sentence, a notice after). After each call the
+    usage (prompt ids, output ids, wall time) is recorded in the ledger and the outcome in the
+    breaker, with the rotation's rules: a 429 or quota trips it for the stated wait, anything
+    else counts as a failure. Thread-safe (the ledger and breaker are).
+    """
+
+    def __init__(
+        self,
+        inner: Callable[[dict[str, Any]], dict[str, Any]],
+        rotation: ProviderRotation,
+        *,
+        provider: str = "modal",
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
+        self.inner = inner
+        self.rotation = rotation
+        self.provider = provider
+        self._clock = clock
+
+    def __repr__(self) -> str:
+        return f"MeteredPost(provider={self.provider!r})"
+
+    def _refuse(self, kind: UnavailableKind, detail: str, retry: float | None = None) -> NoReturn:
+        raise AllProvidersUnavailable([ProviderUnavailable(self.provider, kind, retry, detail)])
+
+    def __call__(self, body: dict[str, Any]) -> dict[str, Any]:
+        name = self.provider
+        rotation = self.rotation
+        if not rotation.is_pinned(name):
+            self._refuse("model_changed", "unpinned")
+        breaker = rotation.breaker(name)
+        if not breaker.allow():
+            self._refuse("server", "circuit open", breaker.retry_after_s())
+        est = len(body.get("input_ids") or ())
+        params = body.get("sampling_params") or {}
+        max_out = int(params.get("max_new_tokens") or 0)
+        ledger = rotation.ledger
+        if ledger is not None and not ledger.reserve(name, est, max_output_tokens=max_out):
+            breaker.cancel()
+            self._refuse("quota", "local quota ledger refused")
+        t0 = self._clock()
+        try:
+            out = self.inner(body)
+        except AllProvidersUnavailable as exc:
+            failure = exc.failures[0] if exc.failures else ProviderUnavailable(name, "server")
+            self._record(est, max_out, t0, None)
+            if failure.kind in ("quota", "rate_limit"):
+                if failure.retry_after_s:
+                    breaker.trip(failure.retry_after_s)
+                else:
+                    breaker.cancel()
+            else:
+                breaker.record_failure()
+            raise
+        except Exception as exc:  # noqa: BLE001 - a client bug must not escape as a judge retry
+            self._record(est, max_out, t0, None)
+            breaker.record_failure()
+            self._refuse("server", f"unexpected {type(exc).__name__}")
+        self._record(est, max_out, t0, len(out.get("output_ids") or ()))
+        breaker.record_success()
+        return out
+
+    def _record(self, est: int, max_out: int, t0: float, completion: int | None) -> None:
+        ledger = self.rotation.ledger
+        if ledger is None:
+            return
+        ledger.record(
+            CallUsage(
+                provider=self.provider,
+                est_tokens=est,
+                max_output_tokens=max_out,
+                prompt_tokens=est if completion is not None else None,
+                completion_tokens=completion,
+                latency_s=self._clock() - t0,
+            )
+        )
+
+
 def load_modal_kv(
     rotation: ProviderRotation,
     settings: Settings,
@@ -360,6 +455,8 @@ def load_modal_kv(
     url = settings.modal_url.rstrip("/").removesuffix("/v1")
     key_env = settings.modal_api_key_env
 
+    metered = MeteredPost(BearerPost(url, api_key_env=key_env), rotation, provider=provider.name)
+
     def make_backend() -> ModalSGLangBackend:
         return ModalSGLangBackend(
             url,
@@ -368,6 +465,7 @@ def load_modal_kv(
             eos=tokenizer.eos,
             api_key_env=key_env,
             processor=processor,
+            post=metered,
         )
 
     def probe() -> bool:
@@ -503,10 +601,14 @@ def _has_access(headers: Mapping[str, str]) -> bool:
     )
 
 
-def _client_key(request: Request) -> str:
-    forwarded = request.headers.get("cf-connecting-ip", "").strip()
-    if forwarded and _has_access(request.headers):
-        return forwarded
+def _client_key(request: Request, *, access_checked: bool) -> str:
+    """The rate-limit key: the Worker's ``X-CV-Client-IP`` when the request passed the
+    Access-header check (``REQUIRE_ACCESS_HEADERS=1``), else the socket peer. Without that check
+    the header could come from anyone, so it is never trusted."""
+    if access_checked:
+        forwarded = request.headers.get(CLIENT_IP_HEADER, "").strip()
+        if forwarded:
+            return forwarded
     return request.client.host if request.client is not None else "unknown"
 
 
@@ -690,7 +792,7 @@ async def _admit(rt: Runtime, request: Request, started: float) -> AskRequest:
     """
     if rt.require_access and not _has_access(request.headers):
         raise _Reject(403, "access_required", "This origin is reached through the site.")
-    decision = rt.limiter.take(_client_key(request))
+    decision = rt.limiter.take(_client_key(request, access_checked=rt.require_access))
     if not decision.allowed:
         raise _Reject(
             429,

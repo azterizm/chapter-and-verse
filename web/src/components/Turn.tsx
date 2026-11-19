@@ -1,6 +1,6 @@
 import type { SentenceEvent } from "../api/events";
 import { type Turn as TurnData, windowAnchor } from "../state/reducer";
-import { EXTRACTIVE_REASON } from "../text";
+import { EXTRACTIVE_REASON, noticeTitle } from "../text";
 import { Citation } from "./Citation";
 import { ReceiptLine, TimingsLine } from "./Receipt";
 import { RefusalCard } from "./RefusalCard";
@@ -49,6 +49,7 @@ export function Turn({ turn, busy, onAsk, onShowSource }: Props) {
         <ul className="notices" aria-label="Notices">
           {turn.notices.map((n, i) => (
             <li key={i} className={`notice notice-${n.code}`}>
+              {noticeTitle(n.code) !== null && <strong className="notice-title">{noticeTitle(n.code)}. </strong>}
               {n.message}
             </li>
           ))}

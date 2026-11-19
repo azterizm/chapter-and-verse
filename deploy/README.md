@@ -205,6 +205,7 @@ Contract for the web page:
 - The first question sends `X-Turnstile-Token: <widget token>` and stores the `X-Session-Token` response header in memory.
 - Every later POST sends `X-Session-Token`. On a 401, the page runs the widget again.
 - The Worker forwards the session id to the engine as `X-CV-Session-Id`. That id is `sessions.session_id`.
+- The Worker forwards the client IP (from `CF-Connecting-IP`) as `X-CV-Client-IP`, dropping any client copy. The engine keys its own rate limit on it only when `REQUIRE_ACCESS_HEADERS=1` and the Access headers are present; otherwise it uses the socket peer.
 - Sessions last 2 hours (`SESSION_TTL_SECONDS`).
 - The request body is limited to 12,288 bytes at the edge. The engine limits the query itself to 4096 bytes (`MAX_QUERY_BYTES`) and refuses a longer one.
 

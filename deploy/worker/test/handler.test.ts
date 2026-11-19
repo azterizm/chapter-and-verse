@@ -129,6 +129,19 @@ describe("questions", () => {
     await handle(ask({ "X-Turnstile-Token": "good", "X-CV-Session-Id": "forged" }), ENV, deps);
     expect((calls[1]!.init.headers as Headers).get("X-CV-Session-Id")).not.toBe("forged");
   });
+  it("forwards the client IP in its own header and drops a client-sent copy", async () => {
+    const { deps, calls } = makeDeps(okOrigin);
+    await handle(ask({ "X-Turnstile-Token": "good", "X-CV-Client-IP": "198.51.100.66" }, undefined, "203.0.113.5"), ENV, deps);
+    const headers = calls[1]!.init.headers as Headers;
+    expect(headers.get("X-CV-Client-IP")).toBe("203.0.113.5");
+    expect(headers.get("CF-Connecting-IP")).toBeNull();
+  });
+  it("sends no client IP header when Cloudflare gave none", async () => {
+    const { deps, calls } = makeDeps(okOrigin);
+    const r = new Request(`${SITE}/api/health`, { headers: { Origin: SITE, "X-CV-Client-IP": "198.51.100.66" } });
+    await handle(r, ENV, deps);
+    expect((calls[0]!.init.headers as Headers).get("X-CV-Client-IP")).toBeNull();
+  });
   it("needs a session for other POSTs", async () => {
     const { deps } = makeDeps(okOrigin);
     const r = await handle(

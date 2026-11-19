@@ -24,6 +24,7 @@ from starlette.types import Message
 from tokenizers import Tokenizer, models, pre_tokenizers
 
 from chapterverse.app import (
+    MeteredPost,
     QwenChatTokenizer,
     Runtime,
     _Maintenance,
@@ -39,10 +40,18 @@ from chapterverse.app import (
 from chapterverse.audit.modal_path import ModalSGLangBackend
 from chapterverse.audit.policy import build_policy
 from chapterverse.config import Settings
-from chapterverse.contracts import AnswerFactObject, TextStore, canonical_json, sha256_hex
+from chapterverse.contracts import (
+    AllProvidersUnavailable,
+    AnswerFactObject,
+    ProviderUnavailable,
+    TextStore,
+    canonical_json,
+    sha256_hex,
+)
 from chapterverse.persistence import INSERT_RECEIPT_SQL, Database, ReceiptStore
-from chapterverse.pipeline import Pipeline
+from chapterverse.pipeline import AskRequest, ModalKV, Pipeline
 from chapterverse.providers import ProviderRotation, make_cloudflare, make_groq, make_modal
+from chapterverse.providers.ledger import InMemoryLedger, ModalLimits
 from chapterverse.providers.presets import JUDGE_PRESET, JUDGE_PRESET_NAME
 from chapterverse.ratelimit import TokenBucket
 
@@ -342,8 +351,9 @@ def test_access_headers_required_when_set(
     assert spy.calls == 2
 
 
-def test_rate_limit_keys_on_cf_connecting_ip_only_from_the_worker(
-    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+@pytest.mark.parametrize("require_access", [True, False])
+def test_rate_limit_keys_on_the_worker_client_ip_only_after_the_access_check(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore, require_access: bool
 ) -> None:
     rt = runtime(
         fixture_data_root,
@@ -351,18 +361,22 @@ def test_rate_limit_keys_on_cf_connecting_ip_only_from_the_worker(
         fixture_text_store,
         FakeRotation(),
         limiter=TokenBucket(per_minute=1, burst=1),
+        require_access=require_access,
     )
     with TestClient(create_app(rt)) as client:
-        a = {**ACCESS, "CF-Connecting-IP": "203.0.113.1"}
-        b = {**ACCESS, "CF-Connecting-IP": "203.0.113.2"}
+        a = {**ACCESS, "X-CV-Client-IP": "203.0.113.1"}
+        b = {**ACCESS, "X-CV-Client-IP": "203.0.113.2"}
         assert ask(client, MARCHWOOD_QUERY, headers=a).status_code == 200
-        assert ask(client, MARCHWOOD_QUERY, headers=b).status_code == 200
-        assert ask(client, MARCHWOOD_QUERY, headers=a).status_code == 429
-        # Without the Worker's Access headers the header is not trusted: the peer is the key.
-        spoof = {"CF-Connecting-IP": "198.51.100.7"}
-        assert ask(client, MARCHWOOD_QUERY, headers=spoof).status_code == 200
-        spoof2 = {"CF-Connecting-IP": "198.51.100.8"}
-        assert ask(client, MARCHWOOD_QUERY, headers=spoof2).status_code == 429
+        second = ask(client, MARCHWOOD_QUERY, headers=b).status_code
+        if require_access:
+            # Access checked: each Worker-reported client has its own bucket.
+            assert second == 200
+            assert ask(client, MARCHWOOD_QUERY, headers=a).status_code == 429
+            cf = {**ACCESS, "CF-Connecting-IP": "198.51.100.9", "X-CV-Client-IP": "203.0.113.1"}
+            assert ask(client, MARCHWOOD_QUERY, headers=cf).status_code == 429
+        else:
+            # No Access check: the header could be forged, so the socket peer is the key.
+            assert second == 429
 
 
 def test_health(fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore) -> None:
@@ -729,3 +743,127 @@ def test_modal_probe_failure_reads_as_cold(tmp_path: Path) -> None:
     kv = load_modal_kv(rotation, settings(tmp_path, modal_url="https://modal.example"), env)
     assert kv is not None
     assert kv.probe() is False
+
+
+# ---------------------------------------------------------------------- Modal KV metering
+
+
+class FakePost:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.bodies: list[dict[str, Any]] = []
+
+    def __call__(self, body: dict[str, Any]) -> dict[str, Any]:
+        self.bodies.append(body)
+        if self.error is not None:
+            raise self.error
+        return {"output_ids": [5, 6, 7], "meta_info": {"finish_reason": {"type": "length"}}}
+
+
+BODY = {"input_ids": [1, 2, 3, 4], "sampling_params": {"max_new_tokens": 3}}
+
+
+def modal_rotation(ledger: Any = None, **kwargs: Any) -> ProviderRotation:
+    return ProviderRotation(
+        [make_modal("https://modal.example", environ={"MODAL_API_KEY": "k"})],
+        generate=["modal"],
+        judge=["modal"],
+        ledger=ledger,
+        **kwargs,
+    )
+
+
+def test_metered_post_reserves_and_records_against_the_modal_ledger() -> None:
+    ledger = InMemoryLedger()
+    post = FakePost()
+    metered = MeteredPost(post, modal_rotation(ledger))
+    assert metered(dict(BODY))["output_ids"] == [5, 6, 7]
+    snapshot = ledger.snapshot()["modal"]
+    assert snapshot["usd_month"] > 0  # a cold start and its tail, as the ledger models it
+    assert snapshot["pending_usd"] == 0
+    assert len(post.bodies) == 1
+
+
+def test_metered_post_refused_reservation_means_modal_unavailable() -> None:
+    ledger = InMemoryLedger(modal=ModalLimits(usd_per_month=0.01))
+    post = FakePost()
+    rotation = modal_rotation(ledger)
+    with pytest.raises(AllProvidersUnavailable) as caught:
+        MeteredPost(post, rotation)(dict(BODY))
+    assert caught.value.failures[0].kind == "quota"
+    assert post.bodies == []
+    assert rotation.breaker("modal").state == "closed"
+
+
+def test_metered_post_respects_and_feeds_the_breaker() -> None:
+    rotation = modal_rotation(InMemoryLedger(), failure_threshold=2)
+    failing = FakePost(AllProvidersUnavailable([ProviderUnavailable("modal", "server")]))
+    metered = MeteredPost(failing, rotation)
+    for _ in range(2):
+        with pytest.raises(AllProvidersUnavailable):
+            metered(dict(BODY))
+    assert rotation.breaker("modal").state == "open"
+    with pytest.raises(AllProvidersUnavailable) as caught:
+        metered(dict(BODY))
+    assert "circuit open" in caught.value.failures[0].detail
+    assert len(failing.bodies) == 2  # the open circuit sent nothing
+    limited = modal_rotation(InMemoryLedger())
+    with pytest.raises(AllProvidersUnavailable):
+        MeteredPost(
+            FakePost(AllProvidersUnavailable([ProviderUnavailable("modal", "rate_limit", 30.0)])),
+            limited,
+        )(dict(BODY))
+    assert limited.breaker("modal").state == "open"
+    unpinned = modal_rotation(InMemoryLedger())
+    unpinned.set_pinned("modal", pinned=False)
+    with pytest.raises(AllProvidersUnavailable) as caught:
+        MeteredPost(FakePost(), unpinned)(dict(BODY))
+    assert caught.value.failures[0].kind == "model_changed"
+    broken = modal_rotation(InMemoryLedger())
+    with pytest.raises(AllProvidersUnavailable) as caught:
+        MeteredPost(FakePost(RuntimeError("bug")), broken)(dict(BODY))
+    assert caught.value.failures[0].kind == "server"
+
+
+def test_kv_path_over_the_cap_answers_extractive(
+    fixture_router: Router, fixture_text_store: TextStore
+) -> None:
+    rotation = FakeRotation(names=("modal",), provider="modal")
+    capped = modal_rotation(InMemoryLedger(modal=ModalLimits(usd_per_month=0.01)))
+    post = FakePost()
+
+    def backend() -> ModalSGLangBackend:
+        return ModalSGLangBackend(
+            "https://modal.example",
+            QwenChatTokenizer(tiny_tokenizer()),
+            model_id="m",
+            eos=(2, 3),
+            post=MeteredPost(post, capped),
+        )
+
+    pipeline = Pipeline(
+        router=fixture_router,
+        store=fixture_text_store,
+        rotation=rotation,
+        policy=POLICY,
+        modal_kv=ModalKV(make_backend=backend, probe=lambda: True),
+    )
+    seen: list[Any] = []
+    outcome = pipeline.run(AskRequest(query=S124_QUERY), seen.append)
+    assert [e.type for e in seen] == ["route", "sources", "extractive", "receipt", "done"]
+    assert outcome.failures == ["modal:quota"]
+    assert post.bodies == []
+
+
+def test_load_modal_kv_meters_its_backend(tmp_path: Path) -> None:
+    rotation = modal_rotation(InMemoryLedger())
+    mask = tmp_path / "mask.txt"
+    mask.write_text("serialised", encoding="utf-8")
+    tok = tmp_path / "tokenizer.json"
+    tok.write_text(tiny_tokenizer().to_str(), encoding="utf-8")
+    env = {"MODAL_MASK_PROCESSOR": str(mask), "MODAL_TOKENIZER_JSON": str(tok)}
+    kv = load_modal_kv(rotation, settings(tmp_path, modal_url="https://modal.example"), env)
+    assert kv is not None
+    post = kv.make_backend()._post
+    assert isinstance(post, MeteredPost)
+    assert post.rotation is rotation

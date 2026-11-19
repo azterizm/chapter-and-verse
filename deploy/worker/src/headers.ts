@@ -14,6 +14,12 @@ export const SESSION_HEADER = "X-Session-Token";
 export const TURNSTILE_HEADER = "X-Turnstile-Token";
 /** Set by the Worker on upstream requests only; any client-sent copy is dropped. */
 export const UPSTREAM_SESSION_HEADER = "X-CV-Session-Id";
+/**
+ * The client IP for the engine's own rate limit, set by the Worker from CF-Connecting-IP on
+ * upstream requests only. The upstream header set is built fresh, so a client-sent copy is never
+ * forwarded. The engine trusts it only on a request that passed its Access-header check.
+ */
+export const UPSTREAM_CLIENT_IP_HEADER = "X-CV-Client-IP";
 
 const ALLOW_HEADERS = ["Content-Type", "Last-Event-ID", SESSION_HEADER, TURNSTILE_HEADER].join(", ");
 const EXPOSE_HEADERS = [SESSION_HEADER, "Retry-After"].join(", ");
