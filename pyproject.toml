@@ -19,6 +19,7 @@ dependencies = [
     "zstandard>=0.23",
     "orjson>=3.10",
     "psycopg[binary]>=3.2",
+    "tokenizers>=0.21",
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",

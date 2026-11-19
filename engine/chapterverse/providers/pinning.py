@@ -35,6 +35,7 @@ __all__ = [
     "PinCheck",
     "apply_checks",
     "check_provider",
+    "is_conclusive",
     "prefill_continued",
     "prefill_ok",
     "run_daily_check",
@@ -182,14 +183,25 @@ def _check(
     )
 
 
+def is_conclusive(check: PinCheck) -> bool:
+    """Whether ``check`` decided the pin: the model list was read and either lacked the model or
+    the thinking-off canary got an answer. A transient failure (a 429, a timeout, a cold server)
+    decides nothing, so it must not take a provider out of rotation for a day."""
+    if check.model_listed is None:
+        return False
+    return check.model_listed is False or check.thinking_off_ok is not None
+
+
 def apply_checks(rotation: ProviderRotation, checks: Iterable[PinCheck]) -> None:
     """Pin or unpin each checked provider (model list and thinking-off canary); turn native
-    prefill on after a passed prefill canary and off (the user-turn fold) after a failed one."""
+    prefill on after a passed prefill canary and off (the user-turn fold) after a failed one.
+    An inconclusive check (:func:`is_conclusive`) leaves the pin as it was."""
     providers = rotation.providers
     for check in checks:
         if check.provider not in providers:
             continue
-        rotation.set_pinned(check.provider, pinned=check.pinned)
+        if is_conclusive(check):
+            rotation.set_pinned(check.provider, pinned=check.pinned)
         provider = providers[check.provider]
         if isinstance(provider, OpenAICompatProvider) and check.prefill_ok is not None:
             provider.set_prefill(enabled=check.prefill_ok)
