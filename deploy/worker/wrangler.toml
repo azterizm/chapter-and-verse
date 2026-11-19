@@ -12,22 +12,21 @@ workers_dev = false
 preview_urls = false
 send_metrics = false
 
-# Enable when the domain is on Cloudflare (domain not yet chosen; plan names chapterandverse.uk).
-# routes = [
-#   { pattern = "chapterandverse.uk/api/*", zone_name = "chapterandverse.uk" },
-# ]
+routes = [
+  { pattern = "chapterandverse.memonsystems.com/api/*", zone_name = "memonsystems.com" },
+]
 
 [vars]
 # Origin 1: the Oracle engine through Cloudflare Tunnel (a public hostname of the tunnel).
 # Slice 4 adds STANDBY_ORIGIN_URL (Hugging Face Space); see src/origins.ts.
-ORIGIN_URL = "https://origin.chapterandverse.uk"
+ORIGIN_URL = "https://cv-origin.memonsystems.com"
 # Comma-separated. Include the site itself: browsers send Origin on same-origin POSTs.
-ALLOWED_ORIGINS = "https://chapterandverse.uk"
+ALLOWED_ORIGINS = "https://chapterandverse.memonsystems.com"
 ORIGIN_TIMEOUT_MS = "4000"
 # JSON body cap. The engine enforces MAX_QUERY_BYTES=4096 on the query itself.
 MAX_BODY_BYTES = "12288"
 SESSION_TTL_SECONDS = "7200"
-TURNSTILE_HOSTNAMES = "chapterandverse.uk"
+TURNSTILE_HOSTNAMES = "chapterandverse.memonsystems.com"
 TURNSTILE_ACTION = "ask"
 
 # Workers Rate Limiting binding: per Cloudflare location, period 10 or 60 s only.

@@ -35,17 +35,17 @@ No secret is in this repository, in cloud-init user-data or in the image.
 | SGLang API key | Modal Secret `chapter-and-verse-judge-key`, key `JUDGE_API_KEY` (same value as `MODAL_API_KEY`) | Modal container |
 | Modal ledger | `~/.local/state/chapter-and-verse/modal_ledger.json` on the operator's machine | `modal/ledger.py` |
 
-The Turnstile site key is public and goes in the web build. The tunnel token, `DATABASE_URL` and the API keys are never pasted into a terminal command line; use the stdin forms below.
+The Turnstile site key is public and goes in the web build. The tunnel token, `DATABASE_URL` and the API keys are never pasted into a terminal command line; use the stdin forms below. Secrets live in `~/.config/chapter-and-verse/` on the operator's machine (files `tunnel_token`, `access_client.env`, `turnstile.env`, `database_url`, `modal.env`), never in the repo.
 
 ## 1. Cloudflare (by hand)
 
-1. Buy the domain at Cloudflare Registrar (plan section 2: `chapterandverse.uk`, else `.app`). The examples below use `chapterandverse.uk`. If the domain differs, change it in `worker/wrangler.toml` (`ALLOWED_ORIGINS`, `TURNSTILE_HOSTNAMES`, `ORIGIN_URL`, `routes`).
-2. Turnstile: add a widget for the domain, mode Managed. Keep the site key for the web build and the secret key for step 6.
-3. Zero Trust, Networks, Tunnels: create a tunnel of type Cloudflared. Copy its token. Add a public hostname `origin.chapterandverse.uk` with service `http://127.0.0.1:8000`.
-4. Protect the origin hostname with Cloudflare Access, so only the Worker can reach it. Without this, anyone who finds the hostname can bypass Turnstile and the rate limits. Required: the Worker returns 503 and forwards nothing until both Access secrets are set.
-   1. Zero Trust, Access, Service Auth, Service Tokens: create a token named `chapter-and-verse-worker`, duration 1 year (or non-expiring). Copy the Client ID and Client Secret; the secret is shown only once. Keep them for step 5.
-   2. Zero Trust, Access, Applications: add a Self-hosted application for the domain `origin.chapterandverse.uk`. Add one policy with action Service Auth, rule Include, Service Token, `chapter-and-verse-worker`. Add no other policy, so no person or other token can pass.
-   3. Check: `curl -s -o /dev/null -w '%{http_code}\n' https://origin.chapterandverse.uk/api/health` returns 403 (or a redirect to the Access login), not 200.
+1. The site is a subdomain of memonsystems.com.
+2. Turnstile widget (done 2026-11-19): add a widget for the domain, mode Managed. Keep the site key for the web build and the secret key for step 6.
+3. Tunnel and origin DNS record (done 2026-11-19): Zero Trust, Networks, Tunnels: create a tunnel of type Cloudflared. Copy its token. Add a public hostname `cv-origin.memonsystems.com` (CNAME) with service `http://127.0.0.1:8000`.
+4. Access app and service token (done 2026-11-19): protect the origin hostname with Cloudflare Access, so only the Worker can reach it. Without this, anyone who finds the hostname can bypass Turnstile and the rate limits. Required: the Worker returns 503 and forwards nothing until both Access secrets are set.
+   1. Service token (done 2026-11-19): Zero Trust, Access, Service Auth, Service Tokens: create a token named `chapter-and-verse-worker`, duration 1 year (or non-expiring). Copy the Client ID and Client Secret; the secret is shown only once. Keep them for step 5.
+   2. Access app (done 2026-11-19): Zero Trust, Access, Applications: add a Self-hosted application for the domain `cv-origin.memonsystems.com`. Add one policy with action Service Auth, rule Include, Service Token, `chapter-and-verse-worker`. Add no other policy, so no person or other token can pass.
+   3. Check: `curl -s -o /dev/null -w '%{http_code}\n' https://cv-origin.memonsystems.com/api/health` returns 403 (or a redirect to the Access login), not 200.
    4. Before the token expires, create a new one, add it to the policy, update the two Worker secrets, then delete the old token.
 5. Workers and Pages: create the Pages project `chapter-and-verse` (direct upload).
 
@@ -233,9 +233,9 @@ The CSP allows scripts from `'self'` and `https://challenges.cloudflare.com` onl
 ## 7. Smoke checks (Command)
 
 ```
-curl -s https://chapterandverse.uk/api/health
+curl -s https://chapterandverse.memonsystems.com/api/health
 curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' \
-  -d '{"query":"test"}' https://chapterandverse.uk/api/ask        # 401 without Turnstile
+  -d '{"query":"test"}' https://chapterandverse.memonsystems.com/api/ask        # 401 without Turnstile
 sudo -iu deploy docker compose -f /opt/chapter-and-verse/deploy/compose.yml ps
 systemctl status cloudflared-cv
 ```

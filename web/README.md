@@ -26,6 +26,8 @@ npm run lint
 
 A backend on another origin must allow this origin in `CORS_ORIGINS`.
 
+The production build uses `VITE_TURNSTILE_SITE_KEY=0x4AAAAAAGJBUNjQv7_0zIKi` and same-origin API (no `VITE_API_BASE`).
+
 ## API
 
 - `POST /api/ask` with `{query, as_at?, session_id?, turnstile_token?}`. The reply is `text/event-stream`, events as in `docs/ARCHITECTURE.md` §4.10, in the order of §5.
