@@ -21,4 +21,4 @@ Context: `specs/grounded-refs/` lets a model-written provision reference pass wh
 - R2.1 The three sentences above as tests (expected: pass, pass, pass), plus R1.2 to R1.4 cases on real ERA text.
 - R2.2 Offline: for each rolled-back point in `SCRATCH/gates2/gates/*.transcript.txt` the drafts are not recorded, so instead write 10 realistic self-referencing sentences for ERA s.94, s.98, s.100, s.103A, s.111, s.119, s.123, s.124 and two SI regulations, cited to the right passage from the store, and show they pass; and 5 that cite a wrong section and show they fail. Write `SCRATCH/self-refs/regression.txt`.
 
-`SCRATCH` = `/private/tmp/claude-501/-Users-abdiel-Code-chapter-and-verse/ff48a7a7-4145-4602-b5a5-4fbe1851fa50/scratchpad`.
+`SCRATCH` = `$CV_SCRATCH`.

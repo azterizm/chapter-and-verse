@@ -1,8 +1,8 @@
 # Slice 1 gates: requirements
 
-Context: Chapter & Verse answers UK legislation questions with sentence-verified, system-rendered citations. The engine is built (`engine/chapterverse/`, see `docs/ARCHITECTURE.md` §10 and §11). Gate 1 (router battery through the app) is already run; its outputs are in `SCRATCH/c2b/battery-none/` (`summary.json`, `metrics.json`, `differences.json`, `faults.json`). This spec covers the remaining Slice 1 gates and the gates report. Plan: `/Users/abdiel/.claude/plans/plan-extensively-to-build-bright-sunset.md` §9 Slice 1 and §11.
+Context: Chapter & Verse answers UK legislation questions with sentence-verified, system-rendered citations. The engine is built (`engine/chapterverse/`, see `docs/ARCHITECTURE.md` §10 and §11). Gate 1 (router battery through the app) is already run; its outputs are in `SCRATCH/c2b/battery-none/` (`summary.json`, `metrics.json`, `differences.json`, `faults.json`). This spec covers the remaining Slice 1 gates and the gates report. Plan: the project plan §9 Slice 1 and §11.
 
-`SCRATCH` = `/private/tmp/claude-501/-Users-abdiel-Code-chapter-and-verse/ff48a7a7-4145-4602-b5a5-4fbe1851fa50/scratchpad`.
+`SCRATCH` = `$CV_SCRATCH`.
 
 ## R1 Latency gate on 20 hand-written questions
 

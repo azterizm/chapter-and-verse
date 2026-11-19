@@ -89,7 +89,7 @@ Reading every generated sentence against source window text identified one factu
   - Sentence: "It is an offence for an employer to discriminate against a person in the arrangements for deciding to whom to offer employment, as to the terms of that offer, or by not offering employment."
   - Source text: Section 39(1) of the Equality Act 2010 states: "(1) An employer (A) must not discriminate against a person (B) (a) in the arrangements A makes for deciding to whom to offer employment; (b) as to the terms on which A offers B employment; (c) by not offering B employment."
   - Defect: Civil discrimination is not a criminal offence. The verifier passed the sentence because it checks figures, dates, durations, and citations, but did not catch the legal misclassification.
-  - Transcript: `/private/tmp/claude-501/-Users-abdiel-Code-chapter-and-verse/ff48a7a7-4145-4602-b5a5-4fbe1851fa50/scratchpad/gates/statute-eq-s39.transcript.txt`
+  - Transcript: `$CV_SCRATCH/gates/statute-eq-s39.transcript.txt`
 
 ### Sentences made vague by section number ban
 

@@ -40,9 +40,7 @@ __all__ = [
     "run_gate",
 ]
 
-DEFAULT_SCRATCH: Final = Path(
-    "/private/tmp/claude-501/-Users-abdiel-Code-chapter-and-verse/ff48a7a7-4145-4602-b5a5-4fbe1851fa50/scratchpad"
-)
+DEFAULT_SCRATCH: Final = Path(os.environ.get("CV_SCRATCH", "scratch"))
 HTTP_OK: Final = 200
 HTTP_PAYLOAD_TOO_LARGE: Final = 413
 MAX_GROQ_REQUESTS: Final = 150

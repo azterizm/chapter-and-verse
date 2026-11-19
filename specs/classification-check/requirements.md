@@ -24,4 +24,4 @@ User story: as a user, I want a sentence that calls something an offence (or ano
 
 - R3.1 Re-run the 17 recorded gate answers offline: for every sentence in `SCRATCH/gates/*.json` (or the transcripts) with its cited passage texts from the same stream's `sources` event, report how many sentences the new check would fail. Expected: the s.39 sentence and no other supported sentence; list any other with its text. Write the result to `SCRATCH/classification-check/regression.txt`.
 
-`SCRATCH` = `/private/tmp/claude-501/-Users-abdiel-Code-chapter-and-verse/ff48a7a7-4145-4602-b5a5-4fbe1851fa50/scratchpad`.
+`SCRATCH` = `$CV_SCRATCH`.

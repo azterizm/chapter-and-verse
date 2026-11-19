@@ -2,7 +2,7 @@
 
 Context: the sentence judge is Qwen3.8-27B. Its reference measurement is the verifier's stop 78 live check on Modal SGLang over fresh2 (151 graded units): 138/151 correct (91.4%), 62 caught, 8 false rollbacks, 141 calls, 0 errors (`~/Code/legal-rag-verifier/results/fresh2-live78/summary.json`). The same method was re-run through our provider layer (`eval/judge_gate.py run`) on Groq and on Cloudflare. Their outputs are in `SCRATCH/c2a/groq/summary.json` and `SCRATCH/c2a/cloudflare/summary.json` (plus `calls.jsonl`, `requests.jsonl`), and the run logs `SCRATCH/c2a/groq-run.log`, `SCRATCH/c2a/cloudflare-run.log`.
 
-`SCRATCH` = `/private/tmp/claude-501/-Users-abdiel-Code-chapter-and-verse/ff48a7a7-4145-4602-b5a5-4fbe1851fa50/scratchpad`.
+`SCRATCH` = `$CV_SCRATCH`.
 
 ## R1 Report
 

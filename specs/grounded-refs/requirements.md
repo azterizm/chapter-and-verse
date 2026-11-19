@@ -24,4 +24,4 @@ User story: as a user, I want an answer to name the sections the cited provision
 - R3.2 Existing tests in `tests/test_audit_refs.py` and `tests/test_audit_prompt.py` keep passing, changed only where a test asserted the old strict rule for a now-grounded reference; list each changed test.
 - R3.3 Offline regression over the gate transcripts: list every supported or rolled-back sentence whose reference verdict changes under the new rule, with its text. Write `SCRATCH/grounded-refs/regression.txt`.
 
-`SCRATCH` = `/private/tmp/claude-501/-Users-abdiel-Code-chapter-and-verse/ff48a7a7-4145-4602-b5a5-4fbe1851fa50/scratchpad`.
+`SCRATCH` = `$CV_SCRATCH`.

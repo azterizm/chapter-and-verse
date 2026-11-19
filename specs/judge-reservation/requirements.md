@@ -20,4 +20,4 @@ User story: as the operator, I want the ledger to match how Groq actually counts
 
 - R3.1 Unit tests: judge reservation uses the constant; generation unchanged; reconcile releases the difference; a burst of judge calls fits as many as the minute window allows by the new rule.
 
-`SCRATCH` = `/private/tmp/claude-501/-Users-abdiel-Code-chapter-and-verse/ff48a7a7-4145-4602-b5a5-4fbe1851fa50/scratchpad`.
+`SCRATCH` = `$CV_SCRATCH`.
