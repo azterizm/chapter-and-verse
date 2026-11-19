@@ -102,6 +102,18 @@ COMMENT ON TABLE sessions IS
 
 CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions (expires_at);
 
+-- ---------------------------------------------------------------- daily caps
+-- Per-client generated answer counts per UTC day (specs/daily-cap/requirements.md).
+-- key_hash is sha256(salt + client_ip); the raw IP is never stored.
+-- Retention: deleted after 2 days.
+CREATE TABLE IF NOT EXISTS daily_caps (
+    key_hash  text    NOT NULL,
+    day       date    NOT NULL,
+    count     int     NOT NULL DEFAULT 0,
+    PRIMARY KEY (key_hash, day)
+);
+COMMENT ON TABLE daily_caps IS 'Per-client answer count per UTC day. Key is sha256(salt + ip).';
+
 INSERT INTO schema_version (version) VALUES (1) ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -118,3 +130,4 @@ COMMIT;
 --  WHERE (window_kind = 'minute' AND window_start < now() - interval '2 days')
 --     OR (window_kind = 'day'    AND window_start < now() - interval '90 days')
 --     OR (window_kind = 'month'  AND window_start < now() - interval '13 months');
+-- DELETE FROM daily_caps WHERE day < (now() AT TIME ZONE 'UTC')::date - 2;

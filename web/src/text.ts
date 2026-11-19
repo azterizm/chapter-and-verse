@@ -42,6 +42,13 @@ export const NOTICE_TITLE: Record<string, string> = {
   current_text_only: "Current text only",
   providers_unavailable: "Answer cut short",
   no_text: "No text to answer from",
+  daily_cap: "Daily limit reached",
+};
+
+/** Deterministic notice wording by notice code (requirements R4). */
+export const NOTICE_MESSAGE: Record<string, string> = {
+  daily_cap:
+    "Daily limit reached for generated answers. The provision text is shown instead. It resets at 00:00 UTC.",
 };
 
 /** The title for a notice code, or null for a code this page does not know. */

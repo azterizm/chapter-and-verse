@@ -110,7 +110,12 @@ from chapterverse.providers.openai_compat import OpenAICompatProvider
 from chapterverse.providers.pinning import PinCheck, apply_checks, check_provider, is_conclusive
 from chapterverse.providers.presets import JUDGE_PRESET, JUDGE_PRESET_NAME, MODAL_MODEL_ID
 from chapterverse.providers.rotation import ProviderRotation, RotationConfig
-from chapterverse.ratelimit import TokenBucket
+from chapterverse.ratelimit import (
+    DEFAULT_DAILY_ASK_CAP,
+    DailyCapStore,
+    TokenBucket,
+    client_key_hash,
+)
 from chapterverse.store import open_store
 
 __all__ = [
@@ -188,6 +193,9 @@ class Runtime:
     store: TextStore
     limiter: TokenBucket
     receipts: ReceiptStore | None = None
+    daily_caps: DailyCapStore | None = None
+    daily_ask_cap: int = DEFAULT_DAILY_ASK_CAP
+    cap_salt: str = ""
     require_access: bool = False
     workers: int = 4
     pin_check: Callable[[], object] | None = None
@@ -198,6 +206,9 @@ class Runtime:
 
     def __post_init__(self) -> None:
         self.executor = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="ask")
+        if self.daily_caps is not None and self.pipeline.daily_caps is None:
+            self.pipeline.daily_caps = self.daily_caps
+            self.pipeline.daily_ask_cap = self.daily_ask_cap
 
     @property
     def max_body_bytes(self) -> int:
@@ -505,12 +516,16 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     rotation = ProviderRotation.from_config(config, ledger=persistence.ledger)
     log.info("rotation: %r", rotation)
     modal_kv = load_modal_kv(rotation, settings, env)
+    daily_ask_cap = int(_env_number(env, "DAILY_ASK_CAP", DEFAULT_DAILY_ASK_CAP))
+    cap_salt = _env(env, "CAP_SALT") or ""
     pipeline = Pipeline(
         router=router,
         store=store,
         rotation=rotation,
         policy=build_policy(JUDGE_PRESET_NAME),
         modal_kv=modal_kv,
+        daily_caps=persistence.daily_caps,
+        daily_ask_cap=daily_ask_cap,
     )
     limiter = TokenBucket(
         per_minute=_env_number(env, "RATE_LIMIT_PER_MINUTE", 10.0),
@@ -534,6 +549,9 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         store=store,
         limiter=limiter,
         receipts=receipts,
+        daily_caps=persistence.daily_caps,
+        daily_ask_cap=daily_ask_cap,
+        cap_salt=cap_salt,
         require_access=_env_flag(env, "REQUIRE_ACCESS_HEADERS"),
         workers=int(_env_number(env, "ASK_WORKERS", 4.0)),
         pin_check=lambda: pin_check(rotation),
@@ -626,7 +644,13 @@ async def _read_body(request: Request, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-def parse_ask(body: bytes, *, max_query_bytes: int, started: float | None = None) -> AskRequest:
+def parse_ask(
+    body: bytes,
+    *,
+    max_query_bytes: int,
+    started: float | None = None,
+    client_key: str | None = None,
+) -> AskRequest:
     """The question in a ``POST /api/ask`` body.
 
     Raises:
@@ -669,6 +693,7 @@ def parse_ask(body: bytes, *, max_query_bytes: int, started: float | None = None
         as_at=as_at,
         context=tuple(raw_context),
         started=time.perf_counter() if started is None else started,
+        client_key=client_key,
     )
 
 
@@ -792,7 +817,8 @@ async def _admit(rt: Runtime, request: Request, started: float) -> AskRequest:
     """
     if rt.require_access and not _has_access(request.headers):
         raise _Reject(403, "access_required", "This origin is reached through the site.")
-    decision = rt.limiter.take(_client_key(request, access_checked=rt.require_access))
+    raw_ip = _client_key(request, access_checked=rt.require_access)
+    decision = rt.limiter.take(raw_ip)
     if not decision.allowed:
         raise _Reject(
             429,
@@ -801,7 +827,13 @@ async def _admit(rt: Runtime, request: Request, started: float) -> AskRequest:
             {"Retry-After": decision.retry_after_header},
         )
     body = await _read_body(request, rt.max_body_bytes)
-    return parse_ask(body, max_query_bytes=rt.settings.max_query_bytes, started=started)
+    client_key = client_key_hash(raw_ip, rt.cap_salt)
+    return parse_ask(
+        body,
+        max_query_bytes=rt.settings.max_query_bytes,
+        started=started,
+        client_key=client_key,
+    )
 
 
 def create_app(

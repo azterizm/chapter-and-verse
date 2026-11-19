@@ -21,12 +21,17 @@ from chapterverse.contracts import AnswerFactObject, canonical_json, sha256_hex
 from chapterverse.persistence import (
     INSERT_RECEIPT_SQL,
     PURGE_SQL,
+    READ_DAILY_CAP_SQL,
     READ_TOTALS_SQL,
+    UPSERT_DAILY_CAP_SQL,
     UPSERT_QUOTA_SQL,
     Database,
+    PostgresDailyCap,
     PostgresLedger,
     QuotaDelta,
     ReceiptStore,
+    daily_cap_read_params,
+    daily_cap_upsert_params,
     open_persistence,
     quota_delta,
     quota_params,
@@ -35,6 +40,7 @@ from chapterverse.persistence import (
     window_start,
 )
 from chapterverse.providers.ledger import CallUsage, InMemoryLedger, QuotaLedger, RateHeaders
+from chapterverse.ratelimit import client_key_hash
 
 REPO = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 11, 19, 13, 47, 31, 5, tzinfo=UTC)
@@ -283,6 +289,72 @@ def test_postgres_ledger_window_wait_unit() -> None:
     assert ledger2.window_wait("groq", 50) is None
 
 
+# ---------------------------------------------------------------------- daily caps
+
+
+def test_daily_cap_sql_builders_and_schema() -> None:
+    today = NOW.date()
+    ip = "192.0.2.1"
+    key = client_key_hash(ip, "salt-123")
+
+    # Key hashing never stores the raw IP
+    assert ip not in key
+    assert len(key) == 64
+
+    # Read builder
+    read_params = daily_cap_read_params(key, today)
+    assert read_params == (key, today)
+    assert READ_DAILY_CAP_SQL.count("%s") == len(read_params)
+    assert "daily_caps" in READ_DAILY_CAP_SQL
+
+    # Upsert builder
+    upsert_params = daily_cap_upsert_params(key, today, 1)
+    assert upsert_params == (key, today, 1)
+    assert UPSERT_DAILY_CAP_SQL.count("%s") == len(upsert_params)
+    assert "ON CONFLICT (key_hash, day) DO UPDATE" in UPSERT_DAILY_CAP_SQL
+
+    # Retention statement in PURGE_SQL
+    assert any("daily_caps" in stmt for stmt in PURGE_SQL)
+
+
+def test_postgres_daily_cap_unit_without_database() -> None:
+    today = NOW.date()
+    key = client_key_hash("192.0.2.2", "salt")
+    log: list[tuple[str, Any]] = []
+
+    # 1. DB has existing count: get reads from DB
+    cap = PostgresDailyCap(fake_db(log, [(5,)]))
+    assert cap.get(key, today) == 5
+    assert log[0] == (READ_DAILY_CAP_SQL, (key, today))
+
+    # 2. DB has no row (empty): returns 0
+    empty_log: list[tuple[str, Any]] = []
+    cap_empty = PostgresDailyCap(fake_db(empty_log, []))
+    assert cap_empty.get(key, today) == 0
+
+    # 3. Increment submits UPSERT_DAILY_CAP_SQL and updates locally
+    write_log: list[tuple[str, Any]] = []
+    db = fake_db(write_log, [])
+    cap_write = PostgresDailyCap(db)
+    assert cap_write.increment(key, today) == 1
+    assert cap_write.increment(key, today) == 2
+    assert write_log == [
+        (UPSERT_DAILY_CAP_SQL, (key, today, 1)),
+        (UPSERT_DAILY_CAP_SQL, (key, today, 1)),
+    ]
+
+    # 4. Fallback to inner when DB is down
+    def fail_connect(_: str) -> FakeConnection:
+        raise RuntimeError("down")
+
+    down_db = Database("postgres://u:pw@h/db", connect=fail_connect, background=False)
+    down_cap = PostgresDailyCap(down_db)
+    assert down_cap.get(key, today) == 0
+    assert down_cap.increment(key, today) == 1
+    assert down_cap.get(key, today) == 1
+    assert "PostgresDailyCap" in repr(down_cap)
+
+
 # ---------------------------------------------------------------------- real Postgres
 
 
@@ -324,7 +396,16 @@ def test_against_a_real_postgres(database_url: str) -> None:
             is False
         )  # the schema's CHECK refuses a query field
         assert receipts.purge()
+        daily = PostgresDailyCap(db)
+        today = datetime.now(UTC).date()
+        daily_key = client_key_hash("198.51.100.99", "salt")
+        assert daily.get(daily_key, today) == 0
+        assert daily.increment(daily_key, today) == 1
+        assert daily.increment(daily_key, today) == 2
+        fresh_daily = PostgresDailyCap(db)
+        assert fresh_daily.get(daily_key, today) == 2
     finally:
         db.execute_many("DELETE FROM provider_quota WHERE provider = %s", [(provider,)])
         db.execute_many("DELETE FROM receipts WHERE answer_id = %s", [(fact().answer_id,)])
+        db.execute_many("DELETE FROM daily_caps WHERE key_hash = %s", [(daily_key,)])
         db.close()

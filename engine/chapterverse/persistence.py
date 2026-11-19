@@ -35,7 +35,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
@@ -49,19 +49,25 @@ from chapterverse.providers.ledger import (
     seconds_to_utc_midnight,
     seconds_to_utc_month,
 )
+from chapterverse.ratelimit import DailyCapStore, InMemoryDailyCap
 
 __all__ = [
     "INSERT_RECEIPT_SQL",
     "PURGE_SQL",
+    "READ_DAILY_CAP_SQL",
     "READ_TOTALS_SQL",
+    "UPSERT_DAILY_CAP_SQL",
     "UPSERT_QUOTA_SQL",
     "WINDOW_KINDS",
     "Database",
     "Persistence",
+    "PostgresDailyCap",
     "PostgresLedger",
     "QuotaDelta",
     "ReceiptStore",
     "Totals",
+    "daily_cap_read_params",
+    "daily_cap_upsert_params",
     "open_persistence",
     "quota_delta",
     "quota_params",
@@ -105,6 +111,15 @@ INSERT_RECEIPT_SQL: Final = (
 )
 """One receipt; the same answer (same hash) is stored once."""
 
+READ_DAILY_CAP_SQL: Final = "SELECT count FROM daily_caps WHERE key_hash = %s AND day = %s"
+"""Read one client's generated answer count for a UTC day (requirements R3)."""
+
+UPSERT_DAILY_CAP_SQL: Final = (
+    "INSERT INTO daily_caps (key_hash, day, count) VALUES (%s, %s, %s) "
+    "ON CONFLICT (key_hash, day) DO UPDATE SET count = daily_caps.count + EXCLUDED.count"
+)
+"""Increment one client's generated answer count for a UTC day (requirements R3)."""
+
 PURGE_SQL: Final[tuple[str, ...]] = (
     "DELETE FROM sessions WHERE expires_at < now()",
     (
@@ -119,6 +134,7 @@ PURGE_SQL: Final[tuple[str, ...]] = (
         "OR (window_kind = 'day' AND window_start < now() - interval '90 days') "
         "OR (window_kind = 'month' AND window_start < now() - interval '13 months')"
     ),
+    "DELETE FROM daily_caps WHERE day < (now() AT TIME ZONE 'UTC')::date - 2",
 )
 """The retention statements at the end of ``deploy/schema.sql``, run hourly by the engine."""
 
@@ -189,6 +205,16 @@ def receipt_params(fact: AnswerFactObject) -> tuple[str, str]:
     if "query" in data or "query_text" in data:
         raise ValueError("a receipt must not hold the query")
     return fact.answer_id, canonical_json(fact).decode("utf-8")
+
+
+def daily_cap_read_params(key_hash: str, day: date) -> tuple[str, date]:
+    """Parameters of :data:`READ_DAILY_CAP_SQL` (requirements R3, R5)."""
+    return (key_hash, day)
+
+
+def daily_cap_upsert_params(key_hash: str, day: date, count: int = 1) -> tuple[str, date, int]:
+    """Parameters of :data:`UPSERT_DAILY_CAP_SQL` (requirements R3, R5)."""
+    return (key_hash, day, count)
 
 
 def quota_delta(
@@ -580,6 +606,33 @@ class ReceiptStore:
         return all(self.db.execute_many(sql, [()]) for sql in PURGE_SQL)
 
 
+class PostgresDailyCap:
+    """:class:`~chapterverse.ratelimit.DailyCapStore` over ``daily_caps`` (requirements R3).
+    Thread-safe."""
+
+    def __init__(self, db: Database, *, inner: InMemoryDailyCap | None = None) -> None:
+        self.db = db
+        self.inner = inner if inner is not None else InMemoryDailyCap()
+
+    def __repr__(self) -> str:
+        return f"PostgresDailyCap({self.db!r})"
+
+    def get(self, key_hash: str, day: date) -> int:
+        rows = self.db.fetchall(READ_DAILY_CAP_SQL, daily_cap_read_params(key_hash, day))
+        if rows is not None:
+            if rows:
+                db_val = int(rows[0][0])
+                local_val = self.inner.get(key_hash, day)
+                return max(db_val, local_val)
+            return self.inner.get(key_hash, day)
+        return self.inner.get(key_hash, day)
+
+    def increment(self, key_hash: str, day: date) -> int:
+        val = self.inner.increment(key_hash, day)
+        self.db.submit(UPSERT_DAILY_CAP_SQL, [daily_cap_upsert_params(key_hash, day, 1)])
+        return val
+
+
 @dataclass(frozen=True, slots=True)
 class Persistence:
     """What :func:`open_persistence` gives the app."""
@@ -587,6 +640,7 @@ class Persistence:
     ledger: QuotaLedger
     receipts: ReceiptStore | None
     database: Database | None
+    daily_caps: DailyCapStore | None = None
 
     def close(self) -> None:
         if self.database is not None:
@@ -602,6 +656,16 @@ def open_persistence(
         if not _LOGGED_NO_DATABASE.is_set():
             _LOGGED_NO_DATABASE.set()
             log.info("DATABASE_URL is not set: quota ledger in memory, receipts not stored")
-        return Persistence(ledger=InMemoryLedger(), receipts=None, database=None)
+        return Persistence(
+            ledger=InMemoryLedger(),
+            receipts=None,
+            database=None,
+            daily_caps=InMemoryDailyCap(),
+        )
     db = Database(settings.database_url, connect=connect or _psycopg_connect, background=background)
-    return Persistence(ledger=PostgresLedger(db), receipts=ReceiptStore(db), database=db)
+    return Persistence(
+        ledger=PostgresLedger(db),
+        receipts=ReceiptStore(db),
+        database=db,
+        daily_caps=PostgresDailyCap(db),
+    )

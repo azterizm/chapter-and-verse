@@ -21,6 +21,7 @@ from chapterverse.contracts import (
 from chapterverse.status import StatusDecision, decide_status
 from chapterverse.templates import (
     CLARIFY_DEFAULT,
+    DAILY_CAP_MESSAGE,
     DISCLAIMER_NOTICE,
     EXTRACTIVE_BANNERS,
     NOTICE_CODES,
@@ -29,6 +30,7 @@ from chapterverse.templates import (
     REFUSAL_MESSAGES,
     clarify_event,
     corrections_notice,
+    daily_cap_notice,
     extractive_banner,
     format_date,
     out_of_scope_refusal,
@@ -54,7 +56,11 @@ def _plain(text: str) -> bool:
 def _all_wording() -> list[str]:
     out = [DISCLAIMER_NOTICE, PRIVACY_NOTICE, CLARIFY_DEFAULT]
     out += list(REFUSAL_MESSAGES.values()) + list(EXTRACTIVE_BANNERS.values())
-    out += [provider_fallback_notice().message, provider_warming_notice().message]
+    out += [
+        provider_fallback_notice().message,
+        provider_warming_notice().message,
+        daily_cap_notice().message,
+    ]
     out += [out_of_scope_refusal(SNAPSHOT, r).message for r in OUT_OF_SCOPE_REASONS]
     return out
 
@@ -249,7 +255,22 @@ def test_notices() -> None:
     )
     assert corrections_notice([]) is None
     assert corrections_notice([("a", "a")]) is None
-    codes = {provider_fallback_notice().code, provider_warming_notice().code, event.code}
+    daily = daily_cap_notice()
+    assert daily.code == "daily_cap"
+    assert (
+        daily.message
+        == DAILY_CAP_MESSAGE
+        == (
+            "Daily limit reached for generated answers. The provision text is shown instead. "
+            "It resets at 00:00 UTC."
+        )
+    )
+    codes = {
+        provider_fallback_notice().code,
+        provider_warming_notice().code,
+        event.code,
+        daily.code,
+    }
     assert codes == set(NOTICE_CODES)
 
 

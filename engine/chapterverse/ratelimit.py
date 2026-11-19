@@ -16,14 +16,77 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final
+from datetime import date, datetime
+from typing import Final, Protocol
 
-__all__ = ["DEFAULT_BURST", "DEFAULT_PER_MINUTE", "Decision", "TokenBucket"]
+from chapterverse.contracts import sha256_hex
+
+__all__ = [
+    "DEFAULT_BURST",
+    "DEFAULT_DAILY_ASK_CAP",
+    "DEFAULT_PER_MINUTE",
+    "DailyCapStore",
+    "Decision",
+    "InMemoryDailyCap",
+    "TokenBucket",
+    "client_key_hash",
+]
 
 DEFAULT_PER_MINUTE: Final = 10.0
 """The Worker's ``ASK_LIMITER``: 10 POSTs per 60 s per IP (deploy/README.md section 5)."""
 DEFAULT_BURST: Final = 10
 DEFAULT_MAX_KEYS: Final = 50_000
+DEFAULT_DAILY_ASK_CAP: Final = 40
+RETENTION_DAYS: Final = 2
+
+
+def client_key_hash(client_ip: str, salt: str = "") -> str:
+    """The daily cap client key: ``sha256(salt + client_ip)`` (requirements R2).
+
+    The raw IP is never stored or logged.
+    """
+    return sha256_hex(salt + client_ip)
+
+
+class DailyCapStore(Protocol):
+    """Storage for daily answer counts per client key hash and UTC day."""
+
+    def get(self, key_hash: str, day: date) -> int: ...
+    def increment(self, key_hash: str, day: date) -> int: ...
+
+
+class InMemoryDailyCap:
+    """In-memory daily answer counts per client key hash and UTC day. Thread-safe."""
+
+    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
+        self._lock = threading.Lock()
+        self._counts: dict[tuple[str, date], int] = {}
+        self._clock = clock
+
+    def __repr__(self) -> str:
+        with self._lock:
+            return f"InMemoryDailyCap(entries={len(self._counts)})"
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._counts)
+
+    def get(self, key_hash: str, day: date) -> int:
+        with self._lock:
+            return self._counts.get((key_hash, day), 0)
+
+    def increment(self, key_hash: str, day: date) -> int:
+        with self._lock:
+            val = self._counts.get((key_hash, day), 0) + 1
+            self._counts[(key_hash, day)] = val
+            self._prune(day)
+            return val
+
+    def _prune(self, current_day: date) -> None:
+        """Drop entries older than 2 days."""
+        old = [k for k in self._counts if (current_day - k[1]).days > RETENTION_DAYS]
+        for k in old:
+            del self._counts[k]
 
 
 @dataclass(frozen=True, slots=True)

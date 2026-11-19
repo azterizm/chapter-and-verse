@@ -29,6 +29,7 @@ from chapterverse.status import StatusDecision
 
 __all__ = [
     "CLARIFY_DEFAULT",
+    "DAILY_CAP_MESSAGE",
     "DISCLAIMER_NOTICE",
     "EXTRACTIVE_BANNERS",
     "NOTICE_CODES",
@@ -38,6 +39,7 @@ __all__ = [
     "OutOfScopeReason",
     "clarify_event",
     "corrections_notice",
+    "daily_cap_notice",
     "extractive_banner",
     "format_date",
     "out_of_scope_refusal",
@@ -127,7 +129,17 @@ EXTRACTIVE_BANNERS: Final[Mapping[ExtractiveReason, str]] = {
     ),
 }
 
-NOTICE_CODES: Final = ("provider_fallback", "provider_warming", "corrections_applied")
+DAILY_CAP_MESSAGE: Final = (
+    "Daily limit reached for generated answers. The provision text is shown instead. "
+    "It resets at 00:00 UTC."
+)
+
+NOTICE_CODES: Final = (
+    "provider_fallback",
+    "provider_warming",
+    "corrections_applied",
+    "daily_cap",
+)
 
 _MONTHS: Final = (
     "January", "February", "March", "April", "May", "June", "July", "August", "September",
@@ -296,6 +308,11 @@ def provider_warming_notice() -> NoticeEvent:
         code="provider_warming",
         message="The backup model is starting up. Ask again in a few minutes for a written answer.",
     )
+
+
+def daily_cap_notice() -> NoticeEvent:
+    """The client reached the daily cap for generated answers."""
+    return NoticeEvent(code="daily_cap", message=DAILY_CAP_MESSAGE)
 
 
 def corrections_notice(corrections: Sequence[tuple[str, str]]) -> NoticeEvent | None:

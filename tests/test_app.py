@@ -11,6 +11,7 @@ import logging
 import subprocess
 import sys
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -53,7 +54,13 @@ from chapterverse.pipeline import AskRequest, ModalKV, Pipeline
 from chapterverse.providers import ProviderRotation, make_cloudflare, make_groq, make_modal
 from chapterverse.providers.ledger import InMemoryLedger, ModalLimits
 from chapterverse.providers.presets import JUDGE_PRESET, JUDGE_PRESET_NAME
-from chapterverse.ratelimit import TokenBucket
+from chapterverse.ratelimit import (
+    DEFAULT_DAILY_ASK_CAP,
+    DailyCapStore,
+    InMemoryDailyCap,
+    TokenBucket,
+    client_key_hash,
+)
 
 if TYPE_CHECKING:  # mypy sees tests/ as the package "tests"; pytest puts tests/ on sys.path
     from tests.test_pipeline_fakes import (
@@ -139,16 +146,30 @@ def runtime(
     *,
     limiter: TokenBucket | None = None,
     receipts: ReceiptStore | None = None,
+    daily_caps: DailyCapStore | None = None,
+    daily_ask_cap: int = DEFAULT_DAILY_ASK_CAP,
+    cap_salt: str = "",
     require_access: bool = False,
     **kwargs: Any,
 ) -> Runtime:
-    pipeline = Pipeline(router=router, store=store, rotation=rotation, policy=POLICY)
+    caps = daily_caps if daily_caps is not None else InMemoryDailyCap()
+    pipeline = Pipeline(
+        router=router,
+        store=store,
+        rotation=rotation,
+        policy=POLICY,
+        daily_caps=caps,
+        daily_ask_cap=daily_ask_cap,
+    )
     return Runtime(
         settings=settings(root, **kwargs),
         pipeline=pipeline,
         store=store,
         limiter=limiter if limiter is not None else TokenBucket(per_minute=600, burst=100),
         receipts=receipts,
+        daily_caps=caps,
+        daily_ask_cap=daily_ask_cap,
+        cap_salt=cap_salt,
         require_access=require_access,
     )
 
@@ -867,3 +888,167 @@ def test_load_modal_kv_meters_its_backend(tmp_path: Path) -> None:
     post = kv.make_backend()._post
     assert isinstance(post, MeteredPost)
     assert post.rotation is rotation
+
+
+# ---------------------------------------------------------------------------- daily cap
+
+
+def test_daily_cap_41st_answer_is_extractive_with_notice(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+) -> None:
+    """R5: app-level test that the 41st generated answer is extractive with the notice."""
+    cap_store = InMemoryDailyCap()
+    rotation = FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 40)
+    rt = runtime(
+        fixture_data_root,
+        spy,
+        fixture_text_store,
+        rotation,
+        limiter=TokenBucket(per_minute=6000, burst=1000),
+        daily_caps=cap_store,
+        daily_ask_cap=40,
+        cap_salt="salt-secret",
+    )
+    with TestClient(create_app(rt)) as client:
+        # Answers 1 through 40 are generated
+        for i in range(40):
+            res = ask(client, S124_QUERY)
+            assert res.status_code == 200, f"Request {i + 1} failed"
+            events = parse_sse(res.content)
+            assert any(k == "sentence" for k, _, _ in events), f"Request {i + 1} not generated"
+            receipt = next(d for k, d, _ in events if k == "receipt")
+            assert receipt["fact"]["mode"] == "generated"
+
+        # Today's count is now 40 (at cap)
+        today = datetime.now(UTC).date()
+        key = client_key_hash("testclient", "salt-secret")
+        assert cap_store.get(key, today) == 40
+
+        # The 41st generated answer is extractive with the notice (over cap)
+        res_41 = ask(client, S124_QUERY)
+        assert res_41.status_code == 200
+        events_41 = parse_sse(res_41.content)
+        event_types = [k for k, _, _ in events_41]
+        assert event_types == ["route", "sources", "notice", "extractive", "receipt", "done"]
+
+        notice = next(d for k, d, _ in events_41 if k == "notice")
+        assert notice["code"] == "daily_cap"
+        assert notice["message"] == (
+            "Daily limit reached for generated answers. The provision text is shown instead. "
+            "It resets at 00:00 UTC."
+        )
+
+        extractive = next(d for k, d, _ in events_41 if k == "extractive")
+        assert extractive["type"] == "extractive"
+
+        receipt_41 = next(d for k, d, _ in events_41 if k == "receipt")
+        assert receipt_41["fact"]["mode"] == "extractive"
+
+        # Count did NOT increment for the extractive answer over cap
+        assert cap_store.get(key, today) == 40
+
+
+def test_daily_cap_refusals_and_clarifications_not_counted(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+) -> None:
+    """R1, R5: refusals and clarifications do not count against the daily cap."""
+    cap_store = InMemoryDailyCap()
+    rotation = FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 2)
+    rt = runtime(
+        fixture_data_root,
+        spy,
+        fixture_text_store,
+        rotation,
+        limiter=TokenBucket(per_minute=6000, burst=1000),
+        daily_caps=cap_store,
+        daily_ask_cap=2,
+        cap_salt="salt-secret",
+    )
+    with TestClient(create_app(rt)) as client:
+        today = datetime.now(UTC).date()
+        key = client_key_hash("testclient", "salt-secret")
+
+        # 1. Refusal (unknown statute)
+        res_refusal = ask(client, MARCHWOOD_QUERY)
+        assert res_refusal.status_code == 200
+        events_refusal = parse_sse(res_refusal.content)
+        assert events_refusal[1][0] == "refusal"
+        assert cap_store.get(key, today) == 0
+
+        # 2. Clarification (ambiguous)
+        res_clarify = ask(client, AMBIGUOUS_QUERY)
+        assert res_clarify.status_code == 200
+        events_clarify = parse_sse(res_clarify.content)
+        assert events_clarify[1][0] == "clarify"
+        assert cap_store.get(key, today) == 0
+
+        # 3. Two generated answers (cap is 2)
+        res_1 = ask(client, S124_QUERY)
+        assert res_1.status_code == 200
+        assert cap_store.get(key, today) == 1
+
+        res_2 = ask(client, S124_QUERY)
+        assert res_2.status_code == 200
+        assert cap_store.get(key, today) == 2
+
+        # 4. Third question is over cap -> extractive with daily_cap notice
+        res_3 = ask(client, S124_QUERY)
+        assert res_3.status_code == 200
+        events_3 = parse_sse(res_3.content)
+        assert any(k == "notice" and d["code"] == "daily_cap" for k, d, _ in events_3)
+        assert any(k == "extractive" for k, _, _ in events_3)
+        assert cap_store.get(key, today) == 2
+
+        # 5. Even when over cap, a refusal question still returns the refusal, never an error
+        res_over_refusal = ask(client, MARCHWOOD_QUERY)
+        assert res_over_refusal.status_code == 200
+        events_over_refusal = parse_sse(res_over_refusal.content)
+        assert events_over_refusal[1][0] == "refusal"
+        assert cap_store.get(key, today) == 2
+
+
+def test_daily_cap_salt_and_client_key_isolation(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+) -> None:
+    """R2: salt from env, raw IP is never stored, different clients have separate caps."""
+    cap_store = InMemoryDailyCap()
+    rotation = FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 2)
+    rt = runtime(
+        fixture_data_root,
+        spy,
+        fixture_text_store,
+        rotation,
+        limiter=TokenBucket(per_minute=6000, burst=1000),
+        daily_caps=cap_store,
+        daily_ask_cap=1,
+        cap_salt="custom-secret-salt",
+        require_access=True,
+    )
+    with TestClient(create_app(rt)) as client:
+        today = datetime.now(UTC).date()
+        ip_a = "203.0.113.10"
+        ip_b = "203.0.113.20"
+        headers_a = {**ACCESS, "X-CV-Client-IP": ip_a}
+        headers_b = {**ACCESS, "X-CV-Client-IP": ip_b}
+
+        key_a = client_key_hash(ip_a, "custom-secret-salt")
+        key_b = client_key_hash(ip_b, "custom-secret-salt")
+
+        # Client A asks 1st question -> generated
+        res_a1 = ask(client, S124_QUERY, headers=headers_a)
+        assert res_a1.status_code == 200
+        assert cap_store.get(key_a, today) == 1
+        assert cap_store.get(key_b, today) == 0
+
+        # Client A asks 2nd question -> over cap (cap=1)
+        res_a2 = ask(client, S124_QUERY, headers=headers_a)
+        assert res_a2.status_code == 200
+        events_a2 = parse_sse(res_a2.content)
+        assert any(k == "notice" and d["code"] == "daily_cap" for k, d, _ in events_a2)
+
+        # Client B asks 1st question -> generated (independent client cap)
+        res_b1 = ask(client, S124_QUERY, headers=headers_b)
+        assert res_b1.status_code == 200
+        events_b1 = parse_sse(res_b1.content)
+        assert any(k == "sentence" for k, _, _ in events_b1)
+        assert cap_store.get(key_b, today) == 1

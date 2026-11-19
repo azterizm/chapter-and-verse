@@ -57,7 +57,7 @@ import traceback
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any, Final, Literal
 
 from legal_rag_router import RouteContext, Router, RouteResult, RouteStatus, partition_filter
@@ -105,10 +105,12 @@ from chapterverse.extractive import extractive_answer, highlight_span, query_ter
 from chapterverse.providers.judge_chat import RotationJudgeChat
 from chapterverse.providers.openai_compat import ProviderWarming
 from chapterverse.providers.rotation import ProviderRotation
+from chapterverse.ratelimit import DEFAULT_DAILY_ASK_CAP, DailyCapStore
 from chapterverse.status import StatusDecision, decide_status, instrument_status
 from chapterverse.templates import (
     clarify_event,
     corrections_notice,
+    daily_cap_notice,
     provider_fallback_notice,
     provider_warming_notice,
     route_refusal,
@@ -178,6 +180,8 @@ class AskRequest:
     context: tuple[Coordinate, ...] = ()
     started: float = field(default_factory=time.perf_counter)
     """``time.perf_counter()`` when the request arrived; timings count from here."""
+    client_key: str | None = None
+    """``sha256(salt + client_ip)`` for the daily cap (requirements R2); never the raw IP."""
 
     @property
     def query_sha256(self) -> str:
@@ -526,6 +530,9 @@ class Pipeline:
         config: PipelineConfig | None = None,
         modal_kv: ModalKV | None = None,
         primary_provider: str | None = None,
+        daily_caps: DailyCapStore | None = None,
+        daily_ask_cap: int = DEFAULT_DAILY_ASK_CAP,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -537,6 +544,14 @@ class Pipeline:
             order = rotation.order("generate")
             primary_provider = order[0] if order else None
         self.primary_provider = primary_provider
+        self.daily_caps = daily_caps
+        self.daily_ask_cap = daily_ask_cap
+        self._clock = clock
+
+    def _current_utc_day(self) -> date:
+        if self._clock is not None:
+            return self._clock().astimezone(UTC).date()
+        return datetime.now(UTC).date()
 
     def __repr__(self) -> str:
         return f"Pipeline(rotation={self.rotation!r}, modal_kv={self.modal_kv is not None})"
@@ -694,6 +709,24 @@ class Pipeline:
             frozenset(citations),
             tuple(dict.fromkeys(titles)),
         )
+        today = self._current_utc_day()
+        if (
+            request.client_key is not None
+            and self.daily_caps is not None
+            and self.daily_caps.get(request.client_key, today) >= self.daily_ask_cap
+        ):
+            stream(daily_cap_notice())
+            spans = self._extractive(stream, request, model_windows, "providers_unavailable")
+            self._receipt(
+                stream,
+                result,
+                mode="extractive",
+                version_dates=version_dates,
+                passages=passage_map,
+                spans=spans,
+            )
+            return
+
         mode, sentences, calls, extra_spans = self._answer(
             request,
             stream,
@@ -703,6 +736,8 @@ class Pipeline:
             read=read,
             provisions=provisions,
         )
+        if request.client_key is not None and self.daily_caps is not None and mode == "generated":
+            self.daily_caps.increment(request.client_key, today)
         spans.update(extra_spans)
         self._receipt(
             stream,
