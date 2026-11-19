@@ -19,7 +19,6 @@ export function App() {
   const input = useRef<HTMLTextAreaElement>(null);
 
   const [token, setToken] = useState<string | null>(null);
-  const [verified, setVerified] = useState(TURNSTILE_SITE_KEY === "");
   const [botError, setBotError] = useState<string | null>(null);
   const [resetKey, setResetKey] = useState(0);
 
@@ -39,17 +38,19 @@ export function App() {
       if (busy) return;
       const turnId = nextTurnId.current++;
       const req: AskRequest = { query, session_id: sessionId.current };
-      // The bot-check token goes with the first question of the session only.
-      if (!verified && token) req.turnstile_token = token;
+      if (token) req.turnstile_token = token;
+      // Tokens are single use: consume it immediately and ask the widget for a fresh token.
+      if (req.turnstile_token) {
+        setToken(null);
+        setResetKey((k) => k + 1);
+      }
       dispatch({ type: "start", turnId, query });
       const ctl = new AbortController();
       abort.current = ctl;
-      let routed = false;
       void ask(
         req,
         {
           onEvent(event, raw) {
-            if (event.type === "route") routed = true;
             dispatch({ type: "event", turnId, event, raw });
           },
           onFailure(failure) {
@@ -59,20 +60,14 @@ export function App() {
         ctl.signal,
       ).finally(() => {
         if (abort.current === ctl) abort.current = null;
-        if (verified) return;
-        // A routed question means the server accepted the token. Otherwise the token is spent
-        // (they are single use), so ask the widget for a new one.
-        if (routed) setVerified(true);
-        else setResetKey((k) => k + 1);
       });
-      if (req.turnstile_token) setToken(null);
       requestAnimationFrame(() => {
         document
           .getElementById(`turn-${turnId}`)
           ?.scrollIntoView({ block: "start", behavior: reducedMotion() ? "auto" : "smooth" });
       });
     },
-    [busy, verified, token],
+    [busy, token],
   );
 
   const stop = useCallback(() => abort.current?.abort(), []);
@@ -89,7 +84,7 @@ export function App() {
   }, []);
 
   let blocked: string | null = null;
-  if (!verified && !token) blocked = botError ?? "Waiting for the bot check.";
+  if (TURNSTILE_SITE_KEY && !token) blocked = botError ?? "Waiting for the bot check.";
 
   const active = state.turns.find((t) => t.id === state.activeTurnId) ?? null;
 
@@ -134,7 +129,7 @@ export function App() {
           )}
 
           <QueryBox busy={busy} blocked={blocked} onAsk={askQuery} onStop={stop} inputRef={input} />
-          {TURNSTILE_SITE_KEY && !verified && (
+          {TURNSTILE_SITE_KEY && (
             <Turnstile
               resetKey={resetKey}
               onToken={(t) => {

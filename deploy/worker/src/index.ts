@@ -6,8 +6,10 @@
  *   2. per-IP rate limit (all requests; POST also has the stricter question limit);
  *   3. POST only: JSON content type, body at most MAX_BODY_BYTES (12288; the engine caps the
  *      query itself at MAX_QUERY_BYTES, 4096);
- *   4. POST only: a valid X-Session-Token, or, on POST /api/ask, a Turnstile token that passes
- *      siteverify, after which a new session token is returned in X-Session-Token;
+ *   4. POST only: on POST /api/ask, a fresh Turnstile token that passes siteverify is required
+ *      for every question (missing, invalid or reused: 403). Session token (X-Session-Token) is verified
+ *      if present for conversation state or a new one minted, but never skips Turnstile.
+ *      Other POST routes require an existing session token;
  *   5. forward to the origin with the Access service token and a short header timeout,
  *      streaming the response (SSE) back. No token configured: 503, nothing is forwarded.
  */
@@ -110,7 +112,7 @@ export async function handle(request: Request, env: Env, deps: Deps): Promise<Re
     }
     body = capped.bytes;
 
-    const session = await resolveSession(request, url, config, deps, ip);
+    const session = await resolveSession(request, url, config, deps, ip, body);
     if ("error" in session) return session.error(cors);
     sessionId = session.sid;
     newSessionToken = session.newToken;
@@ -161,6 +163,7 @@ async function resolveSession(
   config: Config,
   deps: Deps,
   ip: string | null,
+  body: Uint8Array | null = null,
 ): Promise<SessionOutcome> {
   if (config.sessionKey === null || config.turnstileSecret === null) {
     // Fail closed: without both secrets no question is accepted.
@@ -168,14 +171,26 @@ async function resolveSession(
   }
   const nowS = Math.floor(deps.now() / 1000);
   const existing = await verifySession(request.headers.get(SESSION_HEADER), config.sessionKey, nowS);
-  if (existing) return { sid: existing.sid, newToken: null };
 
   if (url.pathname !== ASK_PATH) {
+    if (existing) return { sid: existing.sid, newToken: null };
     return { error: (c) => jsonError(401, "session_required", "Start by asking a question.", c) };
   }
-  const token = request.headers.get(TURNSTILE_HEADER);
+
+  let token = request.headers.get(TURNSTILE_HEADER);
+  if (!token && body && body.length > 0) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(body));
+      if (typeof parsed?.turnstile_token === "string" && parsed.turnstile_token.trim()) {
+        token = parsed.turnstile_token.trim();
+      }
+    } catch {
+      // Ignore JSON parse errors here
+    }
+  }
+
   if (!token) {
-    return { error: (c) => jsonError(401, "turnstile_required", "Complete the check, then ask again.", c) };
+    return { error: (c) => jsonError(403, "turnstile_required", "Complete the check, then ask again.", c) };
   }
   const check = await verifyTurnstile(deps.fetch, {
     secret: config.turnstileSecret,
@@ -189,6 +204,7 @@ async function resolveSession(
     console.log(JSON.stringify({ event: "turnstile_failed", reason: check.reason }));
     return { error: (c) => jsonError(403, "turnstile_failed", "The check did not pass. Reload and try again.", c) };
   }
+  if (existing) return { sid: existing.sid, newToken: null };
   const minted = await mintSession(config.sessionKey, nowS, config.sessionTtlSeconds);
   return { sid: minted.claims.sid, newToken: minted.token };
 }

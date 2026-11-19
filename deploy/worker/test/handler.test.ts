@@ -22,11 +22,21 @@ type Call = { url: string; init: RequestInit };
 
 function makeDeps(origin: (url: string, init: RequestInit) => Promise<Response>, siteverifyOk = true) {
   const calls: Call[] = [];
+  const usedTokens = new Set<string>();
   const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init: init ?? {} });
     if (url === SITEVERIFY_URL) {
-      return Response.json({ success: siteverifyOk, hostname: "site.example", action: "ask" });
+      if (!siteverifyOk) {
+        return Response.json({ success: false, hostname: "site.example", action: "ask", "error-codes": ["invalid-input-response"] });
+      }
+      const form = init?.body as FormData;
+      const tok = form?.get("response")?.toString();
+      if (tok && usedTokens.has(tok)) {
+        return Response.json({ success: false, hostname: "site.example", action: "ask", "error-codes": ["timeout-or-duplicate"] });
+      }
+      if (tok) usedTokens.add(tok);
+      return Response.json({ success: true, hostname: "site.example", action: "ask" });
     }
     return origin(url, init ?? {});
   });
@@ -91,22 +101,74 @@ describe("routing and CORS", () => {
 });
 
 describe("questions", () => {
-  it("requires Turnstile on the first question", async () => {
+  it("rejects a question with missing Turnstile token with 403", async () => {
     const { deps, calls } = makeDeps(okOrigin);
     const r = await handle(ask(), ENV, deps);
-    expect(r.status).toBe(401);
+    expect(r.status).toBe(403);
     expect(((await r.json()) as { error: string }).error).toBe("turnstile_required");
     expect(calls).toHaveLength(0);
   });
-  it("refuses a failed Turnstile check", async () => {
+
+  it("refuses a failed Turnstile check with 403", async () => {
     const { deps, calls } = makeDeps(okOrigin, false);
     const r = await handle(ask({ "X-Turnstile-Token": "bad" }), ENV, deps);
     expect(r.status).toBe(403);
+    expect(((await r.json()) as { error: string }).error).toBe("turnstile_failed");
     expect(calls.map((c) => c.url)).toEqual([SITEVERIFY_URL]);
   });
-  it("starts a session, then reuses it without Turnstile", async () => {
+
+  it("rejects consecutive question when Turnstile token is missing", async () => {
     const { deps, calls } = makeDeps(okOrigin);
-    const first = await handle(ask({ "X-Turnstile-Token": "good" }), ENV, deps);
+    const first = await handle(ask({ "X-Turnstile-Token": "good-1" }), ENV, deps);
+    expect(first.status).toBe(200);
+    const sessionToken = first.headers.get("X-Session-Token")!;
+    expect(sessionToken).toBeTruthy();
+
+    calls.length = 0;
+    const second = await handle(ask({ "X-Session-Token": sessionToken }), ENV, deps);
+    expect(second.status).toBe(403);
+    expect(((await second.json()) as { error: string }).error).toBe("turnstile_required");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects consecutive question when Turnstile token is invalid", async () => {
+    const { deps, calls } = makeDeps(okOrigin);
+    const first = await handle(ask({ "X-Turnstile-Token": "good-1" }), ENV, deps);
+    expect(first.status).toBe(200);
+    const sessionToken = first.headers.get("X-Session-Token")!;
+
+    calls.length = 0;
+    // Set fetch to reject siteverify for the invalid token
+    const origFetch = deps.fetch;
+    deps.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === SITEVERIFY_URL) {
+        return Response.json({ success: false, hostname: "site.example", action: "ask", "error-codes": ["invalid-input-response"] });
+      }
+      return origFetch(input, init);
+    }) as unknown as typeof fetch;
+
+    const second = await handle(ask({ "X-Session-Token": sessionToken, "X-Turnstile-Token": "bad-2" }), ENV, deps);
+    expect(second.status).toBe(403);
+    expect(((await second.json()) as { error: string }).error).toBe("turnstile_failed");
+  });
+
+  it("rejects consecutive question when Turnstile token is reused", async () => {
+    const { deps, calls } = makeDeps(okOrigin);
+    const first = await handle(ask({ "X-Turnstile-Token": "good-1" }), ENV, deps);
+    expect(first.status).toBe(200);
+    const sessionToken = first.headers.get("X-Session-Token")!;
+
+    calls.length = 0;
+    const second = await handle(ask({ "X-Session-Token": sessionToken, "X-Turnstile-Token": "good-1" }), ENV, deps);
+    expect(second.status).toBe(403);
+    expect(((await second.json()) as { error: string }).error).toBe("turnstile_failed");
+    expect(calls.map((c) => c.url)).toEqual([SITEVERIFY_URL]);
+  });
+
+  it("accepts valid tokens on consecutive questions and preserves session id", async () => {
+    const { deps, calls } = makeDeps(okOrigin);
+    const first = await handle(ask({ "X-Turnstile-Token": "good-1" }), ENV, deps);
     expect(first.status).toBe(200);
     const token = first.headers.get("X-Session-Token");
     expect(token).toMatch(/^v1\./);
@@ -118,11 +180,12 @@ describe("questions", () => {
     expect(new TextDecoder().decode(upstream.init.body as Uint8Array)).toBe('{"query":"s.124 ERA 1996"}');
 
     calls.length = 0;
-    const second = await handle(ask({ "X-Session-Token": token! }), ENV, deps);
+    const second = await handle(ask({ "X-Session-Token": token!, "X-Turnstile-Token": "good-2" }), ENV, deps);
     expect(second.status).toBe(200);
     expect(second.headers.get("X-Session-Token")).toBeNull();
-    expect(calls.map((c) => c.url)).toEqual(["https://origin.example/api/ask"]);
-    expect((calls[0]!.init.headers as Headers).get("X-CV-Session-Id")).toBe(sid);
+    expect(calls[0]?.url).toBe(SITEVERIFY_URL);
+    expect(calls[1]?.url).toBe("https://origin.example/api/ask");
+    expect((calls[1]!.init.headers as Headers).get("X-CV-Session-Id")).toBe(sid);
   });
   it("drops a client-sent session id header", async () => {
     const { deps, calls } = makeDeps(okOrigin);
@@ -176,14 +239,14 @@ describe("questions", () => {
     const { deps } = makeDeps(okOrigin);
     const statuses: number[] = [];
     for (let i = 0; i < ASK_LIMIT.limit + 1; i++) {
-      statuses.push((await handle(ask({ "X-Turnstile-Token": "good" }), ENV, deps)).status);
+      statuses.push((await handle(ask({ "X-Turnstile-Token": `good-${i}` }), ENV, deps)).status);
     }
     expect(statuses.slice(0, ASK_LIMIT.limit).every((s) => s === 200)).toBe(true);
-    const last = await handle(ask({ "X-Turnstile-Token": "good" }), ENV, deps);
+    const last = await handle(ask({ "X-Turnstile-Token": "good-last" }), ENV, deps);
     expect(last.status).toBe(429);
     expect(last.headers.get("Retry-After")).toBe("60");
     // Another IP is unaffected.
-    expect((await handle(ask({ "X-Turnstile-Token": "good" }, undefined, "198.51.100.7"), ENV, deps)).status).toBe(200);
+    expect((await handle(ask({ "X-Turnstile-Token": "good-other" }, undefined, "198.51.100.7"), ENV, deps)).status).toBe(200);
   });
   it("uses the Rate Limiting binding when bound", async () => {
     const { deps } = makeDeps(okOrigin);

@@ -1,5 +1,6 @@
 import type { CvEvent } from "./events";
 import { readEvents, StreamFault, type StreamItem } from "./sse";
+import { VERIFICATION_FAILED_MESSAGE } from "../turnstileText";
 
 /** API origin. Empty means same origin (the Worker serves /api/*). */
 export const API_BASE: string = (import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
@@ -36,9 +37,13 @@ export const byteLength = (s: string): number => new TextEncoder().encode(s).len
 export async function ask(req: AskRequest, handlers: AskHandlers, signal: AbortSignal): Promise<void> {
   let res: Response;
   try {
+    const headers: Record<string, string> = { "Content-Type": "application/json", Accept: "text/event-stream" };
+    if (req.turnstile_token) {
+      headers["X-Turnstile-Token"] = req.turnstile_token;
+    }
     res = await fetch(`${API_BASE}/api/ask`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers,
       body: JSON.stringify(req),
       signal,
       credentials: "omit",
@@ -93,7 +98,7 @@ function networkMessage(e: unknown): string {
 function httpMessage(status: number): string {
   if (status === 429) return "Too many questions from this address. Wait a minute and try again.";
   if (status === 413) return "The question is too long.";
-  if (status === 403) return "The bot check failed. Reload the page and try again.";
+  if (status === 403) return VERIFICATION_FAILED_MESSAGE;
   if (status >= 500) return `The server failed (HTTP ${status}). Try again shortly.`;
   return `The server refused the request (HTTP ${status}).`;
 }
