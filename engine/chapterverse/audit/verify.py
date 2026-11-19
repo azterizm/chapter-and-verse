@@ -17,7 +17,7 @@ knows them from its ``ChatResult``); missing keys are recorded as ``"unknown"``,
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
-from typing import Any
+from typing import Any, Final
 
 from legal_rag_verifier.judge import Judge, JudgedVerifier
 from legal_rag_verifier.premise import Premise
@@ -29,11 +29,21 @@ from legal_rag_verifier.verifier import (
     VerifierConfig,
 )
 
+from chapterverse.audit.classify import CLASSIFICATION_SHIFT, classification_failure
 from chapterverse.audit.policy import verifier_config
 from chapterverse.audit.refs import REF_CODES, check_refs
 from chapterverse.contracts import JudgeChat, JudgeReply, Policy, ProviderCall
+from chapterverse.windows import passages_by_id
 
-__all__ = ["AuditVerifier", "RecordingJudgeChat", "make_verifier", "reason_codes"]
+__all__ = [
+    "CLASSIFICATION_SHIFT",
+    "AuditVerifier",
+    "RecordingJudgeChat",
+    "make_verifier",
+    "reason_codes",
+]
+
+AUDIT_CODES: Final = REF_CODES | {CLASSIFICATION_SHIFT}
 
 
 class RecordingJudgeChat:
@@ -98,6 +108,28 @@ class AuditVerifier(JudgedVerifier):
                 repair=Repair("ban", 0),
                 details=tuple(str(f) for f in refs.failures),
             )
+        by_id = passages_by_id(premise)
+        passage_to_pos = {p: i for i, p in enumerate(premise.passages)}
+        cited_texts: list[str] = []
+        aligned: list[int] = []
+        for pid in refs.passage_ids:
+            if pid in by_id:
+                p = by_id[pid]
+                cited_texts.append(p.text)
+                if p in passage_to_pos:
+                    aligned.append(passage_to_pos[p])
+        detail = classification_failure(refs.text, cited_texts)
+        if detail is not None:
+            return SentenceVerdict(
+                refs.text,
+                0,
+                len(refs.text),
+                Verdict.ROLLBACK,
+                (Reason.UNGROUNDED_CITATION,),
+                aligned=tuple(aligned),
+                repair=Repair("ban", 0),
+                details=(f"{CLASSIFICATION_SHIFT}: {detail}",),
+            )
         return super().check_sentence(premise, refs.text, query=query)
 
 
@@ -114,10 +146,10 @@ def make_verifier(
 
 
 def reason_codes(reasons: Iterable[str], details: Iterable[str]) -> tuple[str, ...]:
-    """The verifier's reason codes, then any passage-reference codes named in ``details``."""
+    """The verifier's reason codes, then any reference or classification codes in details."""
     out = [str(r) for r in reasons]
     for detail in details:
         code = detail.split(":", 1)[0]
-        if code in REF_CODES and code not in out:
+        if code in AUDIT_CODES and code not in out:
             out.append(code)
     return tuple(out)
