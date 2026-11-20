@@ -4,7 +4,12 @@ import { Footer } from "./components/Footer";
 import { QueryBox } from "./components/QueryBox";
 import { SourcePanel } from "./components/SourcePanel";
 import { Turn } from "./components/Turn";
-import { Turnstile, TURNSTILE_SITE_KEY } from "./components/Turnstile";
+import {
+  Turnstile,
+  TURNSTILE_SITE_KEY,
+  TurnstileGate,
+  TURNSTILE_TIMEOUT_MESSAGE,
+} from "./components/Turnstile";
 import { initialState, reducer, windowAnchor } from "./state/reducer";
 import { EXAMPLES } from "./text";
 
@@ -18,7 +23,7 @@ export function App() {
   const abort = useRef<AbortController | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
-  const [token, setToken] = useState<string | null>(null);
+  const [checking, setChecking] = useState<string | null>(null);
   const [botError, setBotError] = useState<string | null>(null);
   const [resetKey, setResetKey] = useState(0);
 
@@ -31,19 +36,11 @@ export function App() {
     return () => ctl.abort();
   }, []);
 
-  useEffect(() => () => abort.current?.abort(), []);
-
-  const askQuery = useCallback(
-    (query: string) => {
-      if (busy) return;
+  const executeAsk = useCallback(
+    (query: string, turnstileToken: string | null) => {
       const turnId = nextTurnId.current++;
       const req: AskRequest = { query, session_id: sessionId.current };
-      if (token) req.turnstile_token = token;
-      // Tokens are single use: consume it immediately and ask the widget for a fresh token.
-      if (req.turnstile_token) {
-        setToken(null);
-        setResetKey((k) => k + 1);
-      }
+      if (turnstileToken) req.turnstile_token = turnstileToken;
       dispatch({ type: "start", turnId, query });
       const ctl = new AbortController();
       abort.current = ctl;
@@ -67,10 +64,42 @@ export function App() {
           ?.scrollIntoView({ block: "start", behavior: reducedMotion() ? "auto" : "smooth" });
       });
     },
-    [busy, token],
+    [],
   );
 
-  const stop = useCallback(() => abort.current?.abort(), []);
+  const gateRef = useRef<TurnstileGate | null>(null);
+  const getGate = useCallback((): TurnstileGate => {
+    if (gateRef.current == null) {
+      gateRef.current = new TurnstileGate({
+        onSend: (query, token) => executeAsk(query, token),
+        onReset: () => setResetKey((k) => k + 1),
+        onStatusChange: (status) => setChecking(status),
+        onError: (err) => setBotError(err),
+      });
+    }
+    return gateRef.current;
+  }, [executeAsk]);
+
+  useEffect(() => {
+    return () => {
+      gateRef.current?.cancel();
+      abort.current?.abort();
+    };
+  }, []);
+
+  const askQuery = useCallback(
+    (query: string) => {
+      const gate = getGate();
+      if (busy || gate.isWaiting()) return;
+      gate.ask(query, Boolean(TURNSTILE_SITE_KEY));
+    },
+    [busy, getGate],
+  );
+
+  const stop = useCallback(() => {
+    getGate().cancel();
+    abort.current?.abort();
+  }, [getGate]);
 
   const showSource = useCallback((turnId: number, passageId: string) => {
     dispatch({ type: "focus", turnId });
@@ -84,7 +113,11 @@ export function App() {
   }, []);
 
   let blocked: string | null = null;
-  if (TURNSTILE_SITE_KEY && !token) blocked = botError ?? "Waiting for the bot check.";
+  if (botError) {
+    blocked = botError;
+  } else if (checking) {
+    blocked = checking;
+  }
 
   const active = state.turns.find((t) => t.id === state.activeTurnId) ?? null;
 
@@ -123,7 +156,7 @@ export function App() {
           ) : (
             <div className="transcript">
               {state.turns.map((t) => (
-                <Turn key={t.id} turn={t} busy={busy} onAsk={askQuery} onShowSource={showSource} />
+                <Turn key={t.id} turn={t} busy={busy || blocked !== null} onAsk={askQuery} onShowSource={showSource} />
               ))}
             </div>
           )}
@@ -133,10 +166,12 @@ export function App() {
             <Turnstile
               resetKey={resetKey}
               onToken={(t) => {
-                setToken(t);
-                if (t) setBotError(null);
+                getGate().onToken(t);
+                if (t && botError !== TURNSTILE_TIMEOUT_MESSAGE) setBotError(null);
               }}
-              onError={setBotError}
+              onError={(err) => {
+                getGate().onFailure(err);
+              }}
             />
           )}
         </main>
