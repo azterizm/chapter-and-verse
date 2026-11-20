@@ -12,9 +12,15 @@ workers_dev = false
 preview_urls = false
 send_metrics = false
 
-routes = [
-  { pattern = "chapterandverse.memonsystems.com/api/*", zone_name = "memonsystems.com" },
-]
+routes = [ { pattern = "chapterandverse.memonsystems.com", custom_domain = true } ]
+
+# The site and the API share one Worker since 20 Nov 2026 (wrangler 4 creates Workers-based
+# sites instead of classic Pages projects). web/dist must be built with VITE_TURNSTILE_SITE_KEY
+# and deploy/pages/_headers copied into it before deploy.
+[assets]
+directory = "../../web/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
 
 [vars]
 # Origin 1: the Oracle engine through Cloudflare Tunnel (a public hostname of the tunnel).
