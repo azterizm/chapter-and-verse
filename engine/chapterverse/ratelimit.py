@@ -24,9 +24,14 @@ from chapterverse.contracts import sha256_hex
 __all__ = [
     "DEFAULT_BURST",
     "DEFAULT_DAILY_ASK_CAP",
+    "DEFAULT_GLOBAL_DAILY_ANSWERS",
+    "DEFAULT_HOSTING_SHARE",
     "DEFAULT_PER_MINUTE",
+    "DailyBudgetCounts",
+    "DailyBudgetStore",
     "DailyCapStore",
     "Decision",
+    "InMemoryDailyBudget",
     "InMemoryDailyCap",
     "TokenBucket",
     "client_key_hash",
@@ -37,6 +42,8 @@ DEFAULT_PER_MINUTE: Final = 10.0
 DEFAULT_BURST: Final = 10
 DEFAULT_MAX_KEYS: Final = 50_000
 DEFAULT_DAILY_ASK_CAP: Final = 40
+DEFAULT_GLOBAL_DAILY_ANSWERS: Final = 400
+DEFAULT_HOSTING_SHARE: Final = 0.2
 RETENTION_DAYS: Final = 2
 
 
@@ -53,6 +60,59 @@ class DailyCapStore(Protocol):
 
     def get(self, key_hash: str, day: date) -> int: ...
     def increment(self, key_hash: str, day: date) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DailyBudgetCounts:
+    """Answer counts for a UTC day across all users."""
+
+    total: int = 0
+    hosting: int = 0
+
+
+class DailyBudgetStore(Protocol):
+    """Storage for daily answer counts across all users and UTC day."""
+
+    def get(self, day: date) -> DailyBudgetCounts: ...
+    def increment(self, day: date, *, hosting: bool = False) -> DailyBudgetCounts: ...
+
+
+class InMemoryDailyBudget:
+    """In-memory daily answer counts across all users and UTC day. Thread-safe."""
+
+    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
+        self._lock = threading.Lock()
+        self._counts: dict[date, DailyBudgetCounts] = {}
+        self._clock = clock
+
+    def __repr__(self) -> str:
+        with self._lock:
+            return f"InMemoryDailyBudget(days={len(self._counts)})"
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._counts)
+
+    def get(self, day: date) -> DailyBudgetCounts:
+        with self._lock:
+            return self._counts.get(day, DailyBudgetCounts())
+
+    def increment(self, day: date, *, hosting: bool = False) -> DailyBudgetCounts:
+        with self._lock:
+            curr = self._counts.get(day, DailyBudgetCounts())
+            val = DailyBudgetCounts(
+                total=curr.total + 1,
+                hosting=curr.hosting + (1 if hosting else 0),
+            )
+            self._counts[day] = val
+            self._prune(day)
+            return val
+
+    def _prune(self, current_day: date) -> None:
+        """Drop entries older than 2 days."""
+        old = [d for d in self._counts if (current_day - d).days > RETENTION_DAYS]
+        for d in old:
+            del self._counts[d]
 
 
 class InMemoryDailyCap:

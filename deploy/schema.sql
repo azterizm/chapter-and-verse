@@ -114,6 +114,17 @@ CREATE TABLE IF NOT EXISTS daily_caps (
 );
 COMMENT ON TABLE daily_caps IS 'Per-client answer count per UTC day. Key is sha256(salt + ip).';
 
+-- ---------------------------------------------------------------- daily budget
+-- Global generated answer counts per UTC day (specs/global-budget/requirements.md).
+-- Counts across all users: total answers and hosting-network answers.
+-- Retention: deleted after 2 days.
+CREATE TABLE IF NOT EXISTS daily_budget (
+    day      date    PRIMARY KEY,
+    total    int     NOT NULL DEFAULT 0,
+    hosting  int     NOT NULL DEFAULT 0
+);
+COMMENT ON TABLE daily_budget IS 'Global generated answer counts per UTC day across all users.';
+
 INSERT INTO schema_version (version) VALUES (1) ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -131,3 +142,4 @@ COMMIT;
 --     OR (window_kind = 'day'    AND window_start < now() - interval '90 days')
 --     OR (window_kind = 'month'  AND window_start < now() - interval '13 months');
 -- DELETE FROM daily_caps WHERE day < (now() AT TIME ZONE 'UTC')::date - 2;
+-- DELETE FROM daily_budget WHERE day < (now() AT TIME ZONE 'UTC')::date - 2;

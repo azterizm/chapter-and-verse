@@ -32,6 +32,7 @@ __all__ = [
     "DAILY_CAP_MESSAGE",
     "DISCLAIMER_NOTICE",
     "EXTRACTIVE_BANNERS",
+    "GLOBAL_BUDGET_MESSAGE",
     "NOTICE_CODES",
     "OUT_OF_SCOPE_REASONS",
     "PRIVACY_NOTICE",
@@ -42,6 +43,7 @@ __all__ = [
     "daily_cap_notice",
     "extractive_banner",
     "format_date",
+    "global_budget_notice",
     "out_of_scope_refusal",
     "plain_text",
     "provider_fallback_notice",
@@ -134,11 +136,17 @@ DAILY_CAP_MESSAGE: Final = (
     "It resets at 00:00 UTC."
 )
 
+GLOBAL_BUDGET_MESSAGE: Final = (
+    "Today's generated answers are used up. The provision text is shown instead. "
+    "It resets at 00:00 UTC."
+)
+
 NOTICE_CODES: Final = (
     "provider_fallback",
     "provider_warming",
     "corrections_applied",
     "daily_cap",
+    "global_budget",
 )
 
 _MONTHS: Final = (
@@ -313,6 +321,11 @@ def provider_warming_notice() -> NoticeEvent:
 def daily_cap_notice() -> NoticeEvent:
     """The client reached the daily cap for generated answers."""
     return NoticeEvent(code="daily_cap", message=DAILY_CAP_MESSAGE)
+
+
+def global_budget_notice() -> NoticeEvent:
+    """The daily limit for generated answers across all users was reached."""
+    return NoticeEvent(code="global_budget", message=GLOBAL_BUDGET_MESSAGE)
 
 
 def corrections_notice(corrections: Sequence[tuple[str, str]]) -> NoticeEvent | None:

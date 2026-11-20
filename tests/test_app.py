@@ -40,7 +40,7 @@ from chapterverse.app import (
 )
 from chapterverse.audit.modal_path import ModalSGLangBackend
 from chapterverse.audit.policy import build_policy
-from chapterverse.config import Settings
+from chapterverse.config import ConfigError, Settings
 from chapterverse.contracts import (
     AllProvidersUnavailable,
     AnswerFactObject,
@@ -56,7 +56,12 @@ from chapterverse.providers.ledger import InMemoryLedger, ModalLimits
 from chapterverse.providers.presets import JUDGE_PRESET, JUDGE_PRESET_NAME
 from chapterverse.ratelimit import (
     DEFAULT_DAILY_ASK_CAP,
+    DEFAULT_GLOBAL_DAILY_ANSWERS,
+    DEFAULT_HOSTING_SHARE,
+    DailyBudgetCounts,
+    DailyBudgetStore,
     DailyCapStore,
+    InMemoryDailyBudget,
     InMemoryDailyCap,
     TokenBucket,
     client_key_hash,
@@ -150,9 +155,13 @@ def runtime(
     daily_ask_cap: int = DEFAULT_DAILY_ASK_CAP,
     cap_salt: str = "",
     require_access: bool = False,
+    daily_budget: DailyBudgetStore | None = None,
+    global_daily_answers: int = DEFAULT_GLOBAL_DAILY_ANSWERS,
+    hosting_share: float = DEFAULT_HOSTING_SHARE,
     **kwargs: Any,
 ) -> Runtime:
     caps = daily_caps if daily_caps is not None else InMemoryDailyCap()
+    budget = daily_budget if daily_budget is not None else InMemoryDailyBudget()
     pipeline = Pipeline(
         router=router,
         store=store,
@@ -160,6 +169,9 @@ def runtime(
         policy=POLICY,
         daily_caps=caps,
         daily_ask_cap=daily_ask_cap,
+        daily_budget=budget,
+        global_daily_answers=global_daily_answers,
+        hosting_share=hosting_share,
     )
     return Runtime(
         settings=settings(root, **kwargs),
@@ -170,6 +182,9 @@ def runtime(
         daily_caps=caps,
         daily_ask_cap=daily_ask_cap,
         cap_salt=cap_salt,
+        daily_budget=budget,
+        global_daily_answers=global_daily_answers,
+        hosting_share=hosting_share,
         require_access=require_access,
     )
 
@@ -581,6 +596,7 @@ def test_build_runtime_from_the_environment(
         "GEN_PROVIDERS": "groq,cloudflare",
         "JUDGE_PROVIDERS": "groq,cloudflare",
         "RATE_LIMIT_PER_MINUTE": "30",
+        "CAP_SALT": "test-cap-salt-at-least-32-chars-long",
     }
     with TestClient(create_app(lambda: build_runtime(env))) as client:
         health = client.get("/api/health").json()
@@ -1052,3 +1068,216 @@ def test_daily_cap_salt_and_client_key_isolation(
         events_b1 = parse_sse(res_b1.content)
         assert any(k == "sentence" for k, _, _ in events_b1)
         assert cap_store.get(key_b, today) == 1
+
+
+def test_cap_salt_required_when_daily_cap_active(
+    fixture_data_root: Path, built_store: Path
+) -> None:
+    """R7: when per-IP daily cap is active, CAP_SALT must be at least 32 characters."""
+    base_env = {
+        "LEGAL_DATA_ROOT": str(fixture_data_root),
+        "STORE_DIR": str(built_store),
+        "GEN_PROVIDERS": "groq",
+        "JUDGE_PROVIDERS": "groq",
+    }
+
+    # 1. Empty salt with active cap (default 40) -> ConfigError
+    with pytest.raises(ConfigError, match="CAP_SALT must be at least 32 characters"):
+        build_runtime({**base_env, "CAP_SALT": ""})
+
+    # 2. Too-short salt (< 32 chars) -> ConfigError
+    with pytest.raises(ConfigError, match="CAP_SALT must be at least 32 characters"):
+        build_runtime({**base_env, "CAP_SALT": "short-salt-under-32-characters"})
+
+    # 3. Exactly 32 characters -> succeeds
+    rt_32 = build_runtime({**base_env, "CAP_SALT": "a" * 32})
+    assert rt_32.cap_salt == "a" * 32
+    rt_32.shutdown()
+
+    # 4. Inactive daily cap (DAILY_ASK_CAP=0) -> empty salt allowed
+    rt_inactive = build_runtime({**base_env, "DAILY_ASK_CAP": "0", "CAP_SALT": ""})
+    assert rt_inactive.daily_ask_cap == 0
+    rt_inactive.shutdown()
+
+
+def test_global_budget_under_and_over_cap(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+) -> None:
+    """R1, R2, R3, R5: answers under and over global cap, notice and receipt mode."""
+    budget_store = InMemoryDailyBudget()
+    rotation = FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 2)
+    rt = runtime(
+        fixture_data_root,
+        spy,
+        fixture_text_store,
+        rotation,
+        limiter=TokenBucket(per_minute=6000, burst=1000),
+        daily_budget=budget_store,
+        global_daily_answers=2,
+        daily_ask_cap=100,  # per-IP cap is high
+    )
+    with TestClient(create_app(rt)) as client:
+        today = datetime.now(UTC).date()
+
+        # 1. First question under cap -> generated
+        res_1 = ask(client, S124_QUERY)
+        assert res_1.status_code == 200
+        events_1 = parse_sse(res_1.content)
+        assert any(k == "sentence" for k, _, _ in events_1)
+        assert budget_store.get(today) == DailyBudgetCounts(total=1, hosting=0)
+
+        # 2. Second question under cap -> generated (hits cap of 2)
+        res_2 = ask(client, S124_QUERY)
+        assert res_2.status_code == 200
+        events_2 = parse_sse(res_2.content)
+        assert any(k == "sentence" for k, _, _ in events_2)
+        assert budget_store.get(today) == DailyBudgetCounts(total=2, hosting=0)
+
+        # 3. Third question over global cap -> extractive with global_budget notice
+        res_3 = ask(client, S124_QUERY)
+        assert res_3.status_code == 200
+        events_3 = parse_sse(res_3.content)
+        event_types = [k for k, _, _ in events_3]
+        assert event_types == ["route", "sources", "notice", "extractive", "receipt", "done"]
+
+        notice = next(d for k, d, _ in events_3 if k == "notice")
+        assert notice["code"] == "global_budget"
+        assert notice["message"] == (
+            "Today's generated answers are used up. The provision text is shown instead. "
+            "It resets at 00:00 UTC."
+        )
+
+        extractive = next(d for k, d, _ in events_3 if k == "extractive")
+        assert extractive["type"] == "extractive"
+
+        receipt_3 = next(d for k, d, _ in events_3 if k == "receipt")
+        assert receipt_3["fact"]["mode"] == "extractive"
+
+        # Count did NOT increment for over-budget extractive answer
+        assert budget_store.get(today) == DailyBudgetCounts(total=2, hosting=0)
+
+
+def test_global_budget_hosting_share(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+) -> None:
+    """R2, R3, R5: hosting share limit enforced for hosting network class."""
+    budget_store = InMemoryDailyBudget()
+    rotation = FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 10)
+    rt = runtime(
+        fixture_data_root,
+        spy,
+        fixture_text_store,
+        rotation,
+        limiter=TokenBucket(per_minute=6000, burst=1000),
+        daily_budget=budget_store,
+        global_daily_answers=10,
+        hosting_share=0.2,  # at most 2 hosting answers
+        daily_ask_cap=100,
+        require_access=True,
+    )
+    with TestClient(create_app(rt)) as client:
+        today = datetime.now(UTC).date()
+        hosting_headers = {**ACCESS, "X-CV-Net-Class": "hosting", "X-CV-Client-IP": "203.0.113.1"}
+        other_headers = {**ACCESS, "X-CV-Net-Class": "other", "X-CV-Client-IP": "203.0.113.2"}
+
+        # 1. First hosting request (1/2) -> generated
+        res_h1 = ask(client, S124_QUERY, headers=hosting_headers)
+        assert res_h1.status_code == 200
+        events_h1 = parse_sse(res_h1.content)
+        assert any(k == "sentence" for k, _, _ in events_h1)
+        assert budget_store.get(today) == DailyBudgetCounts(total=1, hosting=1)
+
+        # 2. Second hosting request (2/2) -> generated
+        res_h2 = ask(client, S124_QUERY, headers=hosting_headers)
+        assert res_h2.status_code == 200
+        events_h2 = parse_sse(res_h2.content)
+        assert any(k == "sentence" for k, _, _ in events_h2)
+        assert budget_store.get(today) == DailyBudgetCounts(total=2, hosting=2)
+
+        # 3. Third hosting request -> over hosting share! Extractive with notice
+        res_h3 = ask(client, S124_QUERY, headers=hosting_headers)
+        assert res_h3.status_code == 200
+        events_h3 = parse_sse(res_h3.content)
+        assert any(k == "notice" and d["code"] == "global_budget" for k, d, _ in events_h3)
+        assert any(k == "extractive" for k, _, _ in events_h3)
+        # Hosting count did not increment
+        assert budget_store.get(today) == DailyBudgetCounts(total=2, hosting=2)
+
+        # 4. Ordinary (other) request -> total=2 is well under 10, so generated answer succeeds!
+        res_o1 = ask(client, S124_QUERY, headers=other_headers)
+        assert res_o1.status_code == 200
+        events_o1 = parse_sse(res_o1.content)
+        assert any(k == "sentence" for k, _, _ in events_o1)
+        # Total increments, hosting remains 2
+        assert budget_store.get(today) == DailyBudgetCounts(total=3, hosting=2)
+
+
+def test_global_budget_missing_or_untrusted_network_class(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+) -> None:
+    """R2, R5: missing class or untrusted header counts as other."""
+    budget_store = InMemoryDailyBudget()
+    rotation = FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 5)
+    rt = runtime(
+        fixture_data_root,
+        spy,
+        fixture_text_store,
+        rotation,
+        limiter=TokenBucket(per_minute=6000, burst=1000),
+        daily_budget=budget_store,
+        global_daily_answers=10,
+        hosting_share=0.2,
+        daily_ask_cap=100,
+        require_access=False,  # Access headers not required -> X-CV-Net-Class header is NOT trusted
+    )
+    with TestClient(create_app(rt)) as client:
+        today = datetime.now(UTC).date()
+
+        # Net-class hosting without Access check is untrusted; counts as other
+        res = ask(client, S124_QUERY, headers={"X-CV-Net-Class": "hosting"})
+        assert res.status_code == 200
+        events_res = parse_sse(res.content)
+        assert any(k == "sentence" for k, _, _ in events_res)
+        # total=1, hosting=0 (not counted as hosting!)
+        assert budget_store.get(today) == DailyBudgetCounts(total=1, hosting=0)
+
+        # Request with missing header -> counts as other
+        res_missing = ask(client, S124_QUERY)
+        assert res_missing.status_code == 200
+        events_missing = parse_sse(res_missing.content)
+        assert any(k == "sentence" for k, _, _ in events_missing)
+        # total=2, hosting=0
+        assert budget_store.get(today) == DailyBudgetCounts(total=2, hosting=0)
+
+
+def test_daily_cap_checked_before_global_budget(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+) -> None:
+    """R4: per-IP daily cap is checked first."""
+    cap_store = InMemoryDailyCap()
+    budget_store = InMemoryDailyBudget()
+    rotation = FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 5)
+    rt = runtime(
+        fixture_data_root,
+        spy,
+        fixture_text_store,
+        rotation,
+        limiter=TokenBucket(per_minute=6000, burst=1000),
+        daily_caps=cap_store,
+        daily_ask_cap=1,
+        daily_budget=budget_store,
+        global_daily_answers=1,
+        cap_salt="secret-salt-longer-than-32-chars",
+    )
+    with TestClient(create_app(rt)) as client:
+        # First request uses both 1 per-IP quota and 1 global quota
+        res_1 = ask(client, S124_QUERY)
+        assert res_1.status_code == 200
+
+        # Second request from the same client: both per-IP and global are at limit.
+        # Per-IP daily cap is checked first, so notice code is "daily_cap"
+        res_2 = ask(client, S124_QUERY)
+        assert res_2.status_code == 200
+        events_2 = parse_sse(res_2.content)
+        notice = next(d for k, d, _ in events_2 if k == "notice")
+        assert notice["code"] == "daily_cap"

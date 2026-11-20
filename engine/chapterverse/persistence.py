@@ -35,7 +35,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
@@ -49,25 +49,42 @@ from chapterverse.providers.ledger import (
     seconds_to_utc_midnight,
     seconds_to_utc_month,
 )
-from chapterverse.ratelimit import DailyCapStore, InMemoryDailyCap
+from chapterverse.ratelimit import (
+    RETENTION_DAYS,
+    DailyBudgetCounts,
+    DailyBudgetStore,
+    DailyCapStore,
+    InMemoryDailyBudget,
+    InMemoryDailyCap,
+)
 
 __all__ = [
+    "DELETE_OLD_DAILY_BUDGET_SQL",
+    "DELETE_OLD_DAILY_CAPS_SQL",
     "INSERT_RECEIPT_SQL",
     "PURGE_SQL",
+    "READ_DAILY_BUDGET_SQL",
     "READ_DAILY_CAP_SQL",
     "READ_TOTALS_SQL",
+    "UPSERT_DAILY_BUDGET_SQL",
     "UPSERT_DAILY_CAP_SQL",
     "UPSERT_QUOTA_SQL",
     "WINDOW_KINDS",
     "Database",
     "Persistence",
+    "PostgresDailyBudget",
     "PostgresDailyCap",
     "PostgresLedger",
     "QuotaDelta",
     "ReceiptStore",
     "Totals",
+    "daily_budget_cleanup_params",
+    "daily_budget_read_params",
+    "daily_budget_upsert_params",
     "daily_cap_read_params",
     "daily_cap_upsert_params",
+    "daily_caps_cleanup_params",
+    "daily_cleanup_sql",
     "open_persistence",
     "quota_delta",
     "quota_params",
@@ -120,6 +137,22 @@ UPSERT_DAILY_CAP_SQL: Final = (
 )
 """Increment one client's generated answer count for a UTC day (requirements R3)."""
 
+READ_DAILY_BUDGET_SQL: Final = "SELECT total, hosting FROM daily_budget WHERE day = %s"
+"""Read global generated answer counts for a UTC day (requirements R1)."""
+
+UPSERT_DAILY_BUDGET_SQL: Final = (
+    "INSERT INTO daily_budget (day, total, hosting) VALUES (%s, %s, %s) "
+    "ON CONFLICT (day) DO UPDATE SET total = daily_budget.total + EXCLUDED.total, "
+    "hosting = daily_budget.hosting + EXCLUDED.hosting"
+)
+"""Increment global generated answer counts for a UTC day (requirements R1)."""
+
+DELETE_OLD_DAILY_BUDGET_SQL: Final = "DELETE FROM daily_budget WHERE day < %s"
+"""Delete daily budget rows older than the cutoff date (requirements R8)."""
+
+DELETE_OLD_DAILY_CAPS_SQL: Final = "DELETE FROM daily_caps WHERE day < %s"
+"""Delete daily caps rows older than the cutoff date (requirements R8)."""
+
 PURGE_SQL: Final[tuple[str, ...]] = (
     "DELETE FROM sessions WHERE expires_at < now()",
     (
@@ -135,6 +168,7 @@ PURGE_SQL: Final[tuple[str, ...]] = (
         "OR (window_kind = 'month' AND window_start < now() - interval '13 months')"
     ),
     "DELETE FROM daily_caps WHERE day < (now() AT TIME ZONE 'UTC')::date - 2",
+    "DELETE FROM daily_budget WHERE day < (now() AT TIME ZONE 'UTC')::date - 2",
 )
 """The retention statements at the end of ``deploy/schema.sql``, run hourly by the engine."""
 
@@ -215,6 +249,39 @@ def daily_cap_read_params(key_hash: str, day: date) -> tuple[str, date]:
 def daily_cap_upsert_params(key_hash: str, day: date, count: int = 1) -> tuple[str, date, int]:
     """Parameters of :data:`UPSERT_DAILY_CAP_SQL` (requirements R3, R5)."""
     return (key_hash, day, count)
+
+
+def daily_budget_read_params(day: date) -> tuple[date]:
+    """Parameters of :data:`READ_DAILY_BUDGET_SQL` (requirements R1, R5)."""
+    return (day,)
+
+
+def daily_budget_upsert_params(day: date, *, hosting: bool = False) -> tuple[date, int, int]:
+    """Parameters of :data:`UPSERT_DAILY_BUDGET_SQL` (requirements R1, R5)."""
+    return (day, 1, 1 if hosting else 0)
+
+
+def daily_budget_cleanup_params(
+    current_day: date, retention_days: int = RETENTION_DAYS
+) -> tuple[date]:
+    """Parameters of :data:`DELETE_OLD_DAILY_BUDGET_SQL` (requirements R8)."""
+    return (current_day - timedelta(days=retention_days),)
+
+
+def daily_caps_cleanup_params(
+    current_day: date, retention_days: int = RETENTION_DAYS
+) -> tuple[date]:
+    """Parameters of :data:`DELETE_OLD_DAILY_CAPS_SQL` (requirements R8)."""
+    return (current_day - timedelta(days=retention_days),)
+
+
+def daily_cleanup_sql(table: str = "daily_budget") -> str:
+    """SQL statement to delete rows older than 2 days from a daily table (requirements R8)."""
+    if table == "daily_budget":
+        return "DELETE FROM daily_budget WHERE day < (now() AT TIME ZONE 'UTC')::date - 2"
+    if table == "daily_caps":
+        return "DELETE FROM daily_caps WHERE day < (now() AT TIME ZONE 'UTC')::date - 2"
+    raise ValueError(f"unknown table {table!r}")
 
 
 def quota_delta(
@@ -633,6 +700,44 @@ class PostgresDailyCap:
         return val
 
 
+class PostgresDailyBudget:
+    """:class:`~chapterverse.ratelimit.DailyBudgetStore` over ``daily_budget`` (requirements R1).
+    Thread-safe."""
+
+    def __init__(self, db: Database, *, inner: InMemoryDailyBudget | None = None) -> None:
+        self.db = db
+        self.inner = inner if inner is not None else InMemoryDailyBudget()
+        self._last_pruned: date | None = None
+        self._lock = threading.Lock()
+
+    def __repr__(self) -> str:
+        return f"PostgresDailyBudget({self.db!r})"
+
+    def get(self, day: date) -> DailyBudgetCounts:
+        rows = self.db.fetchall(READ_DAILY_BUDGET_SQL, daily_budget_read_params(day))
+        local = self.inner.get(day)
+        if rows is not None:
+            if rows:
+                db_total = int(rows[0][0])
+                db_hosting = int(rows[0][1])
+                return DailyBudgetCounts(
+                    total=max(db_total, local.total),
+                    hosting=max(db_hosting, local.hosting),
+                )
+            return local
+        return local
+
+    def increment(self, day: date, *, hosting: bool = False) -> DailyBudgetCounts:
+        val = self.inner.increment(day, hosting=hosting)
+        self.db.submit(UPSERT_DAILY_BUDGET_SQL, [daily_budget_upsert_params(day, hosting=hosting)])
+        with self._lock:
+            if self._last_pruned != day:
+                self._last_pruned = day
+                self.db.submit(DELETE_OLD_DAILY_BUDGET_SQL, [daily_budget_cleanup_params(day)])
+                self.db.submit(DELETE_OLD_DAILY_CAPS_SQL, [daily_caps_cleanup_params(day)])
+        return val
+
+
 @dataclass(frozen=True, slots=True)
 class Persistence:
     """What :func:`open_persistence` gives the app."""
@@ -641,6 +746,7 @@ class Persistence:
     receipts: ReceiptStore | None
     database: Database | None
     daily_caps: DailyCapStore | None = None
+    daily_budget: DailyBudgetStore | None = None
 
     def close(self) -> None:
         if self.database is not None:
@@ -661,6 +767,7 @@ def open_persistence(
             receipts=None,
             database=None,
             daily_caps=InMemoryDailyCap(),
+            daily_budget=InMemoryDailyBudget(),
         )
     db = Database(settings.database_url, connect=connect or _psycopg_connect, background=background)
     return Persistence(
@@ -668,4 +775,5 @@ def open_persistence(
         receipts=ReceiptStore(db),
         database=db,
         daily_caps=PostgresDailyCap(db),
+        daily_budget=PostgresDailyBudget(db),
     )

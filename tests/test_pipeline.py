@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -45,6 +45,7 @@ from chapterverse.pipeline import (
 )
 from chapterverse.providers import ProviderRotation, ProviderWarming, make_cloudflare, make_groq
 from chapterverse.providers.presets import JUDGE_PRESET_NAME
+from chapterverse.ratelimit import DailyBudgetCounts, InMemoryDailyBudget, InMemoryDailyCap
 
 if TYPE_CHECKING:  # mypy sees tests/ as the package "tests"; pytest puts tests/ on sys.path
     from tests.test_pipeline_fakes import (
@@ -661,3 +662,89 @@ def test_merge_calls_replaces_placeholders_in_order() -> None:
     ]  # fmt: skip
     mismatch = merge_calls(gen, judge[:1])
     assert [c.provider for c in mismatch] == ["groq", "groq", "cloudflare"]
+
+
+def test_pipeline_global_budget_under_and_over(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    budget = InMemoryDailyBudget()
+    pipeline = make(
+        fixture_router,
+        store,
+        FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 2),
+        daily_budget=budget,
+        global_daily_answers=1,
+    )
+    today = date(2026, 11, 20)
+    pipeline._clock = lambda: datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+    # 1. Under cap: generated answer
+    _events_1, out_1 = run(pipeline, S124_QUERY)
+    assert out_1.mode == "generated"
+    assert budget.get(today) == DailyBudgetCounts(1, 0)
+
+    # 2. Over cap: extractive with global_budget notice
+    events_2, out_2 = run(pipeline, S124_QUERY)
+    assert out_2.mode == "extractive"
+    notices = [e for e in events_2 if isinstance(e, NoticeEvent)]
+    assert any(n.code == "global_budget" for n in notices)
+    assert budget.get(today) == DailyBudgetCounts(1, 0)
+
+
+def test_pipeline_global_budget_hosting_share(fixture_router: Router, store: CountingStore) -> None:
+    budget = InMemoryDailyBudget()
+    pipeline = make(
+        fixture_router,
+        store,
+        FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 10),
+        daily_budget=budget,
+        global_daily_answers=10,
+        hosting_share=0.2,  # max 2 hosting answers
+    )
+    today = date(2026, 11, 20)
+    pipeline._clock = lambda: datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+    # Hosting answers 1 and 2 succeed
+    _, out_h1 = run(pipeline, S124_QUERY, net_class="hosting")
+    assert out_h1.mode == "generated"
+    _, out_h2 = run(pipeline, S124_QUERY, net_class="hosting")
+    assert out_h2.mode == "generated"
+    assert budget.get(today) == DailyBudgetCounts(2, 2)
+
+    # 3rd hosting answer is over hosting share -> extractive with global_budget notice
+    events_h3, out_h3 = run(pipeline, S124_QUERY, net_class="hosting")
+    assert out_h3.mode == "extractive"
+    assert any(isinstance(e, NoticeEvent) and e.code == "global_budget" for e in events_h3)
+    assert budget.get(today) == DailyBudgetCounts(2, 2)
+
+    # Other network class is allowed (total 2 < 10)
+    _, out_o1 = run(pipeline, S124_QUERY, net_class="other")
+    assert out_o1.mode == "generated"
+    assert budget.get(today) == DailyBudgetCounts(3, 2)
+
+
+def test_pipeline_daily_cap_checked_first(fixture_router: Router, store: CountingStore) -> None:
+    caps = InMemoryDailyCap()
+    budget = InMemoryDailyBudget()
+    pipeline = make(
+        fixture_router,
+        store,
+        FakeRotation([(f"{GOOD1} {GOOD2}", "stop")] * 5),
+        daily_caps=caps,
+        daily_ask_cap=1,
+        daily_budget=budget,
+        global_daily_answers=1,
+    )
+    pipeline._clock = lambda: datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+    # 1. 1st query from k1 -> generated
+    _, out_1 = run(pipeline, S124_QUERY, client_key="k1")
+    assert out_1.mode == "generated"
+
+    # 2. 2nd query from k1 -> both daily cap and global budget would trigger,
+    # but daily_cap is checked first so daily_cap notice is emitted
+    events_2, out_2 = run(pipeline, S124_QUERY, client_key="k1")
+    assert out_2.mode == "extractive"
+    notices = [e for e in events_2 if isinstance(e, NoticeEvent)]
+    assert any(n.code == "daily_cap" for n in notices)
+    assert not any(n.code == "global_budget" for n in notices)

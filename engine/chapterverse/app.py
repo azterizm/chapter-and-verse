@@ -112,6 +112,9 @@ from chapterverse.providers.presets import JUDGE_PRESET, JUDGE_PRESET_NAME, MODA
 from chapterverse.providers.rotation import ProviderRotation, RotationConfig
 from chapterverse.ratelimit import (
     DEFAULT_DAILY_ASK_CAP,
+    DEFAULT_GLOBAL_DAILY_ANSWERS,
+    DEFAULT_HOSTING_SHARE,
+    DailyBudgetStore,
     DailyCapStore,
     TokenBucket,
     client_key_hash,
@@ -143,6 +146,10 @@ ACCESS_ID: Final = "cf-access-client-id"
 ACCESS_SECRET: Final = "cf-access-client-secret"  # noqa: S105 - a header name
 CLIENT_IP_HEADER: Final = "x-cv-client-ip"
 """Set by the Worker from ``CF-Connecting-IP``; any client-sent copy is dropped there."""
+NET_CLASS_HEADER: Final = "x-cv-net-class"
+"""Network classification ('hosting', etc.); trusted only with valid Access headers."""
+MIN_CAP_SALT_LEN: Final = 32
+"""Minimum character length for ``CAP_SALT`` when daily cap is active (requirements R7)."""
 SSE_HEADERS: Final = {"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"}
 HF_RESOLVE: Final = "https://huggingface.co/{model}/resolve/{revision}/{name}"
 
@@ -165,6 +172,19 @@ def _env_number(environ: Mapping[str, str], name: str, default: float) -> float:
         raise ConfigError(f"{name} is not a number") from None
     if not math.isfinite(value) or value <= 0:
         raise ConfigError(f"{name} must be positive")
+    return value
+
+
+def _env_nonnegative_number(environ: Mapping[str, str], name: str, default: float) -> float:
+    text = _env(environ, name)
+    if text is None:
+        return default
+    try:
+        value = float(text)
+    except ValueError:
+        raise ConfigError(f"{name} is not a number") from None
+    if not math.isfinite(value) or value < 0:
+        raise ConfigError(f"{name} must be non-negative")
     return value
 
 
@@ -196,6 +216,9 @@ class Runtime:
     daily_caps: DailyCapStore | None = None
     daily_ask_cap: int = DEFAULT_DAILY_ASK_CAP
     cap_salt: str = ""
+    daily_budget: DailyBudgetStore | None = None
+    global_daily_answers: int = DEFAULT_GLOBAL_DAILY_ANSWERS
+    hosting_share: float = DEFAULT_HOSTING_SHARE
     require_access: bool = False
     workers: int = 4
     pin_check: Callable[[], object] | None = None
@@ -209,6 +232,10 @@ class Runtime:
         if self.daily_caps is not None and self.pipeline.daily_caps is None:
             self.pipeline.daily_caps = self.daily_caps
             self.pipeline.daily_ask_cap = self.daily_ask_cap
+        if self.daily_budget is not None and self.pipeline.daily_budget is None:
+            self.pipeline.daily_budget = self.daily_budget
+            self.pipeline.global_daily_answers = self.global_daily_answers
+            self.pipeline.hosting_share = self.hosting_share
 
     @property
     def max_body_bytes(self) -> int:
@@ -516,8 +543,21 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     rotation = ProviderRotation.from_config(config, ledger=persistence.ledger)
     log.info("rotation: %r", rotation)
     modal_kv = load_modal_kv(rotation, settings, env)
-    daily_ask_cap = int(_env_number(env, "DAILY_ASK_CAP", DEFAULT_DAILY_ASK_CAP))
+    daily_ask_cap_raw = _env(env, "DAILY_ASK_CAP")
+    daily_ask_cap = (
+        int(_env_nonnegative_number(env, "DAILY_ASK_CAP", DEFAULT_DAILY_ASK_CAP))
+        if daily_ask_cap_raw is not None
+        else DEFAULT_DAILY_ASK_CAP
+    )
     cap_salt = _env(env, "CAP_SALT") or ""
+    if daily_ask_cap > 0 and len(cap_salt) < MIN_CAP_SALT_LEN:
+        raise ConfigError("CAP_SALT must be at least 32 characters when the daily cap is active")
+    global_daily_answers = int(
+        _env_number(env, "GLOBAL_DAILY_ANSWERS", DEFAULT_GLOBAL_DAILY_ANSWERS)
+    )
+    hosting_share = _env_nonnegative_number(env, "HOSTING_SHARE", DEFAULT_HOSTING_SHARE)
+    if hosting_share > 1.0:
+        raise ConfigError("HOSTING_SHARE must be between 0 and 1")
     pipeline = Pipeline(
         router=router,
         store=store,
@@ -526,6 +566,9 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         modal_kv=modal_kv,
         daily_caps=persistence.daily_caps,
         daily_ask_cap=daily_ask_cap,
+        daily_budget=persistence.daily_budget,
+        global_daily_answers=global_daily_answers,
+        hosting_share=hosting_share,
     )
     limiter = TokenBucket(
         per_minute=_env_number(env, "RATE_LIMIT_PER_MINUTE", 10.0),
@@ -552,6 +595,9 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         daily_caps=persistence.daily_caps,
         daily_ask_cap=daily_ask_cap,
         cap_salt=cap_salt,
+        daily_budget=persistence.daily_budget,
+        global_daily_answers=global_daily_answers,
+        hosting_share=hosting_share,
         require_access=_env_flag(env, "REQUIRE_ACCESS_HEADERS"),
         workers=int(_env_number(env, "ASK_WORKERS", 4.0)),
         pin_check=lambda: pin_check(rotation),
@@ -630,6 +676,17 @@ def _client_key(request: Request, *, access_checked: bool) -> str:
     return request.client.host if request.client is not None else "unknown"
 
 
+def _net_class(request: Request, *, access_checked: bool) -> str:
+    """The network class: the Worker's ``X-CV-Net-Class`` when the request passed the
+    Access-header check (``REQUIRE_ACCESS_HEADERS=1``). Without that check the header could
+    come from anyone, so it is never trusted. Missing class counts as 'other'."""
+    if access_checked:
+        forwarded = request.headers.get(NET_CLASS_HEADER, "").strip().lower()
+        if forwarded:
+            return forwarded
+    return "other"
+
+
 async def _read_body(request: Request, limit: int) -> bytes:
     length = request.headers.get("content-length")
     if length is not None and length.isdigit() and int(length) > limit:
@@ -650,6 +707,7 @@ def parse_ask(
     max_query_bytes: int,
     started: float | None = None,
     client_key: str | None = None,
+    net_class: str = "other",
 ) -> AskRequest:
     """The question in a ``POST /api/ask`` body.
 
@@ -694,6 +752,7 @@ def parse_ask(
         context=tuple(raw_context),
         started=time.perf_counter() if started is None else started,
         client_key=client_key,
+        net_class=net_class,
     )
 
 
@@ -818,6 +877,7 @@ async def _admit(rt: Runtime, request: Request, started: float) -> AskRequest:
     if rt.require_access and not _has_access(request.headers):
         raise _Reject(403, "access_required", "This origin is reached through the site.")
     raw_ip = _client_key(request, access_checked=rt.require_access)
+    net_class = _net_class(request, access_checked=rt.require_access)
     decision = rt.limiter.take(raw_ip)
     if not decision.allowed:
         raise _Reject(
@@ -833,6 +893,7 @@ async def _admit(rt: Runtime, request: Request, started: float) -> AskRequest:
         max_query_bytes=rt.settings.max_query_bytes,
         started=started,
         client_key=client_key,
+        net_class=net_class,
     )
 
 

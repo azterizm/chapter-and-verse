@@ -105,12 +105,19 @@ from chapterverse.extractive import extractive_answer, highlight_span, query_ter
 from chapterverse.providers.judge_chat import RotationJudgeChat
 from chapterverse.providers.openai_compat import ProviderWarming
 from chapterverse.providers.rotation import ProviderRotation
-from chapterverse.ratelimit import DEFAULT_DAILY_ASK_CAP, DailyCapStore
+from chapterverse.ratelimit import (
+    DEFAULT_DAILY_ASK_CAP,
+    DEFAULT_GLOBAL_DAILY_ANSWERS,
+    DEFAULT_HOSTING_SHARE,
+    DailyBudgetStore,
+    DailyCapStore,
+)
 from chapterverse.status import StatusDecision, decide_status, instrument_status
 from chapterverse.templates import (
     clarify_event,
     corrections_notice,
     daily_cap_notice,
+    global_budget_notice,
     provider_fallback_notice,
     provider_warming_notice,
     route_refusal,
@@ -182,6 +189,8 @@ class AskRequest:
     """``time.perf_counter()`` when the request arrived; timings count from here."""
     client_key: str | None = None
     """``sha256(salt + client_ip)`` for the daily cap (requirements R2); never the raw IP."""
+    net_class: str = "other"
+    """The network class (``X-CV-Net-Class`` header); defaults to 'other'."""
 
     @property
     def query_sha256(self) -> str:
@@ -532,6 +541,9 @@ class Pipeline:
         primary_provider: str | None = None,
         daily_caps: DailyCapStore | None = None,
         daily_ask_cap: int = DEFAULT_DAILY_ASK_CAP,
+        daily_budget: DailyBudgetStore | None = None,
+        global_daily_answers: int = DEFAULT_GLOBAL_DAILY_ANSWERS,
+        hosting_share: float = DEFAULT_HOSTING_SHARE,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.router = router
@@ -546,6 +558,9 @@ class Pipeline:
         self.primary_provider = primary_provider
         self.daily_caps = daily_caps
         self.daily_ask_cap = daily_ask_cap
+        self.daily_budget = daily_budget
+        self.global_daily_answers = global_daily_answers
+        self.hosting_share = hosting_share
         self._clock = clock
 
     def _current_utc_day(self) -> date:
@@ -651,6 +666,26 @@ class Pipeline:
                 kept.append(row)
         return read
 
+    def _budget_notice(self, request: AskRequest, today: date) -> NoticeEvent | None:
+        if (
+            request.client_key is not None
+            and self.daily_caps is not None
+            and self.daily_ask_cap > 0
+            and self.daily_caps.get(request.client_key, today) >= self.daily_ask_cap
+        ):
+            return daily_cap_notice()
+
+        if self.daily_budget is not None and self.global_daily_answers > 0:
+            budget = self.daily_budget.get(today)
+            hosting_cap = int(self.global_daily_answers * self.hosting_share)
+            is_hosting = request.net_class == "hosting"
+            over_global = budget.total >= self.global_daily_answers
+            over_hosting = is_hosting and budget.hosting >= hosting_cap
+            if over_global or over_hosting:
+                return global_budget_notice()
+
+        return None
+
     def _bounded(
         self,
         request: AskRequest,
@@ -710,12 +745,9 @@ class Pipeline:
             tuple(dict.fromkeys(titles)),
         )
         today = self._current_utc_day()
-        if (
-            request.client_key is not None
-            and self.daily_caps is not None
-            and self.daily_caps.get(request.client_key, today) >= self.daily_ask_cap
-        ):
-            stream(daily_cap_notice())
+        notice = self._budget_notice(request, today)
+        if notice is not None:
+            stream(notice)
             spans = self._extractive(stream, request, model_windows, "providers_unavailable")
             self._receipt(
                 stream,
@@ -736,8 +768,15 @@ class Pipeline:
             read=read,
             provisions=provisions,
         )
-        if request.client_key is not None and self.daily_caps is not None and mode == "generated":
-            self.daily_caps.increment(request.client_key, today)
+        if mode == "generated" and bool(calls):
+            if (
+                request.client_key is not None
+                and self.daily_caps is not None
+                and self.daily_ask_cap > 0
+            ):
+                self.daily_caps.increment(request.client_key, today)
+            if self.daily_budget is not None and self.global_daily_answers > 0:
+                self.daily_budget.increment(today, hosting=(request.net_class == "hosting"))
         spans.update(extra_spans)
         self._receipt(
             stream,

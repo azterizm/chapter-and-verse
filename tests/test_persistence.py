@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,19 +19,29 @@ from chapterverse import persistence
 from chapterverse.config import Settings
 from chapterverse.contracts import AnswerFactObject, canonical_json, sha256_hex
 from chapterverse.persistence import (
+    DELETE_OLD_DAILY_BUDGET_SQL,
+    DELETE_OLD_DAILY_CAPS_SQL,
     INSERT_RECEIPT_SQL,
     PURGE_SQL,
+    READ_DAILY_BUDGET_SQL,
     READ_DAILY_CAP_SQL,
     READ_TOTALS_SQL,
+    UPSERT_DAILY_BUDGET_SQL,
     UPSERT_DAILY_CAP_SQL,
     UPSERT_QUOTA_SQL,
     Database,
+    PostgresDailyBudget,
     PostgresDailyCap,
     PostgresLedger,
     QuotaDelta,
     ReceiptStore,
+    daily_budget_cleanup_params,
+    daily_budget_read_params,
+    daily_budget_upsert_params,
     daily_cap_read_params,
     daily_cap_upsert_params,
+    daily_caps_cleanup_params,
+    daily_cleanup_sql,
     open_persistence,
     quota_delta,
     quota_params,
@@ -40,7 +50,7 @@ from chapterverse.persistence import (
     window_start,
 )
 from chapterverse.providers.ledger import CallUsage, InMemoryLedger, QuotaLedger, RateHeaders
-from chapterverse.ratelimit import client_key_hash
+from chapterverse.ratelimit import DailyBudgetCounts, client_key_hash
 
 REPO = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 11, 19, 13, 47, 31, 5, tzinfo=UTC)
@@ -353,6 +363,88 @@ def test_postgres_daily_cap_unit_without_database() -> None:
     assert down_cap.increment(key, today) == 1
     assert down_cap.get(key, today) == 1
     assert "PostgresDailyCap" in repr(down_cap)
+
+
+def test_daily_budget_sql_builders_and_schema() -> None:
+    today = NOW.date()
+
+    # Read builder
+    read_params = daily_budget_read_params(today)
+    assert read_params == (today,)
+    assert READ_DAILY_BUDGET_SQL.count("%s") == len(read_params)
+    assert "daily_budget" in READ_DAILY_BUDGET_SQL
+
+    # Upsert builder
+    upsert_params_other = daily_budget_upsert_params(today, hosting=False)
+    assert upsert_params_other == (today, 1, 0)
+    assert UPSERT_DAILY_BUDGET_SQL.count("%s") == len(upsert_params_other)
+    assert "ON CONFLICT (day) DO UPDATE" in UPSERT_DAILY_BUDGET_SQL
+
+    upsert_params_hosting = daily_budget_upsert_params(today, hosting=True)
+    assert upsert_params_hosting == (today, 1, 1)
+
+    # Cleanup builders
+    cleanup_params = daily_budget_cleanup_params(today, 2)
+    assert cleanup_params == (today - timedelta(days=2),)
+    assert DELETE_OLD_DAILY_BUDGET_SQL.count("%s") == len(cleanup_params)
+
+    caps_cleanup = daily_caps_cleanup_params(today, 2)
+    assert caps_cleanup == (today - timedelta(days=2),)
+    assert DELETE_OLD_DAILY_CAPS_SQL.count("%s") == len(caps_cleanup)
+
+    # daily_cleanup_sql statement builder
+    assert daily_cleanup_sql("daily_budget") == (
+        "DELETE FROM daily_budget WHERE day < (now() AT TIME ZONE 'UTC')::date - 2"
+    )
+    assert daily_cleanup_sql("daily_caps") == (
+        "DELETE FROM daily_caps WHERE day < (now() AT TIME ZONE 'UTC')::date - 2"
+    )
+    with pytest.raises(ValueError, match="unknown table"):
+        daily_cleanup_sql("other_table")
+
+    # Retention statement in PURGE_SQL
+    assert any("daily_budget" in stmt for stmt in PURGE_SQL)
+    assert any("daily_caps" in stmt for stmt in PURGE_SQL)
+
+
+def test_postgres_daily_budget_unit_without_database() -> None:
+    today = NOW.date()
+    log: list[tuple[str, Any]] = []
+
+    # 1. DB has existing count: get reads from DB
+    budget = PostgresDailyBudget(fake_db(log, [(10, 3)]))
+    assert budget.get(today) == DailyBudgetCounts(10, 3)
+    assert log[0] == (READ_DAILY_BUDGET_SQL, (today,))
+
+    # 2. DB has no row (empty): returns 0, 0
+    empty_log: list[tuple[str, Any]] = []
+    budget_empty = PostgresDailyBudget(fake_db(empty_log, []))
+    assert budget_empty.get(today) == DailyBudgetCounts(0, 0)
+
+    # 3. Increment submits UPSERT_DAILY_BUDGET_SQL and cleanup queries
+    write_log: list[tuple[str, Any]] = []
+    db = fake_db(write_log, [])
+    budget_write = PostgresDailyBudget(db)
+    assert budget_write.increment(today, hosting=False) == DailyBudgetCounts(1, 0)
+    assert budget_write.increment(today, hosting=True) == DailyBudgetCounts(2, 1)
+    cutoff = today - timedelta(days=2)
+    assert write_log == [
+        (UPSERT_DAILY_BUDGET_SQL, (today, 1, 0)),
+        (DELETE_OLD_DAILY_BUDGET_SQL, (cutoff,)),
+        (DELETE_OLD_DAILY_CAPS_SQL, (cutoff,)),
+        (UPSERT_DAILY_BUDGET_SQL, (today, 1, 1)),
+    ]
+
+    # 4. Fallback to inner when DB is down
+    def fail_connect(_: str) -> FakeConnection:
+        raise RuntimeError("down")
+
+    down_db = Database("postgres://u:pw@h/db", connect=fail_connect, background=False)
+    down_budget = PostgresDailyBudget(down_db)
+    assert down_budget.get(today) == DailyBudgetCounts(0, 0)
+    assert down_budget.increment(today, hosting=True) == DailyBudgetCounts(1, 1)
+    assert down_budget.get(today) == DailyBudgetCounts(1, 1)
+    assert "PostgresDailyBudget" in repr(down_budget)
 
 
 # ---------------------------------------------------------------------- real Postgres

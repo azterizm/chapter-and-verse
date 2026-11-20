@@ -10,7 +10,11 @@ import pytest
 from chapterverse.contracts import sha256_hex
 from chapterverse.ratelimit import (
     DEFAULT_DAILY_ASK_CAP,
+    DEFAULT_GLOBAL_DAILY_ANSWERS,
+    DEFAULT_HOSTING_SHARE,
+    DailyBudgetCounts,
     Decision,
+    InMemoryDailyBudget,
     InMemoryDailyCap,
     TokenBucket,
     client_key_hash,
@@ -191,3 +195,81 @@ def test_in_memory_daily_cap_thread_safe() -> None:
 
     assert cap_store.get(key, today) == 100
     assert "InMemoryDailyCap" in repr(cap_store)
+
+
+def test_in_memory_daily_budget_under_and_over() -> None:
+    budget = InMemoryDailyBudget()
+    today = date(2026, 11, 20)
+    tomorrow = date(2026, 11, 21)
+
+    assert budget.get(today) == DailyBudgetCounts(0, 0)
+
+    # 1. Non-hosting request
+    c1 = budget.increment(today, hosting=False)
+    assert c1 == DailyBudgetCounts(1, 0)
+    assert budget.get(today) == DailyBudgetCounts(1, 0)
+
+    # 2. Hosting request
+    c2 = budget.increment(today, hosting=True)
+    assert c2 == DailyBudgetCounts(2, 1)
+    assert budget.get(today) == DailyBudgetCounts(2, 1)
+
+    # 3. Another non-hosting
+    c3 = budget.increment(today, hosting=False)
+    assert c3 == DailyBudgetCounts(3, 1)
+    assert budget.get(today) == DailyBudgetCounts(3, 1)
+
+    # Tomorrow is unaffected
+    assert budget.get(tomorrow) == DailyBudgetCounts(0, 0)
+
+    assert DEFAULT_GLOBAL_DAILY_ANSWERS == 400
+    assert DEFAULT_HOSTING_SHARE == 0.2
+
+
+def test_in_memory_daily_budget_pruning() -> None:
+    budget = InMemoryDailyBudget()
+    d0 = date(2026, 11, 1)
+    d1 = date(2026, 11, 2)
+    d2 = date(2026, 11, 3)
+    d4 = date(2026, 11, 5)  # > 2 days after d0 and d1
+
+    budget.increment(d0, hosting=True)
+    budget.increment(d1, hosting=False)
+    budget.increment(d2, hosting=True)
+    assert len(budget) == 3
+
+    budget.increment(d4, hosting=False)
+    assert budget.get(d0) == DailyBudgetCounts(0, 0)
+    assert budget.get(d1) == DailyBudgetCounts(0, 0)
+    assert budget.get(d2) == DailyBudgetCounts(1, 1)
+    assert budget.get(d4) == DailyBudgetCounts(1, 0)
+    assert len(budget) == 2
+
+
+def test_in_memory_daily_budget_thread_safe() -> None:
+    budget = InMemoryDailyBudget()
+    today = date(2026, 11, 20)
+
+    def worker_hosting() -> None:
+        for _ in range(25):
+            budget.increment(today, hosting=True)
+
+    def worker_other() -> None:
+        for _ in range(25):
+            budget.increment(today, hosting=False)
+
+    threads = [
+        threading.Thread(target=worker_hosting),
+        threading.Thread(target=worker_hosting),
+        threading.Thread(target=worker_other),
+        threading.Thread(target=worker_other),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    res = budget.get(today)
+    assert res.total == 100
+    assert res.hosting == 50
+    assert "InMemoryDailyBudget" in repr(budget)

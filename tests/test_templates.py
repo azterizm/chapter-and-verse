@@ -24,6 +24,7 @@ from chapterverse.templates import (
     DAILY_CAP_MESSAGE,
     DISCLAIMER_NOTICE,
     EXTRACTIVE_BANNERS,
+    GLOBAL_BUDGET_MESSAGE,
     NOTICE_CODES,
     OUT_OF_SCOPE_REASONS,
     PRIVACY_NOTICE,
@@ -33,6 +34,7 @@ from chapterverse.templates import (
     daily_cap_notice,
     extractive_banner,
     format_date,
+    global_budget_notice,
     out_of_scope_refusal,
     plain_text,
     provider_fallback_notice,
@@ -60,6 +62,7 @@ def _all_wording() -> list[str]:
         provider_fallback_notice().message,
         provider_warming_notice().message,
         daily_cap_notice().message,
+        global_budget_notice().message,
     ]
     out += [out_of_scope_refusal(SNAPSHOT, r).message for r in OUT_OF_SCOPE_REASONS]
     return out
@@ -265,11 +268,22 @@ def test_notices() -> None:
             "It resets at 00:00 UTC."
         )
     )
+    budget = global_budget_notice()
+    assert budget.code == "global_budget"
+    assert (
+        budget.message
+        == GLOBAL_BUDGET_MESSAGE
+        == (
+            "Today's generated answers are used up. The provision text is shown instead. "
+            "It resets at 00:00 UTC."
+        )
+    )
     codes = {
         provider_fallback_notice().code,
         provider_warming_notice().code,
         event.code,
         daily.code,
+        budget.code,
     }
     assert codes == set(NOTICE_CODES)
 
