@@ -209,8 +209,22 @@ def test_ambiguous_citation_asks(fixture_router: Router, store: CountingStore) -
     clarify = events[1]
     assert clarify.type == "clarify"
     assert [c.coordinate for c in clarify.candidates] == ["uk/ukpga/1996/18/s124"]
+    assert clarify.candidates[0].label == "s.124 Employment Rights Act 1996"
     assert outcome.mode == "clarify"
     assert outcome.fact is None
+
+
+def test_ambiguous_query_keeps_provision_on_candidates(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    # R1.1, R1.2: ambiguous query naming provision resolves ERA 1996 to provision coord
+    events, outcome = run(make(fixture_router, store, FakeRotation()), "ERA section 124")
+    assert [e.type for e in events] == ["route", "clarify", "done"]
+    clarify = events[1]
+    assert clarify.type == "clarify"
+    assert [c.coordinate for c in clarify.candidates] == ["uk/ukpga/1996/18/s124"]
+    assert clarify.candidates[0].label == "s.124 Employment Rights Act 1996"
+    assert outcome.mode == "clarify"
 
 
 def test_unresolved_refuses(fixture_router: Router, store: CountingStore) -> None:
@@ -387,7 +401,12 @@ def test_outage_after_a_sentence_closes_the_answer(
     assert [e.type for e in events] == [
         "route", "sources", "sentence", "notice", "receipt", "done"
     ]  # fmt: skip
-    assert of(events, NoticeEvent)[0].code == "providers_unavailable"
+    (notice,) = of(events, NoticeEvent)
+    assert notice.code == "providers_unavailable"
+    assert notice.message == (
+        "The model became unavailable while writing. Every sentence shown was checked; "
+        "there may have been more to say."
+    )
     assert receipt(events).fact.mode == "generated"
 
 

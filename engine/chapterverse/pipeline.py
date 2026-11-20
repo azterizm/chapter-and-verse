@@ -120,6 +120,7 @@ from chapterverse.templates import (
     global_budget_notice,
     provider_fallback_notice,
     provider_warming_notice,
+    providers_unavailable_notice,
     route_refusal,
     status_refusal,
 )
@@ -150,13 +151,7 @@ MAX_PROMPT_WINDOWS: Final = 8
 MAX_CONTEXT_COORDINATES: Final = 10
 """Previous-turn coordinates accepted as routing context."""
 
-INCOMPLETE_NOTICE: Final = NoticeEvent(
-    code="providers_unavailable",
-    message=(
-        "The model became unavailable before the answer was finished. The sentences shown "
-        "were checked; the rest of the answer is missing."
-    ),
-)
+INCOMPLETE_NOTICE: Final = providers_unavailable_notice()
 NO_TEXT_NOTICE: Final = NoticeEvent(
     code="no_text",
     message="The cited provision holds no text in force to answer from.",
@@ -617,7 +612,7 @@ class Pipeline:
             stream(notice)
         if result.status is RouteStatus.AMBIGUOUS:
             stream.outcome.mode = "clarify"
-            stream(clarify_event(result))
+            stream(clarify_event(result, router=self.router, store=self.store))
             stream.done()
             return
         if result.status is not RouteStatus.BOUNDED:

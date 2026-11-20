@@ -14,8 +14,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
 from typing import Final, Literal
 
-from legal_rag_router import Candidate, RouteResult, RouteStatus
+from legal_rag_router import Candidate, Coordinate, Router, RouteResult, RouteStatus
 
+from chapterverse.citations import provision_label
 from chapterverse.contracts import (
     REFUSAL_KINDS,
     ClarifyEvent,
@@ -24,6 +25,7 @@ from chapterverse.contracts import (
     NoticeEvent,
     RefusalEvent,
     TemporalStatus,
+    TextStore,
 )
 from chapterverse.status import StatusDecision
 
@@ -33,6 +35,7 @@ __all__ = [
     "DISCLAIMER_NOTICE",
     "EXTRACTIVE_BANNERS",
     "GLOBAL_BUDGET_MESSAGE",
+    "INCOMPLETE_MESSAGE",
     "NOTICE_CODES",
     "OUT_OF_SCOPE_REASONS",
     "PRIVACY_NOTICE",
@@ -48,6 +51,7 @@ __all__ = [
     "plain_text",
     "provider_fallback_notice",
     "provider_warming_notice",
+    "providers_unavailable_notice",
     "refusal",
     "route_refusal",
     "status_refusal",
@@ -141,12 +145,18 @@ GLOBAL_BUDGET_MESSAGE: Final = (
     "It resets at 00:00 UTC."
 )
 
+INCOMPLETE_MESSAGE: Final = (
+    "The model became unavailable while writing. Every sentence shown was checked; "
+    "there may have been more to say."
+)
+
 NOTICE_CODES: Final = (
     "provider_fallback",
     "provider_warming",
     "corrections_applied",
     "daily_cap",
     "global_budget",
+    "providers_unavailable",
 )
 
 _MONTHS: Final = (
@@ -289,9 +299,66 @@ def out_of_scope_refusal(snapshot: str, reason: OutOfScopeReason | None = None) 
     return RefusalEvent(kind="out_of_scope", message=message, suggestions=(), snapshot=snapshot)
 
 
-def clarify_event(result: RouteResult) -> ClarifyEvent:
+def _format_candidate_label(base_label: str, coord: str) -> str:
+    head = provision_label(coord)
+    base = plain_text(base_label)
+    if not head:
+        return base
+    if base.startswith(head):
+        return base
+    if base.endswith(f" {head}"):
+        base = base[: -len(head) - 1].strip()
+    elif head.startswith("s.") and base.lower().endswith(f" section {head[2:]}"):
+        base = base[: -len(f" section {head[2:]}")].strip()
+    return f"{head} {base}"
+
+
+def _resolve_candidate_coordinate(
+    candidate_coord: str,
+    provision: str | None,
+    router: Router | None,
+    store: TextStore | None,
+) -> str:
+    parsed = Coordinate.parse(candidate_coord)
+    if parsed.provision:
+        return candidate_coord
+    if not provision:
+        return candidate_coord
+
+    if router is not None:
+        try:
+            res = router.route(f"{candidate_coord} {provision}")
+        except (KeyError, ValueError):
+            pass
+        else:
+            if res.status is RouteStatus.BOUNDED and res.coordinates:
+                return str(res.coordinates[0])
+
+    if store is not None:
+        m = re.match(r"^(?:s\.?|section\s*)(\d+[a-z]*)$", provision.strip(), re.IGNORECASE)
+        if m:
+            prov_coord = f"{candidate_coord}/s{m.group(1)}"
+            try:
+                store.get(prov_coord)
+            except KeyError:
+                pass
+            else:
+                return prov_coord
+
+    return candidate_coord
+
+
+def clarify_event(
+    result: RouteResult,
+    *,
+    router: Router | None = None,
+    store: TextStore | None = None,
+) -> ClarifyEvent:
     """The clarifying question for ``ROUTE_AMBIGUOUS``: the router's own question and
     candidates; never a silent pick.
+
+    When the query names a provision, each candidate carries the coordinate of that provision
+    inside the candidate instrument when that provision exists in that instrument (requirements R1).
 
     Raises:
         ValueError: the result is not ambiguous.
@@ -299,7 +366,28 @@ def clarify_event(result: RouteResult) -> ClarifyEvent:
     if result.status is not RouteStatus.AMBIGUOUS:
         raise ValueError(f"{result.status.value} is not ambiguous")
     question = plain_text(result.clarification or "") or CLARIFY_DEFAULT
-    return ClarifyEvent(question=question, candidates=_labelled(result.candidates))
+
+    provision: str | None = None
+    if hasattr(result, "citation") and getattr(result.citation, "provision", None):
+        provision = result.citation.provision
+    elif result.citations:
+        for cit in result.citations:
+            if cit.provision:
+                provision = cit.provision
+                break
+
+    candidates: list[LabelledCoordinate] = []
+    for c in result.candidates:
+        coord = _resolve_candidate_coordinate(str(c.coordinate), provision, router, store)
+        label = _format_candidate_label(c.label, coord)
+        candidates.append(LabelledCoordinate(coordinate=coord, label=label))
+
+    return ClarifyEvent(question=question, candidates=tuple(candidates))
+
+
+def providers_unavailable_notice() -> NoticeEvent:
+    """The model became unavailable after at least one sentence was written."""
+    return NoticeEvent(code="providers_unavailable", message=INCOMPLETE_MESSAGE)
 
 
 def provider_fallback_notice() -> NoticeEvent:

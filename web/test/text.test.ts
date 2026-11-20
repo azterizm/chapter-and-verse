@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { NOTICE_TITLE, noticeTitle } from "../src/text";
+import { NOTICE_MESSAGE, NOTICE_TITLE, noticeTitle } from "../src/text";
 
 describe("notice titles", () => {
   const REQUIRED_CODES = [
@@ -29,5 +29,12 @@ describe("notice titles", () => {
     for (const code of REQUIRED_CODES) {
       expect(NOTICE_TITLE).toHaveProperty(code);
     }
+  });
+
+  it("has updated wording for providers_unavailable (R2)", () => {
+    expect(NOTICE_TITLE.providers_unavailable).toBe("Answer may be incomplete");
+    expect(NOTICE_MESSAGE.providers_unavailable).toBe(
+      "The model became unavailable while writing. Every sentence shown was checked; there may have been more to say.",
+    );
   });
 });

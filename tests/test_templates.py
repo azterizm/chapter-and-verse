@@ -7,7 +7,15 @@ from datetime import date
 from typing import Any
 
 import pytest
-from legal_rag_router import Candidate, Coordinate, NextAction, Router, RouteResult, RouteStatus
+from legal_rag_router import (
+    Candidate,
+    Coordinate,
+    NextAction,
+    ParsedCitation,
+    Router,
+    RouteResult,
+    RouteStatus,
+)
 
 from chapterverse.contracts import (
     REFUSAL_KINDS,
@@ -25,6 +33,7 @@ from chapterverse.templates import (
     DISCLAIMER_NOTICE,
     EXTRACTIVE_BANNERS,
     GLOBAL_BUDGET_MESSAGE,
+    INCOMPLETE_MESSAGE,
     NOTICE_CODES,
     OUT_OF_SCOPE_REASONS,
     PRIVACY_NOTICE,
@@ -39,6 +48,7 @@ from chapterverse.templates import (
     plain_text,
     provider_fallback_notice,
     provider_warming_notice,
+    providers_unavailable_notice,
     refusal,
     route_refusal,
     status_refusal,
@@ -63,6 +73,7 @@ def _all_wording() -> list[str]:
         provider_warming_notice().message,
         daily_cap_notice().message,
         global_budget_notice().message,
+        providers_unavailable_notice().message,
     ]
     out += [out_of_scope_refusal(SNAPSHOT, r).message for r in OUT_OF_SCOPE_REASONS]
     return out
@@ -247,9 +258,57 @@ def test_clarify_from_the_router(fixture_router: Router) -> None:
     assert clarify_event(bare).question == CLARIFY_DEFAULT
 
 
+def test_clarify_keeps_provision_when_present(fixture_router: Router) -> None:
+    # R1.1, R1.2: when ambiguous query names a provision, each candidate carries the
+    # coordinate of that provision inside candidate instrument when it exists;
+    # otherwise instrument coordinate. Label names the provision.
+    result = RouteResult(
+        status=RouteStatus.AMBIGUOUS,
+        next_action=NextAction.ASK_USER,
+        candidates=(
+            Candidate(Coordinate.parse("uk/ukpga/1996/18"), "Employment Rights Act 1996"),
+            Candidate(
+                Coordinate.parse("uk/ukpga/1980/15"),
+                "National Health Service (Invalid Direction) Act 1980",
+            ),
+        ),
+        citations=(
+            ParsedCitation(
+                span=(0, 33),
+                jurisdiction_hint="uk",
+                instrument_type="act",
+                title_as_cited="Employment Rights Act",
+                year=None,
+                number=None,
+                provision="s.124",
+                resolution="resolved",
+                live_checkable=False,
+            ),
+        ),
+        index_snapshot=SNAPSHOT,
+    )
+    event = clarify_event(result, router=fixture_router)
+    assert event.candidates == (
+        LabelledCoordinate("uk/ukpga/1996/18/s124", "s.124 Employment Rights Act 1996"),
+        LabelledCoordinate(
+            "uk/ukpga/1980/15", "National Health Service (Invalid Direction) Act 1980"
+        ),
+    )
+
+
 def test_notices() -> None:
     assert provider_fallback_notice().code == "provider_fallback"
     assert provider_warming_notice().code == "provider_warming"
+    incomplete = providers_unavailable_notice()
+    assert incomplete.code == "providers_unavailable"
+    assert (
+        incomplete.message
+        == INCOMPLETE_MESSAGE
+        == (
+            "The model became unavailable while writing. Every sentence shown was checked; "
+            "there may have been more to say."
+        )
+    )
     event = corrections_notice([("rihgts", "rights"), ("emplyment", "employment")])
     assert isinstance(event, NoticeEvent)
     assert event.code == "corrections_applied"
@@ -281,6 +340,7 @@ def test_notices() -> None:
     codes = {
         provider_fallback_notice().code,
         provider_warming_notice().code,
+        incomplete.code,
         event.code,
         daily.code,
         budget.code,

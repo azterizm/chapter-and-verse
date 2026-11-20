@@ -40,7 +40,7 @@ export const NOTICE_TITLE: Record<string, string> = {
   provider_warming: "Model starting",
   status_excluded: "Part not answered",
   current_text_only: "Current text only",
-  providers_unavailable: "Answer cut short",
+  providers_unavailable: "Answer may be incomplete",
   no_text: "No text to answer from",
   daily_cap: "Daily limit reached",
   global_budget: "Daily limit reached",
@@ -52,6 +52,8 @@ export const NOTICE_MESSAGE: Record<string, string> = {
     "Daily limit reached for generated answers. The provision text is shown instead. It resets at 00:00 UTC.",
   global_budget:
     "Today's generated answers are used up. The provision text is shown instead. It resets at 00:00 UTC.",
+  providers_unavailable:
+    "The model became unavailable while writing. Every sentence shown was checked; there may have been more to say.",
 };
 
 /** The title for a notice code, or null for a code this page does not know. */
