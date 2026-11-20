@@ -1,0 +1,9 @@
+event: route
+data: {"coordinates":[],"corrections":[],"index_snapshot":"2026-09-28","messages":[],"next_action":"ASK_USER","status":"ROUTE_AMBIGUOUS","type":"route"}
+
+event: clarify
+data: {"candidates":[{"coordinate":"uk/ukpga/1996/18/s124","label":"s.124 Employment Rights Act 1996"},{"coordinate":"uk/nisi/1996/1919","label":"Employment Rights (Northern Ireland) Order 1996"}],"question":"Several instruments match. Which one do you mean?","type":"clarify"}
+
+event: done
+data: {"timings":{"first_sentence_ms":null,"first_source_ms":null,"total_ms":29.6},"type":"done"}
+

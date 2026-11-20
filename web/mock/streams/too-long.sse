@@ -1,0 +1,6 @@
+event: error
+data: {"code":"query_too_long","message":"The question is longer than 4096 bytes.","type":"error"}
+
+event: done
+data: {"timings":{"first_sentence_ms":null,"first_source_ms":null,"total_ms":0.4},"type":"done"}
+

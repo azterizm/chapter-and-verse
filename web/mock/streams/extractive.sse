@@ -1,0 +1,15 @@
+event: route
+data: {"coordinates":["uk/ukpga/1996/18/s124"],"corrections":[],"index_snapshot":"2026-09-28","messages":[],"next_action":"RETRIEVE_BOUNDED","status":"ROUTE_BOUNDED","type":"route"}
+
+event: sources
+data: {"type":"sources","windows":[{"coordinate":"uk/ukpga/1996/18/s124/1","heading":"Employment Rights Act 1996, section 124(1) (Limit of compensatory award etc)","highlight":[173,231],"passage_id":"P1","source_url":"https://www.legislation.gov.uk/ukpga/1996/18/section/124/1","status":"IN_FORCE","text":"(1) The amount of— (a) any compensation awarded to a person under section 117(1) and (2), or (b) a compensatory award to a person calculated in accordance with section 123, shall not exceed the amount specified in subsection (1ZA).","version_date":"2026-07-29"},{"coordinate":"uk/ukpga/1996/18/s124/1ZA","heading":"Employment Rights Act 1996, section 124(1ZA) (Limit of compensatory award etc)","highlight":[49,139],"passage_id":"P2","source_url":"https://www.legislation.gov.uk/ukpga/1996/18/section/124/1ZA","status":"IN_FORCE","text":"(1ZA) The amount specified in this subsection is the lower of— (a) £123,543, and (b) 52 multiplied by a week’s pay of the person concerned.","version_date":"2026-07-29"}]}
+
+event: extractive
+data: {"reason":"providers_unavailable","type":"extractive","windows":[{"coordinate":"uk/ukpga/1996/18/s124/1","heading":"Employment Rights Act 1996, section 124(1) (Limit of compensatory award etc)","highlight":[173,231],"passage_id":"P1","source_url":"https://www.legislation.gov.uk/ukpga/1996/18/section/124/1","status":"IN_FORCE","text":"(1) The amount of— (a) any compensation awarded to a person under section 117(1) and (2), or (b) a compensatory award to a person calculated in accordance with section 123, shall not exceed the amount specified in subsection (1ZA).","version_date":"2026-07-29"},{"coordinate":"uk/ukpga/1996/18/s124/1ZA","heading":"Employment Rights Act 1996, section 124(1ZA) (Limit of compensatory award etc)","highlight":[49,139],"passage_id":"P2","source_url":"https://www.legislation.gov.uk/ukpga/1996/18/section/124/1ZA","status":"IN_FORCE","text":"(1ZA) The amount specified in this subsection is the lower of— (a) £123,543, and (b) 52 multiplied by a week’s pay of the person concerned.","version_date":"2026-07-29"}]}
+
+event: receipt
+data: {"answer_id":"adb429901925d43d592786aa67dd7504cf863d1a455ed3159d3d2fd6dfeff0a9","fact":{"calls":[],"coordinates":["uk/ukpga/1996/18/s124"],"corpus_id":"72fc78d82b08e0e2e0cdc5bd12fbabebcee56adbb48aec557d555f7131aa461d","mode":"extractive","passages":{"P1":"uk/ukpga/1996/18/s124/1","P2":"uk/ukpga/1996/18/s124/1ZA"},"policy_hash":"22dd66f70e8b7d267d9fa17d8e1585de419e1aca8df08aa5b16bc74be6662a3a","query_sha256":"3fac80ba3a582aaa4df23c187813eb93ce57ff39cf31899e7f194fca25f6fd5b","route_status":"ROUTE_BOUNDED","schema":1,"sentences":[],"spans":{"uk/ukpga/1996/18/s124/1":[173,231],"uk/ukpga/1996/18/s124/1ZA":[49,139]},"version_dates":{"uk/ukpga/1996/18":"2026-07-29"}},"type":"receipt"}
+
+event: done
+data: {"timings":{"first_sentence_ms":null,"first_source_ms":198.0,"total_ms":1240.5},"type":"done"}
+

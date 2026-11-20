@@ -1,0 +1,12 @@
+event: route
+data: {"coordinates":[],"corrections":[],"index_snapshot":"2026-09-28","messages":[],"next_action":"REFUSE","status":"EPISTEMIC_ABSTENTION_INSTRUMENT_NOT_FOUND","type":"route"}
+
+event: refusal
+data: {"kind":"EPISTEMIC_ABSTENTION_INSTRUMENT_NOT_FOUND","link":null,"message":"There is no Act called the Marchwood Commercial Arbitration Act 1996 in the corpus. It may not exist. Check the title and year.","snapshot":"2026-09-28","suggestions":[{"coordinate":"uk/ukpga/1996/23","label":"Arbitration Act 1996"}],"type":"refusal"}
+
+event: receipt
+data: {"answer_id":"a484f24c5bd2fbbdaa7a8af53eeefc5223d60d2cf3e4080535fb804257c03881","fact":{"calls":[],"coordinates":[],"corpus_id":"72fc78d82b08e0e2e0cdc5bd12fbabebcee56adbb48aec557d555f7131aa461d","mode":"refusal","passages":{},"policy_hash":"22dd66f70e8b7d267d9fa17d8e1585de419e1aca8df08aa5b16bc74be6662a3a","query_sha256":"e12c5f14fe374b5d244292e05be58523f4f4ebca5da25a077e68304bddbfc319","route_status":"EPISTEMIC_ABSTENTION_INSTRUMENT_NOT_FOUND","schema":1,"sentences":[],"spans":{},"version_dates":{}},"type":"receipt"}
+
+event: done
+data: {"timings":{"first_sentence_ms":null,"first_source_ms":null,"total_ms":41.2},"type":"done"}
+

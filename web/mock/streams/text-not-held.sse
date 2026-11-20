@@ -1,0 +1,12 @@
+event: route
+data: {"coordinates":["uk/ukpga/1980/15"],"corrections":[],"index_snapshot":"2026-09-28","messages":[],"next_action":"RETRIEVE_BOUNDED","status":"ROUTE_BOUNDED","type":"route"}
+
+event: refusal
+data: {"kind":"TEXT_NOT_HELD","link":"https://www.legislation.gov.uk/ukpga/1980/15","message":"The corpus holds the title of the National Health Service (Invalid Direction) Act 1980 but not its text. Read it on legislation.gov.uk.","snapshot":"2026-09-28","suggestions":[],"type":"refusal"}
+
+event: receipt
+data: {"answer_id":"63789e1c7deb06f339c94de35b9cf0c9b76ac1ee99a81955829b122d0a881a4d","fact":{"calls":[],"coordinates":["uk/ukpga/1980/15"],"corpus_id":"72fc78d82b08e0e2e0cdc5bd12fbabebcee56adbb48aec557d555f7131aa461d","mode":"refusal","passages":{},"policy_hash":"22dd66f70e8b7d267d9fa17d8e1585de419e1aca8df08aa5b16bc74be6662a3a","query_sha256":"e934712339443133ad07b8dcd33d62473d92db52cd849a09d57d4c8bffbf6964","route_status":"ROUTE_BOUNDED","schema":1,"sentences":[],"spans":{},"version_dates":{"uk/ukpga/1980/15":null}},"type":"receipt"}
+
+event: done
+data: {"timings":{"first_sentence_ms":null,"first_source_ms":null,"total_ms":37.9},"type":"done"}
+

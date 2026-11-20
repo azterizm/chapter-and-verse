@@ -115,6 +115,8 @@ Row fields (router record schema version 2). Instrument record: `record_type: "i
 `tests/conftest.py` has `JsonlTextStore`, a test double over router JSONL files, exposed as the
 `fixture_text_store` fixture. B1's store must pass the same checks.
 
+The on-disk store format (files, table values, frames) is described in `chapterverse.store.format`.
+
 ### 4.3 Window
 
 One numbered passage, shown to the model, the auditor and the user. `passage_id` is `"P1"`,
@@ -379,3 +381,82 @@ Rebuild: `uv run python scripts/build_fixtures.py [--data PATH] [--router PATH]`
 | `TextStore.instrument` returns None for an unknown instrument; `get` and `has_text` raise `KeyError` | `instrument` is the existence check; the others need a known instrument |
 | `validate_order` allows `error`, `done` before `route` | Rate limits and oversized queries fail before routing |
 | `Settings.legal_data_root` is optional when both index paths are set; `read_secret` and `ConfigError` added | Production may mount the indexes without the raw records; one shared rule for reading keys |
+
+## 10. Pipeline (`pipeline.py`)
+
+`Pipeline.run(request, emit, cancelled)` runs one answer in a worker thread and never raises:
+any fault becomes `error`, `done`. Order of work, and the events each step can emit:
+
+| Step | What happens | Events |
+|---|---|---|
+| Route | `Router.route(query, context=RouteContext(...))` | `route`, then `notice` `corrections_applied` |
+| Not bound | `ROUTE_AMBIGUOUS` asks; every other non-bound status refuses (no discovery in Slice 1) | `clarify`, `done` / `refusal`, `receipt`, `done` |
+| Temporal hint | A dated router `temporal_hint` ("as at 1 January 2010") sets `as_at` to the earliest day of the period; a dateless one adds a `current_text_only` notice. A request `as_at` wins | `notice` |
+| Read | `partition_filter` validates the result. Nested bound coordinates are read once; excluded subtrees are dropped. `TextStore.instrument` is read first, and an instrument-level refusal (title only, repealed, history) never reads the body | |
+| Status | `decide_status` per bound coordinate. All refused: the first refusal. Some refused: the rest answer, each refused one gets a `status_excluded` notice | `refusal` or `notice` |
+| Windows | `Premise.from_records` and `build_windows` per instrument, then `select_windows` (premise cap, below), renumbered `P1..Pk` in document order | `sources` |
+| Generate | Only `IN_FORCE` windows reach the model and the verifier premise. `ChatContinuationGenerator` over a per-request view of the rotation that refuses every call once the client has gone; `ModalPathGenerator` when Modal is the first generation provider available and the KV path loaded (`ModalKV`). A fresh `RotationJudgeChat` per request | `notice` `provider_fallback`, `sentence`... |
+| Failure | No provider before any sentence: `extractive` (`provider_warming` plus its notice when Modal is cold). After a sentence: `notice` `providers_unavailable`, then the receipt | `extractive` / `notice` |
+| Receipt | `calls` = generation calls with each judge placeholder (provider `unknown`) replaced in order by `RotationJudgeChat`'s record (`merge_calls`), so nothing is counted twice | `receipt`, `done` |
+
+Notice codes added here: `status_excluded`, `current_text_only`, `providers_unavailable`, `no_text`.
+
+Premise cap: `PREMISE_BUDGET_TOKENS = 1500` estimated tokens of rendered passages (4 characters a
+token, about 6,000 characters) and `MAX_PROMPT_WINDOWS = 8`. Sized for Groq's 8,000 tokens a
+minute: a block request is then about 2,500 tokens, so a typical answer (two blocks, three or four
+judge calls) fits one minute. A subtree within the cap goes whole (ERA s.124: six windows). A
+larger one (a whole Act) gets the windows with the best lexical overlap with the question (the
+extractive span rule), in force first, each trimmed to its span plus 300 characters, best first,
+until the budget is spent; with no overlap at all, the leading windows. Extractive mode is not
+used for this, because its reasons mean "no model".
+
+## 11. App (`app.py`, `ratelimit.py`, `persistence.py`)
+
+`chapterverse.app:app`. `POST /api/ask` streams `encode_sse` bytes; `GET /api/health` returns
+`{status, corpus_id, snapshot}`. Edge rules run before routing and answer with an HTTP status and
+`{"error", "message"}`: 403 `access_required` (when `REQUIRE_ACCESS_HEADERS=1` and the Cloudflare
+Access headers are absent; health exempt), 429 `rate_limited` with `Retry-After` (per-client
+token bucket, keyed by the Worker's `X-CV-Client-IP` only when `REQUIRE_ACCESS_HEADERS=1` and the
+Access headers are present, else by the socket peer; the Worker sets the header from
+`CF-Connecting-IP` and drops any client copy),
+413 `body_too_large` / `query_too_long` (`MAX_QUERY_BYTES` on the UTF-8 query), 400 `bad_request`.
+
+Startup opens the store, router and concepts once and refuses to start when the store and router
+snapshots differ. The rotation comes from `GEN_PROVIDERS` / `JUDGE_PROVIDERS` over the quota
+ledger. The pin check (`check_provider` plus `apply_checks`) runs at startup and every
+`PIN_CHECK_INTERVAL_S`, skipping Modal (it serves its own pinned revision, and any request to a
+cold Modal starts a billed container). An inconclusive check (`pinning.is_conclusive`: a 429, a
+timeout) leaves the pin unchanged.
+
+Threading differs from section 6 in mechanism, not in rule: each answer runs on a bounded
+`ThreadPoolExecutor` (`ASK_WORKERS`, default 4), and events cross to the loop with
+`loop.call_soon_threadsafe` into an `asyncio.Queue`. `EventStreamResponse` always listens for
+`http.disconnect` and sets a flag when the response ends; the worker's next `emit` (or next
+provider call) raises `StreamClosed`, and the answer stops with no receipt.
+
+Modal KV path: the serialised mask from `MODAL_MASK_PROCESSOR` (the file
+`serve.py::get_mask_processor --out` writes) and the pinned revision's `tokenizer.json`
+(`MODAL_TOKENIZER_JSON`, else downloaded once from Hugging Face), loaded with `tokenizers` behind
+`QwenChatTokenizer` (Qwen3 chat template, thinking off). Either failing logs why and leaves Modal
+serving chat and the judge only. Every KV-path `/generate` call goes through `MeteredPost`: the pin,
+the Modal circuit breaker and a ledger reservation (dollars a month, hard cap) are checked
+first, usage and outcome recorded after, with the rotation's rules. A refusal raises
+`AllProvidersUnavailable`, so Modal is unavailable for that request.
+
+Persistence: `PostgresLedger` layers the in-memory ledger (reservations, minute windows, rate
+headers) under shared day and month totals in `provider_quota` (cached 10 s), written by one
+background thread with the schema's upsert. `ReceiptStore` keeps each fact under its
+`answer_id`; the retention purge runs at startup and hourly. A database failure never fails a
+request; it is logged once per outage. No `DATABASE_URL`: in-memory ledger, no receipts.
+
+Logs: one `ask {...}` JSON line per answer (query sha256, route status, mode, counts, provider
+calls, timings). The query is never logged.
+
+Open items (as of Slice 1, C1):
+- The mask processor is read from a file (`MODAL_MASK_PROCESSOR`), not fetched from Modal at
+  startup: the engine host has no Modal SDK or Modal token, only the SGLang bearer key. The
+  operator writes the file once with `serve.py::get_mask_processor --out`.
+- `tokenizers` brings `huggingface-hub` and its tree (`httpx2`, `hf-xet`, `fsspec`, `filelock`,
+  `tqdm`, `click`) into the image. With `httpx2` installed, Starlette's `TestClient` uses it.
+- The Postgres ledger shares day and month totals across origins; per-minute limits (Groq's
+  8,000 tokens a minute) stay local to each origin, corrected by Groq's own headers.

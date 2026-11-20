@@ -1,0 +1,220 @@
+"""Offline tests of the Modal held-out runner (eval/heldout_modal.py).
+
+Verifies the R4 requirements:
+1. Refuses without a method commit;
+2. Caches replies by prompt sha under out / cache.jsonl;
+3. Cost cap stops the run;
+4. Counting matches the Groq runner's on the same fake verdicts.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+from legal_rag_verifier.judge import SYSTEM, prompt_key
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from chapterverse.contracts import ProviderCall  # noqa: E402
+from chapterverse.providers import InMemoryLedger, ModalLimits  # noqa: E402
+from eval import heldout_modal as hm  # noqa: E402
+from eval import judge_gate as jg  # noqa: E402
+
+MSGS = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "Hypothesis to check"}]
+SUPPORTED = '{"label": "supported", "passage": 1}'
+CONTRADICTED = '{"label": "contradicted", "passage": 2}'
+
+
+class FakeInner:
+    """A test double for the inner chat client: returns scripted replies."""
+
+    model = "Vishva007/Qwen3.8-27B"
+
+    def __init__(self, script: list[Any]) -> None:
+        self.script = list(script)
+        self.calls: list[ProviderCall] = []
+        self.sent = 0
+
+    def __call__(self, messages: list[dict[str, str]], /) -> dict[str, Any]:
+        self.sent += 1
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        self.calls.append(
+            ProviderCall(
+                provider="modal",
+                model_id=self.model,
+                quantisation="GPTQ",
+                purpose="judge",
+                prompt_tokens=120,
+                completion_tokens=8,
+                latency_ms=580.0,
+            )
+        )
+        return {"content": item, "ms": 580.0, "tokens": 8, "finish": "stop"}
+
+
+def _gate_chat(tmp_path: Path, inner: FakeInner, **kw: Any) -> hm.ModalGateChat:
+    slept: list[float] = []
+    chat = hm.ModalGateChat(
+        provider="modal",
+        inner=inner,
+        body=lambda m: {"messages": m, "temperature": 0.7},
+        out=tmp_path,
+        sleep=slept.append,
+        **kw,
+    )
+    chat.slept = slept  # type: ignore[attr-defined]
+    return chat
+
+
+# ---------------------------------------------------------------------- 1. Refuses without commit
+
+
+def test_refuses_without_method_commit(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        verifier=jg.VERIFIER_ROOT,
+        out=tmp_path,
+        layer_root=None,
+        dry=False,
+        method_commit="",
+        max_usd=3.00,
+        cmd=None,
+    )
+    with pytest.raises(SystemExit, match="method-commit"):
+        hm.cmd_heldout(args)
+
+
+# ---------------------------------------------------------------------- 2. Caches by prompt sha
+
+
+def test_prompt_sha_matches_judge_prompt_key() -> None:
+    user_text = "Some passage text for user prompt"
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user_text}]
+    assert hm.prompt_sha(msgs) == prompt_key(user_text)
+
+
+def test_caches_by_prompt_sha_and_survives_restart(tmp_path: Path) -> None:
+    inner = FakeInner([SUPPORTED])
+    chat = _gate_chat(tmp_path, inner)
+    expected_sha = hm.prompt_sha(MSGS)
+
+    # First call: hits provider
+    reply1 = chat(MSGS)
+    assert reply1["content"] == SUPPORTED
+    assert inner.sent == 1
+    assert chat.hits == 0
+
+    # Second call in same process: cache hit
+    reply2 = chat(MSGS)
+    assert reply2 == reply1
+    assert inner.sent == 1
+    assert chat.hits == 1
+
+    # Verify cache file format on disk
+    cache_lines = [
+        json.loads(line) for line in (tmp_path / "cache.jsonl").read_text().splitlines() if line
+    ]
+    assert len(cache_lines) == 1
+    assert cache_lines[0]["key"] == expected_sha
+    assert cache_lines[0]["prompt_sha"] == expected_sha
+    assert (tmp_path / "cache" / f"{expected_sha}.json").is_file()
+
+    # Restart with empty script that would throw IndexError if called
+    restart_chat = _gate_chat(tmp_path, FakeInner([]))
+    assert expected_sha in restart_chat.cache
+    reply3 = restart_chat(MSGS)
+    assert reply3 == reply1
+    assert restart_chat.hits == 1
+
+
+# ---------------------------------------------------------------------- 3. Cost cap stops the run
+
+
+def test_cost_cap_stops_run_before_sending(tmp_path: Path) -> None:
+    inner = FakeInner([SUPPORTED])
+    chat = _gate_chat(tmp_path, inner, max_usd=3.00, cost_spent=lambda: True)
+    with pytest.raises(jg.RunHalted, match="dollar cap"):
+        chat(MSGS)
+    assert inner.sent == 0
+
+
+def test_cost_cap_stops_run_after_budget_spent(tmp_path: Path) -> None:
+    # 1 cold start = $0.3279, next tail = $0.0748. Cap of $0.40 allows 1 call but stops the 2nd.
+    limits = ModalLimits(usd_per_session=0.40, usd_per_month=0.40)
+    ledger = InMemoryLedger(modal=limits)
+    inner = FakeInner([SUPPORTED, CONTRADICTED])
+    chat = _gate_chat(tmp_path, inner, ledger=ledger, max_usd=0.40)
+
+    # First call succeeds (fits within $0.40)
+    chat(MSGS)
+    assert inner.sent == 1
+
+    # Second call fails because session spend plus tail exceeds $0.40
+    other_msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "second"}]
+    with pytest.raises(jg.RunHalted, match="dollar cap"):
+        chat(other_msgs)
+    assert inner.sent == 1
+
+
+# -------------------------------------------------------- 4. Counting matches Groq runner
+
+
+def test_counting_matches_groq_runner() -> None:
+    rb = jg.load_run_battery(jg.VERIFIER_ROOT)
+    fake_outcomes = [
+        # Pass classes
+        rb.Outcome("row-1", "grounded_paraphrase", "ROLLBACK", "PASS", ()),
+        rb.Outcome("row-2", "grounded_paraphrase", "ROLLBACK", "ROLLBACK", ("ungrounded_figure",)),
+        rb.Outcome("row-3", "connective", "ROLLBACK", "PASS", ()),
+        rb.Outcome("row-4", "premise_correction", "ROLLBACK", "PASS", ()),
+        # Planted failure classes
+        rb.Outcome("row-5", "wrong_figure", "ROLLBACK", "ROLLBACK", ("ungrounded_figure",)),
+        rb.Outcome("row-6", "value_swap", "ROLLBACK", "ROLLBACK", ("contradicted",)),
+        rb.Outcome("row-7", "modal_shift", "ROLLBACK", "PASS", ()),
+        rb.Outcome("row-8", "unsupported_plausible", "ROLLBACK", "ROLLBACK", ("not_stated",)),
+    ]
+
+    jg_counts = jg.heldout_counts(rb, fake_outcomes)
+    modal_counts = hm.heldout_counts(rb, fake_outcomes)
+
+    assert modal_counts == jg_counts
+    assert modal_counts["rows"] == 8
+    # 4 failures: 3 caught (recall 75%)
+    assert modal_counts["failure_recall"]["k"] == 3
+    assert modal_counts["failure_recall"]["n"] == 4
+    assert modal_counts["failure_recall"]["pct"] == 75.0
+    # 4 passes: 1 false rollback (25%)
+    assert modal_counts["pass_false_rollback"]["k"] == 1
+    assert modal_counts["pass_false_rollback"]["n"] == 4
+    assert modal_counts["pass_false_rollback"]["pct"] == 25.0
+    # Precision: 3 / (3 + 1) = 75%
+    assert modal_counts["rollback_precision"]["pct"] == 75.0
+
+
+# ---------------------------------------------------------------------- Additional helper tests
+
+
+def test_estimate_modal_cost() -> None:
+    # 328 calls: 406s cold start + 328 * 0.58s run + 120s tail = 716.24s
+    # 716.24 * (0.000542 * 1.15) = 0.4464 USD
+    est = hm.estimate_modal_cost(328)
+    assert 0.40 <= est <= 0.50
+
+
+def test_dynamic_modal_adapter_reads_env_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MODAL_URL", raising=False)
+    adapter = hm.DynamicModalAdapter()
+    with pytest.raises(Exception, match="MODAL_URL"):
+        _ = adapter.base_url()
+
+    monkeypatch.setenv("MODAL_URL", "https://modal.example.com/endpoint")
+    assert adapter.base_url() == "https://modal.example.com/endpoint/v1"
+    assert adapter.health_url() == "https://modal.example.com/endpoint/health"

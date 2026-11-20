@@ -1,0 +1,76 @@
+# Chapter & Verse API Worker. Deploy from deploy/worker/:  npx wrangler deploy
+# Secrets (never in this file):
+#   npx wrangler secret put TURNSTILE_SECRET       Turnstile widget secret key
+#   npx wrangler secret put SESSION_SIGNING_KEY    32+ random characters (openssl rand -base64 48)
+#   npx wrangler secret put ACCESS_CLIENT_ID       Access service token Client ID (required)
+#   npx wrangler secret put ACCESS_CLIENT_SECRET   Access service token Client Secret (required)
+name = "chapter-and-verse-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+# No *.workers.dev URL: the API is reachable only on the route below, behind the same checks.
+workers_dev = false
+preview_urls = false
+send_metrics = false
+
+routes = [ { pattern = "chapterandverse.memonsystems.com", custom_domain = true } ]
+
+# The site and the API share one Worker since 20 Nov 2026 (wrangler 4 creates Workers-based
+# sites instead of classic Pages projects). web/dist must be built with VITE_TURNSTILE_SITE_KEY
+# and deploy/pages/_headers copied into it before deploy.
+[assets]
+directory = "../../web/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+[vars]
+# Origin 1: the Oracle engine through Cloudflare Tunnel (a public hostname of the tunnel).
+# Slice 4 adds STANDBY_ORIGIN_URL (Hugging Face Space); see src/origins.ts.
+ORIGIN_URL = "https://cv-origin.memonsystems.com"
+# Comma-separated. Include the site itself: browsers send Origin on same-origin POSTs.
+ALLOWED_ORIGINS = "https://chapterandverse.memonsystems.com"
+ORIGIN_TIMEOUT_MS = "4000"
+# JSON body cap. The engine enforces MAX_QUERY_BYTES=4096 on the query itself.
+MAX_BODY_BYTES = "12288"
+SESSION_TTL_SECONDS = "7200"
+TURNSTILE_HOSTNAMES = "chapterandverse.memonsystems.com"
+TURNSTILE_ACTION = "ask"
+# Network-aware limits (POST /api/ask)
+HOSTING_ASN_PER_MINUTE = "6"
+HOSTING_IP_PER_MINUTE = "2"
+OTHER_ASN_PER_MINUTE = "120"
+
+# Workers Rate Limiting binding: per Cloudflare location, period 10 or 60 s only.
+# Keep in step with src/ratelimit.ts (the in-isolate fallback uses the same numbers).
+# namespace_id is any positive integer unique within the account.
+[[ratelimits]]
+name = "API_LIMITER"
+namespace_id = "41001"
+simple = { limit = 60, period = 60 }
+
+[[ratelimits]]
+name = "ASK_LIMITER"
+namespace_id = "41002"
+simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "HOSTING_ASN_LIMITER"
+namespace_id = "41003"
+simple = { limit = 6, period = 60 }
+
+[[ratelimits]]
+name = "HOSTING_IP_LIMITER"
+namespace_id = "41004"
+simple = { limit = 2, period = 60 }
+
+[[ratelimits]]
+name = "OTHER_ASN_LIMITER"
+namespace_id = "41005"
+simple = { limit = 120, period = 60 }
+
+# Health ping every 3 hours (minute 17 to avoid the top of the hour).
+[triggers]
+crons = ["17 */3 * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
