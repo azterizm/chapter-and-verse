@@ -35,8 +35,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # The project itself, installed non-editable so the runtime stage needs no source tree.
 COPY README.md LICENSE NOTICE ./
 COPY engine ./engine
+# uv keys a local package's cached build on pyproject.toml only, so without this flag the cache mount reuses a stale wheel (found 20 Nov 2026: the image ran code from an older commit).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+    uv sync --locked --no-dev --no-editable --reinstall-package chapterverse
 
 # ---------------------------------------------------------------- runtime
 FROM ${PYTHON_IMAGE} AS runtime
