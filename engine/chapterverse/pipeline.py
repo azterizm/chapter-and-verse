@@ -83,6 +83,7 @@ from chapterverse.contracts import (
     ChatMode,
     ChatRequest,
     ChatResult,
+    ClarifyEvent,
     Coordinate,
     DoneEvent,
     ErrorEvent,
@@ -110,6 +111,8 @@ from chapterverse.discovery import (
     Suggest,
     check_out_of_scope,
     discover_step,
+    is_named_private_document,
+    remove_bare_section,
 )
 from chapterverse.extractive import extractive_answer, highlight_span, query_terms
 from chapterverse.nlp import analyse
@@ -128,10 +131,13 @@ from chapterverse.ratelimit import (
 from chapterverse.status import StatusDecision, decide_status, instrument_status
 from chapterverse.symspell_build import build_symspell_in_memory
 from chapterverse.templates import (
+    CLARIFY_RELATED_PROVISIONS,
+    CLARIFY_WHICH_ACT,
     clarify_event,
     corrections_notice,
     daily_cap_notice,
     global_budget_notice,
+    private_document_refusal,
     provider_fallback_notice,
     provider_warming_notice,
     providers_unavailable_notice,
@@ -678,11 +684,57 @@ class Pipeline:
         if notice is not None:
             stream(notice)
 
+    def _handle_bare_section(
+        self,
+        stream: _Stream,
+        query: str,
+        result: RouteResult,
+    ) -> None:
+        cleaned = remove_bare_section(query, result.citations)
+        router_index = getattr(self.router, "index", None)
+        snapshot = getattr(router_index, "snapshot", "") or self.store.snapshot
+
+        out_of_scope = check_out_of_scope(cleaned, snapshot)
+        if out_of_scope is not None:
+            stream(out_of_scope)
+            self._receipt(stream, result, mode="refusal")
+            return
+
+        outcome = discover_step(self.router, cleaned)
+        if isinstance(outcome, RefusalEvent):  # out_of_scope
+            stream(outcome)
+            self._receipt(stream, result, mode="refusal")
+            return
+
+        if isinstance(outcome, Suggest) and outcome.candidates:
+            clarify = ClarifyEvent(
+                question=CLARIFY_RELATED_PROVISIONS,
+                candidates=outcome.candidates,
+            )
+        else:
+            clarify = ClarifyEvent(
+                question=CLARIFY_WHICH_ACT,
+                candidates=(),
+            )
+
+        stream.outcome.mode = "clarify"
+        stream(clarify)
+        stream.done()
+
     def _discover_or_refuse(
         self, stream: _Stream, raw: str, norm_text: str, norm_result: RouteResult
     ) -> None:
         router_index = getattr(self.router, "index", None)
         snapshot = getattr(router_index, "snapshot", "") or self.store.snapshot
+
+        # R1 Private documents: provision_without_instrument (or ROUTE_UNRESOLVED)
+        if is_named_private_document(raw, self.router) or is_named_private_document(
+            norm_text, self.router
+        ):
+            stream(private_document_refusal(snapshot))
+            self._receipt(stream, norm_result, mode="refusal")
+            return
+
         out_of_scope = check_out_of_scope(raw, snapshot) or check_out_of_scope(norm_text, snapshot)
         if out_of_scope is not None:
             stream(out_of_scope)
@@ -714,13 +766,33 @@ class Pipeline:
     ) -> None:
         self._emit_route_with_corrections(stream, norm_result, norm_corrections)
 
+        # R1 Private documents
+        if (
+            norm_result.reason == "provision_without_instrument"
+            or norm_result.status is RouteStatus.UNRESOLVED
+        ) and (
+            is_named_private_document(raw, self.router)
+            or is_named_private_document(norm_text, self.router)
+        ):
+            stream(private_document_refusal(self.store.snapshot))
+            self._receipt(stream, norm_result, mode="refusal")
+            return
+
         if norm_result.status is RouteStatus.AMBIGUOUS:
+            if norm_result.reason == "provision_without_instrument":
+                self._handle_bare_section(stream, norm_text, norm_result)
+                return
+
             stream.outcome.mode = "clarify"
             stream(clarify_event(norm_result, router=self.router, store=self.store))
             stream.done()
             return
 
         if norm_result.status is RouteStatus.UNRESOLVED:
+            if norm_result.reason == "provision_without_instrument":
+                self._handle_bare_section(stream, norm_text, norm_result)
+                return
+
             self._discover_or_refuse(stream, raw, norm_text, norm_result)
             return
 
@@ -732,6 +804,16 @@ class Pipeline:
         stream(RouteEvent.from_route_result(raw_result))
 
         if raw_result.status is RouteStatus.AMBIGUOUS:
+            if raw_result.reason == "provision_without_instrument":
+                # R1 Private documents
+                if is_named_private_document(stream.request.query, self.router):
+                    stream(private_document_refusal(self.store.snapshot))
+                    self._receipt(stream, raw_result, mode="refusal")
+                    return
+                # R2 Bare section without a document
+                self._handle_bare_section(stream, stream.request.query, raw_result)
+                return
+
             stream.outcome.mode = "clarify"
             stream(clarify_event(raw_result, router=self.router, store=self.store))
             stream.done()

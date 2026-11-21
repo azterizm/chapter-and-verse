@@ -7,6 +7,8 @@ import {
   TURNSTILE_ACTION,
   TURNSTILE_CHECKING_MESSAGE,
   TURNSTILE_TIMEOUT_MESSAGE,
+  TURNSTILE_TIMEOUT_MS,
+  TURNSTILE_UNSUPPORTED_MESSAGE,
 } from "../src/components/Turnstile";
 import { VERIFICATION_FAILED_MESSAGE } from "../src/turnstileText";
 
@@ -135,20 +137,21 @@ describe("Turnstile on every question", () => {
     expect(fetchCalls[0]!.headers.get("X-Turnstile-Token")).toBeNull();
   });
 
-  it("render options include action: \"ask\"", () => {
+  it("render options include appearance: \"always\" and action: \"ask\"", () => {
     expect(TURNSTILE_ACTION).toBe("ask");
     const onToken = vi.fn();
     const onError = vi.fn();
     const opts = turnstileOptions(onToken, onError);
     expect(opts.action).toBe("ask");
-    expect(opts.appearance).toBe("interaction-only");
+    expect(opts.appearance).toBe("always");
+    expect(opts.size).toBe("compact");
 
     const renderMock = vi.fn();
     const mockTs = { render: renderMock, reset: vi.fn(), remove: vi.fn() };
     mockTs.render({} as HTMLElement, opts);
     expect(renderMock).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ action: "ask", appearance: "interaction-only" }),
+      expect.objectContaining({ action: "ask", appearance: "always" }),
     );
   });
 
@@ -206,16 +209,18 @@ describe("Turnstile on every question", () => {
     });
   });
 
-  it("the 15 s timeout path (fake timers)", () => {
+  it("token arrives late (25 s) and the question is sent", () => {
     vi.useFakeTimers();
     try {
+      expect(TURNSTILE_TIMEOUT_MS).toBe(30000);
       const sent: Array<{ query: string; token: string | null }> = [];
       const errors: string[] = [];
       const statuses: Array<string | null> = [];
+      let resets = 0;
 
       const gate = new TurnstileGate({
         onSend: (query, token) => sent.push({ query, token }),
-        onReset: vi.fn(),
+        onReset: () => resets++,
         onStatusChange: (s) => statuses.push(s),
         onError: (err) => errors.push(err),
       });
@@ -227,23 +232,202 @@ describe("Turnstile on every question", () => {
       expect(statuses).toEqual([TURNSTILE_CHECKING_MESSAGE]);
       expect(gate.isWaiting()).toBe(true);
 
-      // Advance by 14,999 ms: still waiting
-      vi.advanceTimersByTime(14999);
+      // Advance by 25 s (25,000 ms)
+      vi.advanceTimersByTime(25000);
       expect(sent).toHaveLength(0);
       expect(errors).toHaveLength(0);
       expect(gate.isWaiting()).toBe(true);
 
-      // Advance remaining 1 ms (reaches 15 s)
+      // Token arrives at 25 s
+      gate.onToken("token-25s");
+
+      expect(sent).toEqual([{ query: "s.124 ERA 1996", token: "token-25s" }]);
+      expect(errors).toHaveLength(0);
+      expect(gate.isWaiting()).toBe(false);
+      expect(statuses).toEqual([TURNSTILE_CHECKING_MESSAGE, null]);
+      expect(resets).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("first wait times out, reset, token arrives and the question is sent", () => {
+    vi.useFakeTimers();
+    try {
+      const sent: Array<{ query: string; token: string | null }> = [];
+      const errors: string[] = [];
+      const statuses: Array<string | null> = [];
+      let resets = 0;
+
+      const gate = new TurnstileGate({
+        onSend: (query, token) => sent.push({ query, token }),
+        onReset: () => resets++,
+        onStatusChange: (s) => statuses.push(s),
+        onError: (err) => errors.push(err),
+      });
+
+      gate.ask("s.124 ERA 1996");
+
+      expect(sent).toHaveLength(0);
+      expect(errors).toHaveLength(0);
+      expect(gate.isWaiting()).toBe(true);
+
+      // Advance by 30 s (first wait times out)
+      vi.advanceTimersByTime(30000);
+
+      // Resets widget once and continues waiting
+      expect(resets).toBe(1);
+      expect(sent).toHaveLength(0);
+      expect(errors).toHaveLength(0);
+      expect(gate.isWaiting()).toBe(true);
+
+      // Advance 15 s into the retry wait (total 45 s)
+      vi.advanceTimersByTime(15000);
+
+      // Token arrives during retry
+      gate.onToken("token-during-retry");
+
+      expect(sent).toEqual([{ query: "s.124 ERA 1996", token: "token-during-retry" }]);
+      expect(errors).toHaveLength(0);
+      expect(gate.isWaiting()).toBe(false);
+      expect(statuses).toEqual([TURNSTILE_CHECKING_MESSAGE, null]);
+      expect(resets).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("both waits time out and the R5 message shows", () => {
+    vi.useFakeTimers();
+    try {
+      const sent: Array<{ query: string; token: string | null }> = [];
+      const errors: string[] = [];
+      const statuses: Array<string | null> = [];
+      let resets = 0;
+
+      const gate = new TurnstileGate({
+        onSend: (query, token) => sent.push({ query, token }),
+        onReset: () => resets++,
+        onStatusChange: (s) => statuses.push(s),
+        onError: (err) => errors.push(err),
+      });
+
+      gate.ask("s.124 ERA 1996");
+
+      expect(sent).toHaveLength(0);
+      expect(errors).toHaveLength(0);
+      expect(gate.isWaiting()).toBe(true);
+
+      // Advance 30 s (first wait times out -> resets widget once)
+      vi.advanceTimersByTime(30000);
+      expect(resets).toBe(1);
+      expect(errors).toHaveLength(0);
+      expect(gate.isWaiting()).toBe(true);
+
+      // Advance another 29,999 ms: still waiting during retry
+      vi.advanceTimersByTime(29999);
+      expect(sent).toHaveLength(0);
+      expect(errors).toHaveLength(0);
+      expect(gate.isWaiting()).toBe(true);
+
+      // Advance remaining 1 ms (reaches 60 s total, second wait times out)
       vi.advanceTimersByTime(1);
       expect(sent).toHaveLength(0);
       expect(gate.isWaiting()).toBe(false);
       expect(errors).toEqual([TURNSTILE_TIMEOUT_MESSAGE]);
-      expect(TURNSTILE_TIMEOUT_MESSAGE).toBe("The bot check did not finish. Reload the page.");
+      expect(TURNSTILE_TIMEOUT_MESSAGE).toBe(
+        "The bot check did not finish. Click Ask again, or reload the page if it keeps failing.",
+      );
       expect(statuses).toEqual([TURNSTILE_CHECKING_MESSAGE, null]);
 
       // Late token arrival after timeout does not send the aborted question
       gate.onToken("late-token");
       expect(sent).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clicking Ask again after timeout starts a fresh attempt (R5)", () => {
+    vi.useFakeTimers();
+    try {
+      const sent: Array<{ query: string; token: string | null }> = [];
+      const errors: string[] = [];
+      const statuses: Array<string | null> = [];
+      let resets = 0;
+
+      const gate = new TurnstileGate({
+        onSend: (query, token) => sent.push({ query, token }),
+        onReset: () => resets++,
+        onStatusChange: (s) => statuses.push(s),
+        onError: (err) => errors.push(err),
+      });
+
+      gate.ask("s.124 ERA 1996");
+      vi.advanceTimersByTime(60000);
+
+      expect(errors).toEqual([TURNSTILE_TIMEOUT_MESSAGE]);
+      expect(gate.isWaiting()).toBe(false);
+
+      // Clicking Ask again starts a fresh attempt
+      gate.ask("s.124 ERA 1996");
+      expect(gate.isWaiting()).toBe(true);
+      expect(statuses).toEqual([TURNSTILE_CHECKING_MESSAGE, null, TURNSTILE_CHECKING_MESSAGE]);
+
+      // Token arrives on fresh attempt
+      gate.onToken("token-fresh");
+      expect(sent).toEqual([{ query: "s.124 ERA 1996", token: "token-fresh" }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("unsupported callback message", () => {
+    expect(TURNSTILE_UNSUPPORTED_MESSAGE).toBe(
+      "This browser cannot run the bot check. Try another browser.",
+    );
+    const onToken = vi.fn();
+    const onError = vi.fn();
+    const opts = turnstileOptions(onToken, onError);
+
+    expect(typeof opts["unsupported-callback"]).toBe("function");
+    opts["unsupported-callback"]();
+    expect(onError).toHaveBeenCalledWith(
+      "This browser cannot run the bot check. Try another browser.",
+    );
+  });
+
+  it("handles timeout-callback with reset and retry within single retry limit", () => {
+    vi.useFakeTimers();
+    try {
+      const sent: Array<{ query: string; token: string | null }> = [];
+      const errors: string[] = [];
+      let resets = 0;
+
+      const gate = new TurnstileGate({
+        onSend: (query, token) => sent.push({ query, token }),
+        onReset: () => resets++,
+        onStatusChange: vi.fn(),
+        onError: (err) => errors.push(err),
+      });
+
+      gate.ask("s.124 ERA 1996");
+
+      // Turnstile timeout-callback fires at 10 s
+      vi.advanceTimersByTime(10000);
+      gate.onTimeout();
+
+      // First timeout resets the widget and retries
+      expect(resets).toBe(1);
+      expect(sent).toHaveLength(0);
+      expect(errors).toHaveLength(0);
+      expect(gate.isWaiting()).toBe(true);
+
+      // Second timeout-callback fires: retry limit reached
+      gate.onTimeout();
+      expect(sent).toHaveLength(0);
+      expect(errors).toEqual([TURNSTILE_TIMEOUT_MESSAGE]);
+      expect(gate.isWaiting()).toBe(false);
     } finally {
       vi.useRealTimers();
     }

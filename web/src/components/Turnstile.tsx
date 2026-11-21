@@ -17,8 +17,10 @@ declare global {
 
 export const TURNSTILE_SITE_KEY: string = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "";
 export const TURNSTILE_ACTION = "ask";
-export const TURNSTILE_TIMEOUT_MS = 15000;
-export const TURNSTILE_TIMEOUT_MESSAGE = "The bot check did not finish. Reload the page.";
+export const TURNSTILE_TIMEOUT_MS = 30000;
+export const TURNSTILE_TIMEOUT_MESSAGE =
+  "The bot check did not finish. Click Ask again, or reload the page if it keeps failing.";
+export const TURNSTILE_UNSUPPORTED_MESSAGE = "This browser cannot run the bot check. Try another browser.";
 export const TURNSTILE_CHECKING_MESSAGE = "Checking...";
 
 const SCRIPT_URL = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
@@ -43,24 +45,37 @@ function loadTurnstile(): Promise<TurnstileApi> {
 export interface TurnstileRenderOptions {
   sitekey: string;
   action: string;
-  appearance: "interaction-only";
+  appearance: "always";
+  size?: "compact" | "flexible";
   callback: (token: string) => void;
   "expired-callback": () => void;
+  "timeout-callback": () => void;
   "error-callback": () => void;
+  "unsupported-callback": () => void;
   [key: string]: unknown;
 }
 
 export function turnstileOptions(
   onToken: (token: string | null) => void,
   onError: (message: string) => void,
+  onTimeout?: () => void,
 ): TurnstileRenderOptions {
   return {
     sitekey: TURNSTILE_SITE_KEY,
     action: TURNSTILE_ACTION,
-    appearance: "interaction-only",
+    appearance: "always",
+    size: "compact",
     callback: (token: string) => onToken(token),
     "expired-callback": () => onToken(null),
+    "timeout-callback": () => {
+      if (onTimeout) {
+        onTimeout();
+      } else {
+        onToken(null);
+      }
+    },
     "error-callback": () => onError("The bot check failed to run. Reload the page."),
+    "unsupported-callback": () => onError(TURNSTILE_UNSUPPORTED_MESSAGE),
   };
 }
 
@@ -75,6 +90,7 @@ export interface TurnstileGateOptions {
 export class TurnstileGate {
   private token: string | null = null;
   private pendingQuery: string | null = null;
+  private retried = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly timeoutMs: number;
   private readonly onSend: (query: string, token: string | null) => void;
@@ -111,14 +127,10 @@ export class TurnstileGate {
       return;
     }
     this.pendingQuery = query;
+    this.retried = false;
     this.onStatusChange(TURNSTILE_CHECKING_MESSAGE);
     this.clearTimer();
-    this.timer = setTimeout(() => {
-      this.pendingQuery = null;
-      this.timer = null;
-      this.onStatusChange(null);
-      this.onError(TURNSTILE_TIMEOUT_MESSAGE);
-    }, this.timeoutMs);
+    this.timer = setTimeout(() => this.handleTimeout(), this.timeoutMs);
   }
 
   onToken(token: string | null): void {
@@ -137,6 +149,30 @@ export class TurnstileGate {
       return;
     }
     this.token = token;
+  }
+
+  onTimeout(): void {
+    if (this.pendingQuery !== null) {
+      this.handleTimeout();
+    } else {
+      this.token = null;
+      this.onReset();
+    }
+  }
+
+  private handleTimeout(): void {
+    if (this.pendingQuery === null) return;
+    if (!this.retried) {
+      this.retried = true;
+      this.onReset();
+      this.clearTimer();
+      this.timer = setTimeout(() => this.handleTimeout(), this.timeoutMs);
+      return;
+    }
+    this.clearTimer();
+    this.pendingQuery = null;
+    this.onStatusChange(null);
+    this.onError(TURNSTILE_TIMEOUT_MESSAGE);
   }
 
   onFailure(message: string): void {
@@ -165,14 +201,15 @@ interface Props {
   resetKey: number;
   onToken(token: string | null): void;
   onError(message: string): void;
+  onTimeout?(): void;
 }
 
-export function Turnstile({ resetKey, onToken, onError }: Props) {
+export function Turnstile({ resetKey, onToken, onError, onTimeout }: Props) {
   const el = useRef<HTMLDivElement>(null);
   const widget = useRef<string | null>(null);
-  const handlers = useRef({ onToken, onError });
+  const handlers = useRef({ onToken, onError, onTimeout });
   useEffect(() => {
-    handlers.current = { onToken, onError };
+    handlers.current = { onToken, onError, onTimeout };
   });
 
   useEffect(() => {
@@ -185,6 +222,7 @@ export function Turnstile({ resetKey, onToken, onError }: Props) {
           turnstileOptions(
             (token) => handlers.current.onToken(token),
             (message) => handlers.current.onError(message),
+            () => handlers.current.onTimeout?.(),
           ),
         );
       },
