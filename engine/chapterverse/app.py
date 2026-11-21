@@ -84,6 +84,7 @@ from fastapi.responses import JSONResponse
 from legal_rag_router import Router
 from starlette.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
+from symspellpy import SymSpell  # type: ignore[import-untyped]
 from tokenizers import Tokenizer
 
 from chapterverse.audit.modal_path import BearerPost, ModalSGLangBackend
@@ -97,6 +98,8 @@ from chapterverse.contracts import (
     UnavailableKind,
     encode_sse,
 )
+from chapterverse.nlp import get_nlp
+from chapterverse.normalise import load_dictionary
 from chapterverse.persistence import ReceiptStore, open_persistence
 from chapterverse.pipeline import (
     MAX_CONTEXT_COORDINATES,
@@ -120,6 +123,7 @@ from chapterverse.ratelimit import (
     client_key_hash,
 )
 from chapterverse.store import open_store
+from chapterverse.symspell_build import build_symspell_in_memory
 
 __all__ = [
     "MeteredPost",
@@ -221,6 +225,7 @@ class Runtime:
     hosting_share: float = DEFAULT_HOSTING_SHARE
     require_access: bool = False
     workers: int = 4
+    dictionary: SymSpell | None = None
     pin_check: Callable[[], object] | None = None
     pin_interval_s: float = DAY_S
     purge: Callable[[], object] | None = None
@@ -516,6 +521,20 @@ def load_modal_kv(
     return ModalKV(make_backend=make_backend, probe=probe, provider=provider.name)
 
 
+def _load_slice2_dictionary(env: Mapping[str, str], store: TextStore) -> SymSpell:
+    symspell_path = _env(env, "SYMSPELL_DICT")
+    t0 = time.perf_counter()
+    if symspell_path is not None and Path(symspell_path).is_file():
+        sym = load_dictionary(Path(symspell_path))
+        elapsed = time.perf_counter() - t0
+        log.info("dictionary from file: %d terms in %.3fs", sym.word_count, elapsed)
+        return sym
+    sym = build_symspell_in_memory(store)
+    elapsed = time.perf_counter() - t0
+    log.info("dictionary built from store: %d terms in %.3fs", sym.word_count, elapsed)
+    return sym
+
+
 def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     """Build everything from the environment (module docstring, "Startup").
 
@@ -558,6 +577,13 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     hosting_share = _env_nonnegative_number(env, "HOSTING_SHARE", DEFAULT_HOSTING_SHARE)
     if hosting_share > 1.0:
         raise ConfigError("HOSTING_SHARE must be between 0 and 1")
+
+    t_slice2 = time.perf_counter()
+    sym_dict = _load_slice2_dictionary(env, store)
+    get_nlp()
+    slice2_time_s = time.perf_counter() - t_slice2
+    log.info("Slice 2 startup: loaded SymSpell and spaCy in %.3fs", slice2_time_s)
+
     pipeline = Pipeline(
         router=router,
         store=store,
@@ -569,6 +595,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         daily_budget=persistence.daily_budget,
         global_daily_answers=global_daily_answers,
         hosting_share=hosting_share,
+        dictionary=sym_dict,
     )
     limiter = TokenBucket(
         per_minute=_env_number(env, "RATE_LIMIT_PER_MINUTE", 10.0),
@@ -600,6 +627,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         hosting_share=hosting_share,
         require_access=_env_flag(env, "REQUIRE_ACCESS_HEADERS"),
         workers=int(_env_number(env, "ASK_WORKERS", 4.0)),
+        dictionary=sym_dict,
         pin_check=lambda: pin_check(rotation),
         pin_interval_s=_env_number(env, "PIN_CHECK_INTERVAL_S", DAY_S),
         purge=receipts.purge if receipts is not None else None,

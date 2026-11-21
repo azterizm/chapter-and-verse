@@ -1,0 +1,9 @@
+# Slice 2 cleanup: requirements
+
+The route-raw-first change (`engine/chapterverse/pipeline.py`, `nlp.py`, uncommitted) is functionally right: the router battery through the pipeline gives 0 faults, 0 regressions, 0 wrong instrument, 0 invented bound, 82 false abstentions (equal to the sealed run). Remaining:
+
+- R1 Lint in `nlp.py`: catch only the retokenizer's `ValueError`, not `Exception`; replace the module-level `global _retokenize_fault_count` with a small thread-safe counter object (or `itertools.count` plus a lock); keep logging counts only.
+- R2 Lint in `pipeline.py`: `_run` has too many statements, branches and returns (PLR0911/0912/0915) and two lines over 100 characters. Split it into small private helpers with no behaviour change (for example `_route_raw_then_normalised`, `_handle_unresolved`). No `noqa` for these rules.
+- R3 Three tests in `tests/test_app.py` fail because a spy router counts `route` calls and the pipeline now routes twice for a query that does not bind (raw, then normalised), and because the spy does not delegate `discover`: `test_oversized_query_is_413_before_routing` (expects 1, gets 2), `test_rate_limit_is_429_before_routing` and `test_access_headers_required_when_set` (expect 2, get 4). These tests check that rejected requests never reach routing. Make the spy count requests that reached routing (for example distinct query texts, or a flag per request) rather than raw `route` calls, and make it delegate `discover` and any other method the pipeline calls. Keep the tests' intent: rejected requests reach routing 0 times.
+- R4 Lint in `eval/discovery_gate.py`, `eval/probes_gate.py` and `tests/test_slice2_integrate.py` (unused imports, long lines, loop-variable overwrite, long `main`): fix without changing results; splitting `main` into helpers is fine.
+- R5 All checks pass: `uv run ruff check`, `uv run ruff format --check`, `uv run mypy`, `uv run pytest -q`.

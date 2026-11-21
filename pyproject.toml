@@ -20,6 +20,9 @@ dependencies = [
     "orjson>=3.10",
     "psycopg[binary]>=3.2",
     "tokenizers>=0.21",
+    "symspellpy==6.10.2",
+    "spacy==3.8.18",
+    "en-core-web-sm",
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
@@ -95,3 +98,6 @@ filterwarnings = ["error"]
 markers = [
     "data: needs the real corpus at LEGAL_DATA_ROOT (skipped when it is unset)",
 ]
+
+[tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }

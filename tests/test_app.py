@@ -102,19 +102,42 @@ ACCESS = {"CF-Access-Client-Id": "id.access", "CF-Access-Client-Secret": "secret
 
 
 class SpyRouter:
-    """Counts ``route`` calls; delegates to the fixture router."""
+    """Counts requests that reached routing; delegates to the fixture router."""
 
     def __init__(self, inner: Router) -> None:
         self.inner = inner
         self.calls = 0
+        self._routed_requests: list[AskRequest] = []
+        self._lock = threading.Lock()
 
     @property
     def index(self) -> Any:
         return self.inner.index
 
+    def discover(self, *args: Any, **kwargs: Any) -> Any:
+        return self.inner.discover(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
     def route(self, query: str, *, context: Any = None) -> Any:
-        self.calls += 1
+        req = self._get_request()
+        with self._lock:
+            if req is not None:
+                if not any(req is r for r in self._routed_requests):
+                    self._routed_requests.append(req)
+                    self.calls += 1
+            else:
+                self.calls += 1
         return self.inner.route(query, context=context)
+
+    def _get_request(self) -> AskRequest | None:
+        f: Any = sys._getframe(2)
+        while f is not None:
+            if "request" in f.f_locals and isinstance(f.f_locals["request"], AskRequest):
+                return f.f_locals["request"]
+            f = f.f_back
+        return None
 
 
 class FakeConnection:

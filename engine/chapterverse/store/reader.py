@@ -18,6 +18,7 @@ thread.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import mmap
@@ -27,7 +28,7 @@ import sys
 import threading
 from array import array
 from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
@@ -221,6 +222,28 @@ class CompressedTextStore:
     def __len__(self) -> int:
         """Number of coordinates held (instruments and provisions)."""
         return len(self._table)
+
+    def iter_records(self) -> Iterator[dict[str, Any]]:
+        """Yield every record in the store in file order."""
+        if self._decompressed is not None:
+            for raw_line_bytes in self._decompressed.split(b"\n"):
+                line_bytes = raw_line_bytes.strip()
+                if line_bytes:
+                    yield json.loads(line_bytes.decode("utf-8"))
+            return
+
+        dctx = zstandard.ZstdDecompressor(dict_data=self._dictionary)
+        text_path = self._root / TEXT_NAME
+        with text_path.open("rb") as fh:
+            reader = dctx.stream_reader(fh, read_across_frames=True)
+            text_io = io.TextIOWrapper(reader, encoding="utf-8")
+            for raw_line_str in text_io:
+                line_str = raw_line_str.strip()
+                if line_str:
+                    yield json.loads(line_str)
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        return self.iter_records()
 
     def __contains__(self, coordinate: object) -> bool:
         if not isinstance(coordinate, str):

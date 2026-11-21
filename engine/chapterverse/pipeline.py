@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import re
 import time
 import traceback
@@ -58,11 +59,13 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any, Final, Literal
 
 from legal_rag_router import RouteContext, Router, RouteResult, RouteStatus, partition_filter
 from legal_rag_verifier.corpus import instrument_coordinate
 from legal_rag_verifier.premise import Passage, Premise
+from symspellpy import SymSpell  # type: ignore[import-untyped]
 
 from chapterverse.audit.continuation import ChatContinuationGenerator, GenerationSettings
 from chapterverse.audit.modal_path import ModalPathGenerator
@@ -89,6 +92,7 @@ from chapterverse.contracts import (
     Policy,
     ProviderCall,
     ReceiptEvent,
+    RefusalEvent,
     RenderedCitation,
     Rotation,
     RouteEvent,
@@ -101,7 +105,16 @@ from chapterverse.contracts import (
     Window,
     sha256_hex,
 )
+from chapterverse.discovery import (
+    NoEvidence,
+    Suggest,
+    check_out_of_scope,
+    discover_step,
+)
 from chapterverse.extractive import extractive_answer, highlight_span, query_terms
+from chapterverse.nlp import analyse
+from chapterverse.normalise import Normalised, find_protected_spans, load_dictionary, normalise
+from chapterverse.pii import Masked, mask_pii
 from chapterverse.providers.judge_chat import RotationJudgeChat
 from chapterverse.providers.openai_compat import ProviderWarming
 from chapterverse.providers.rotation import ProviderRotation
@@ -113,6 +126,7 @@ from chapterverse.ratelimit import (
     DailyCapStore,
 )
 from chapterverse.status import StatusDecision, decide_status, instrument_status
+from chapterverse.symspell_build import build_symspell_in_memory
 from chapterverse.templates import (
     clarify_event,
     corrections_notice,
@@ -520,6 +534,13 @@ def _where(exc: BaseException) -> str:
     return f"{type(exc).__name__} at {last.filename.rsplit('/', 1)[-1]}:{last.lineno}"
 
 
+def _mask_query(text: str, masked: Masked) -> str:
+    out = text
+    for ph, orig in sorted(masked.reverse_map.items(), key=lambda item: len(item[1]), reverse=True):
+        out = out.replace(orig, ph)
+    return out
+
+
 class Pipeline:
     """Runs the read path for one request at a time per call; one instance serves all
     requests (it holds only shared, thread-safe parts)."""
@@ -540,6 +561,7 @@ class Pipeline:
         global_daily_answers: int = DEFAULT_GLOBAL_DAILY_ANSWERS,
         hosting_share: float = DEFAULT_HOSTING_SHARE,
         clock: Callable[[], datetime] | None = None,
+        dictionary: SymSpell | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -557,6 +579,26 @@ class Pipeline:
         self.global_daily_answers = global_daily_answers
         self.hosting_share = hosting_share
         self._clock = clock
+        self.dictionary = dictionary
+
+    def _get_dictionary(self) -> SymSpell:
+        if self.dictionary is not None:
+            return self.dictionary
+        env_dict = os.environ.get("SYMSPELL_DICT")
+        if env_dict and Path(env_dict).is_file():
+            self.dictionary = load_dictionary(Path(env_dict))
+            return self.dictionary
+        repo_root = Path(__file__).resolve().parents[2]
+        default_dict = repo_root / "artefacts" / "symspell" / "dictionary.txt"
+        if default_dict.is_file():
+            self.dictionary = load_dictionary(default_dict)
+            return self.dictionary
+        concepts = getattr(self.router, "_concepts", None) or getattr(self.router, "concepts", None)
+        if concepts is not None:
+            self.dictionary = build_symspell_in_memory(concepts)
+        else:
+            self.dictionary = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
+        return self.dictionary
 
     def _current_utc_day(self) -> date:
         if self._clock is not None:
@@ -602,24 +644,134 @@ class Pipeline:
                     outcome.mode = "closed"
         return outcome
 
-    def _run(self, request: AskRequest, stream: _Stream, cancelled: Callable[[], bool]) -> None:
-        context = RouteContext(coordinates=request.context) if request.context else None
-        result = self.router.route(request.query, context=context)
+    def _normalise_and_route(
+        self, raw: str, context: RouteContext | None
+    ) -> tuple[Normalised, Masked, RouteResult]:
+        citation_spans = find_protected_spans(raw)
+        analysis = analyse(raw, protected_spans=citation_spans)
+        router_index = getattr(self.router, "index", None)
+        masked = mask_pii(raw, analysis, router_index=router_index, protected_spans=citation_spans)
+        name_spans = list(masked.name_spans)
+
+        dict_obj = self._get_dictionary()
+        protect_spans = list(citation_spans) + name_spans
+        norm = normalise(raw, dictionary=dict_obj, protect=protect_spans)
+        norm_result = self.router.route(norm.text, context=context)
+        return norm, masked, norm_result
+
+    def _emit_route_with_corrections(
+        self,
+        stream: _Stream,
+        result: RouteResult,
+        norm_corrections: Sequence[tuple[str, str]],
+    ) -> None:
         stream.outcome.route_status = result.status.value
-        stream(RouteEvent.from_route_result(result))
-        notice = corrections_notice(result.corrections)
+        combined_corrections = tuple(
+            dict.fromkeys((*norm_corrections, *((a, b) for a, b in result.corrections)))
+        )
+        route_event = RouteEvent.from_route_result(result)
+        if combined_corrections:
+            route_event = dataclasses.replace(route_event, corrections=combined_corrections)
+        stream(route_event)
+
+        notice = corrections_notice(combined_corrections)
         if notice is not None:
             stream(notice)
-        if result.status is RouteStatus.AMBIGUOUS:
+
+    def _discover_or_refuse(
+        self, stream: _Stream, raw: str, norm_text: str, norm_result: RouteResult
+    ) -> None:
+        router_index = getattr(self.router, "index", None)
+        snapshot = getattr(router_index, "snapshot", "") or self.store.snapshot
+        out_of_scope = check_out_of_scope(raw, snapshot) or check_out_of_scope(norm_text, snapshot)
+        if out_of_scope is not None:
+            stream(out_of_scope)
+            self._receipt(stream, norm_result, mode="refusal")
+            return
+
+        outcome = discover_step(self.router, norm_text)
+        if isinstance(outcome, RefusalEvent):  # out_of_scope
+            stream(outcome)
+            self._receipt(stream, norm_result, mode="refusal")
+            return
+        if isinstance(outcome, NoEvidence):
+            stream(outcome.receipt)
+            self._receipt(stream, norm_result, mode="refusal")
+            return
+        if isinstance(outcome, Suggest):
             stream.outcome.mode = "clarify"
-            stream(clarify_event(result, router=self.router, store=self.store))
+            stream(outcome.clarify_event)
             stream.done()
             return
-        if result.status is not RouteStatus.BOUNDED:
-            stream(route_refusal(result))
-            self._receipt(stream, result, mode="refusal")
+
+    def _handle_unresolved(
+        self,
+        stream: _Stream,
+        raw: str,
+        norm_text: str,
+        norm_result: RouteResult,
+        norm_corrections: Sequence[tuple[str, str]],
+    ) -> None:
+        self._emit_route_with_corrections(stream, norm_result, norm_corrections)
+
+        if norm_result.status is RouteStatus.AMBIGUOUS:
+            stream.outcome.mode = "clarify"
+            stream(clarify_event(norm_result, router=self.router, store=self.store))
+            stream.done()
             return
-        self._bounded(request, result, stream, cancelled)
+
+        if norm_result.status is RouteStatus.UNRESOLVED:
+            self._discover_or_refuse(stream, raw, norm_text, norm_result)
+            return
+
+        stream(route_refusal(norm_result))
+        self._receipt(stream, norm_result, mode="refusal")
+
+    def _handle_raw_fallback(self, stream: _Stream, raw_result: RouteResult) -> None:
+        stream.outcome.route_status = raw_result.status.value
+        stream(RouteEvent.from_route_result(raw_result))
+
+        if raw_result.status is RouteStatus.AMBIGUOUS:
+            stream.outcome.mode = "clarify"
+            stream(clarify_event(raw_result, router=self.router, store=self.store))
+            stream.done()
+            return
+
+        stream(route_refusal(raw_result))
+        self._receipt(stream, raw_result, mode="refusal")
+
+    def _run(self, request: AskRequest, stream: _Stream, cancelled: Callable[[], bool]) -> None:
+        raw = request.query
+        context = RouteContext(coordinates=request.context) if request.context else None
+
+        # R2: Route the RAW query first.
+        raw_result = self.router.route(raw, context=context)
+
+        # If the raw result is ROUTE_BOUNDED, use it and the raw text;
+        # spelling correction is not applied and no corrections notice is sent.
+        if raw_result.status is RouteStatus.BOUNDED:
+            stream.outcome.route_status = raw_result.status.value
+            stream(RouteEvent.from_route_result(raw_result))
+            self._bounded(request, raw_result, stream, cancelled, norm_text=raw)
+            return
+
+        norm, masked, norm_result = self._normalise_and_route(raw, context)
+
+        # R2: use the normalised result only if it is ROUTE_BOUNDED,
+        # or if the raw result was ROUTE_UNRESOLVED (then discovery runs on the normalised text);
+        # in every other case keep the raw result (raw abstentions and clarifications stand).
+        if norm_result.status is RouteStatus.BOUNDED:
+            self._emit_route_with_corrections(stream, norm_result, norm.corrections)
+            self._bounded(
+                request, norm_result, stream, cancelled, masked=masked, norm_text=norm.text
+            )
+            return
+
+        if raw_result.status is RouteStatus.UNRESOLVED:
+            self._handle_unresolved(stream, raw, norm.text, norm_result, norm.corrections)
+            return
+
+        self._handle_raw_fallback(stream, raw_result)
 
     # ------------------------------------------------------------------ bound
 
@@ -687,7 +839,21 @@ class Pipeline:
         result: RouteResult,
         stream: _Stream,
         cancelled: Callable[[], bool],
+        *,
+        masked: Masked | None = None,
+        norm_text: str | None = None,
     ) -> None:
+        if masked is None:
+            citation_spans = find_protected_spans(request.query)
+            analysis = analyse(request.query, protected_spans=citation_spans)
+            masked = mask_pii(
+                request.query,
+                analysis,
+                router_index=getattr(self.router, "index", None),
+                protected_spans=citation_spans,
+            )
+        if norm_text is None:
+            norm_text = request.query
         if request.as_at is None and result.temporal_hint:
             as_at = hint_as_at(result.temporal_hint)
             if as_at is None:
@@ -711,7 +877,7 @@ class Pipeline:
         windows, passages, titles, citations, provisions = self._windows(request, result, read)
         selection = select_windows(
             windows,
-            request.query,
+            norm_text,
             budget_tokens=self.config.premise_budget_tokens,
             max_windows=self.config.max_prompt_windows,
         )
@@ -743,7 +909,9 @@ class Pipeline:
         notice = self._budget_notice(request, today)
         if notice is not None:
             stream(notice)
-            spans = self._extractive(stream, request, model_windows, "providers_unavailable")
+            spans = self._extractive(
+                stream, request, model_windows, "providers_unavailable", query=norm_text
+            )
             self._receipt(
                 stream,
                 result,
@@ -762,6 +930,8 @@ class Pipeline:
             windows=model_windows,
             read=read,
             provisions=provisions,
+            masked=masked,
+            norm_text=norm_text,
         )
         if mode == "generated" and bool(calls):
             if (
@@ -824,6 +994,8 @@ class Pipeline:
         windows: tuple[Window, ...],
         read: _Read,
         provisions: Mapping[Coordinate, Mapping[str, Any]],
+        masked: Masked,
+        norm_text: str,
     ) -> tuple[
         AnswerMode,
         tuple[SentenceOut, ...],
@@ -831,6 +1003,8 @@ class Pipeline:
         dict[Coordinate, tuple[int, int]],
     ]:
         """Generate and audit; returns the mode, sentences, calls and extractive spans."""
+        masked_query = _mask_query(norm_text, masked)
+
         gen_ready = _available(self.rotation, "generate")
         judge_ready = _available(self.rotation, "judge")
         if not gen_ready or not judge_ready:
@@ -838,7 +1012,12 @@ class Pipeline:
                 "provider_warming" if _warming(self.rotation) else "providers_unavailable"
             )
             stream.outcome.failures.append("none_available")
-            return ("extractive", (), (), self._extractive(stream, request, windows, reason))
+            return (
+                "extractive",
+                (),
+                (),
+                self._extractive(stream, request, windows, reason, query=norm_text),
+            )
 
         rotation = _Cancellable(self.rotation, cancelled)
         judge_chat = RotationJudgeChat(rotation)
@@ -860,9 +1039,11 @@ class Pipeline:
                 ):
                     stream(provider_fallback_notice())
             sentences.append(sentence)
+            unmasked_text = masked.unmask(sentence.text)
+            user_sentence = dataclasses.replace(sentence, text=unmasked_text)
             stream(
                 SentenceEvent(
-                    sentence=sentence, citations=self._cite(sentence, by_id, read, provisions)
+                    sentence=user_sentence, citations=self._cite(sentence, by_id, read, provisions)
                 )
             )
 
@@ -872,7 +1053,9 @@ class Pipeline:
             assert self.modal_kv is not None  # noqa: S101 - checked above
             if not self.modal_kv.probe():  # cold: the probe starts it; answer meanwhile
                 stream.outcome.failures.append(f"{self.modal_kv.provider}:warming")
-                spans = self._extractive(stream, request, windows, "provider_warming")
+                spans = self._extractive(
+                    stream, request, windows, "provider_warming", query=norm_text
+                )
                 return "extractive", (), (), spans
         try:
             if use_modal:
@@ -881,7 +1064,7 @@ class Pipeline:
                     self.modal_kv.make_backend(),
                     judge_chat,
                     self.policy,
-                    query=request.query,
+                    query=masked_query,
                     premise=premise,
                     windows=windows,
                     mode=self.config.mode,
@@ -895,7 +1078,7 @@ class Pipeline:
                     rotation,
                     judge_chat,
                     self.policy,
-                    query=request.query,
+                    query=masked_query,
                     premise=premise,
                     windows=windows,
                     mode=self.config.mode,
@@ -916,7 +1099,7 @@ class Pipeline:
                     "extractive",
                     (),
                     done_calls,
-                    self._extractive(stream, request, windows, reason),
+                    self._extractive(stream, request, windows, reason, query=norm_text),
                 )
             stream(INCOMPLETE_NOTICE)
             return "generated", tuple(sentences), done_calls, {}
@@ -929,12 +1112,12 @@ class Pipeline:
         request: AskRequest,
         windows: Sequence[Window],
         reason: ExtractiveReason,
+        query: str | None = None,
     ) -> dict[Coordinate, tuple[int, int]]:
         if reason == "provider_warming":
             stream(provider_warming_notice())
-        event = extractive_answer(
-            windows, request.query, reason, max_windows=self.config.max_prompt_windows
-        )
+        q = query or request.query
+        event = extractive_answer(windows, q, reason, max_windows=self.config.max_prompt_windows)
         stream(event)
         return {w.coordinate: w.highlight for w in event.windows if w.highlight is not None}
 
