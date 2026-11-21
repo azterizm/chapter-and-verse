@@ -153,12 +153,23 @@ class Masked:
 
     text: str
     reverse_map: dict[str, str]
+    spans: tuple[tuple[int, int], ...] = ()
+    name_spans: tuple[tuple[int, int], ...] = ()
 
     def unmask(self, text: str | None = None) -> str:
         """Replace all masked placeholders back with their original values."""
         target = self.text if text is None else text
         for placeholder, original in self.reverse_map.items():
             target = target.replace(placeholder, original)
+        for ph, orig in list(self.reverse_map.items()):
+            if ph.startswith("[NAME ") and ph.endswith("]"):
+                alt = ph.replace("[NAME ", "[PERSON ")
+                if alt not in self.reverse_map:
+                    target = target.replace(alt, orig)
+            elif ph.startswith("[PERSON ") and ph.endswith("]"):
+                alt = ph.replace("[PERSON ", "[NAME ")
+                if alt not in self.reverse_map:
+                    target = target.replace(alt, orig)
         return target
 
 
@@ -331,7 +342,7 @@ def _is_fallback_token(
     existing_candidates: list[Candidate],
 ) -> bool:
     """Check whether a token qualifies as a fallback name candidate."""
-    if tok.is_space or tok.is_punct or not any(c.isalpha() for c in tok.text):
+    if tok.is_space or tok.is_punct or not tok.text[:1].isupper():
         return False
     tok_lower = tok.text.lower()
     if tok_lower in MONTH_AND_DAY_NAMES or tok_lower in SINGLE_WORD_STOPLIST:
@@ -475,6 +486,10 @@ def mask_pii(
     candidates.extend(fallback_candidates)
 
     chosen = _resolve_candidates(candidates, all_protected)
+    all_spans = tuple((start, end) for start, end, _, _ in chosen)
+    name_spans = tuple(
+        (start, end) for start, end, cat, _ in chosen if cat in ("PERSON", "ORG", "NAME")
+    )
 
     category_counters: dict[str, int] = defaultdict(int)
     name_to_placeholder: dict[tuple[str, str], str] = {}
@@ -500,4 +515,9 @@ def mask_pii(
     for start, end, placeholder in span_replacements:
         masked_text = masked_text[:start] + placeholder + masked_text[end:]
 
-    return Masked(text=masked_text, reverse_map=reverse_map)
+    return Masked(
+        text=masked_text,
+        reverse_map=reverse_map,
+        spans=all_spans,
+        name_spans=name_spans,
+    )

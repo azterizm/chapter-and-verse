@@ -81,6 +81,7 @@ SYSTEM_TEMPLATE: Final = (
     "- You may name a section, subsection or paragraph only when the passage it cites names it, "
     "and must still cite with [P#]. Never write an SI number or any other citation.\n"
     "- State figures, dates and conditions exactly as the passages give them.\n"
+    "- Placeholders like [PERSON 1] stand for people the user named and must be kept as written.\n"
     "- If the passages do not answer the question, say so plainly in one sentence.\n"
     "- {mode_rule}\n\n"
     "{context}"

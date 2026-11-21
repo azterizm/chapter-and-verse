@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,7 +23,7 @@ from symspellpy import SymSpell, Verbosity  # type: ignore[import-untyped]
 if TYPE_CHECKING:
     from legal_rag_router import Router
 
-__all__ = ["Normalised", "load_dictionary", "normalise"]
+__all__ = ["Normalised", "find_protected_spans", "load_dictionary", "normalise"]
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +97,15 @@ def _raw_protected_spans(query: str, router: Router | None) -> list[tuple[int, i
     return raw_spans
 
 
-def _find_protected_spans(query: str, *, router: Router | None = None) -> list[tuple[int, int]]:
+def find_protected_spans(
+    query: str,
+    *,
+    router: Router | None = None,
+    extra_spans: Sequence[tuple[int, int]] = (),
+) -> list[tuple[int, int]]:
     """Identify all protected spans according to R2 rules and resolve overlaps."""
     raw_spans = _raw_protected_spans(query, router)
+    raw_spans.extend(extra_spans)
 
     # Overlap resolution following legal-rag-mask core mechanism:
     # Prioritise longer spans first
@@ -115,6 +122,9 @@ def _find_protected_spans(query: str, *, router: Router | None = None) -> list[t
     # Sort ascending by start offset
     valid_spans.sort(key=lambda s: s[0])
     return valid_spans
+
+
+_find_protected_spans = find_protected_spans
 
 
 def _apply_casing(original: str, candidate: str) -> str:
@@ -186,6 +196,7 @@ def normalise(
     *,
     dictionary: SymSpell | Path | str,
     router: Router | None = None,
+    protect: Sequence[tuple[int, int]] = (),
 ) -> Normalised:
     """Normalise a query string: mask protected spans, correct spelling, unmask.
 
@@ -193,6 +204,7 @@ def normalise(
         query: User query string.
         dictionary: SymSpell instance or path to dictionary.txt.
         router: Optional Router instance to assist citation span detection.
+        protect: Optional extra character spans to protect from spelling correction.
 
     Returns:
         Normalised dataclass with corrected text, corrections list, and masked spans.
@@ -202,7 +214,7 @@ def normalise(
 
     sym: SymSpell = dictionary if isinstance(dictionary, SymSpell) else load_dictionary(dictionary)
 
-    valid_spans = _find_protected_spans(query, router=router)
+    valid_spans = find_protected_spans(query, router=router, extra_spans=protect)
 
     # Masking mechanism (legal-rag-mask placeholder & reverse-map)
     span_tags = [

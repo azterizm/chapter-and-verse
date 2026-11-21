@@ -19,6 +19,7 @@ from legal_rag_router import Router
 from chapterverse.audit.policy import build_policy
 from chapterverse.contracts import (
     AllProvidersUnavailable,
+    ClarifyEvent,
     Event,
     ExtractiveEvent,
     NoticeEvent,
@@ -228,9 +229,21 @@ def test_ambiguous_query_keeps_provision_on_candidates(
 
 
 def test_unresolved_refuses(fixture_router: Router, store: CountingStore) -> None:
-    events, _ = run(make(fixture_router, store, FakeRotation()), "what about unfair dismissal")
+    events, outcome = run(
+        make(fixture_router, store, FakeRotation()), "teleportation spacecraft asteroid"
+    )
     (refusal,) = of(events, RefusalEvent)
     assert refusal.kind == "ROUTE_UNRESOLVED"
+    assert outcome.mode == "refusal"
+
+
+def test_unresolved_concept_clarifies(fixture_router: Router, store: CountingStore) -> None:
+    events, outcome = run(
+        make(fixture_router, store, FakeRotation()), "what about unfair dismissal"
+    )
+    (clarify,) = of(events, ClarifyEvent)
+    assert clarify.type == "clarify"
+    assert outcome.mode == "clarify"
 
 
 @pytest.mark.parametrize(
