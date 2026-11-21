@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import io
 import json
 import re
 import time
@@ -13,10 +12,10 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Final
 
-import zstandard
 from symspellpy import SymSpell  # type: ignore[import-untyped]
 
-from chapterverse.store import CompressedTextStore, open_store
+from chapterverse.contracts import TextStore
+from chapterverse.store import open_store
 
 __all__ = [
     "WORD_RE",
@@ -74,17 +73,20 @@ def _extract_from_jsonl_files(paths: Iterable[Path]) -> Counter[str]:
     return freqs
 
 
-def _extract_from_store(store: CompressedTextStore) -> Counter[str]:
+def _extract_from_text_store(store: TextStore) -> Counter[str]:
     freqs: Counter[str] = Counter()
-    text_path = store.directory / "text.zst"
-    dctx = zstandard.ZstdDecompressor(dict_data=store._dictionary)
-    with text_path.open("rb") as fh:
-        reader = dctx.stream_reader(fh, read_across_frames=True)
-        text_io = io.TextIOWrapper(reader, encoding="utf-8")
-        for raw_line in text_io:
-            line = raw_line.strip()
-            if line:
-                _extract_from_record(json.loads(line), freqs)
+    if hasattr(store, "iter_records"):
+        for rec in store.iter_records():
+            _extract_from_record(rec, freqs)
+    elif isinstance(store, Iterable):
+        for rec in store:
+            _extract_from_record(rec, freqs)
+    else:
+        root = getattr(store, "root", None)
+        if isinstance(root, Path):
+            jsonl_files = _find_jsonl_files(root)
+            if jsonl_files:
+                return _extract_from_jsonl_files(jsonl_files)
     return freqs
 
 
@@ -119,7 +121,9 @@ def _extract_from_concepts(path: Path) -> Counter[str]:
     return freqs
 
 
-def extract_term_frequencies(store_or_source: Any | Path | str | None = None) -> Counter[str]:
+def extract_term_frequencies(
+    store_or_source: TextStore | Path | str | None = None,
+) -> Counter[str]:
     """Extract vocabulary frequencies from store records or JSONL files.
 
     Words are extracted from provision text, text_after, title, crossheading,
@@ -128,15 +132,15 @@ def extract_term_frequencies(store_or_source: Any | Path | str | None = None) ->
     if store_or_source is None:
         store_or_source = Path("artefacts/store")
 
-    if isinstance(store_or_source, CompressedTextStore):
-        return _extract_from_store(store_or_source)
+    if isinstance(store_or_source, TextStore):
+        return _extract_from_text_store(store_or_source)
 
     path = Path(store_or_source)
     if (path / "text.zst").is_file() and (path / "corpus-manifest.json").is_file():
-        return _extract_from_store(open_store(path))
+        return _extract_from_text_store(open_store(path))
 
     if (path / "store" / "text.zst").is_file():
-        return _extract_from_store(open_store(path / "store"))
+        return _extract_from_text_store(open_store(path / "store"))
 
     jsonl_files = _find_jsonl_files(path)
     if jsonl_files:
@@ -145,10 +149,12 @@ def extract_term_frequencies(store_or_source: Any | Path | str | None = None) ->
     if (path / "terms.tbl").is_file() or (path / "concepts-manifest.json").is_file():
         return _extract_from_concepts(path)
 
-    return _extract_from_store(open_store(path))
+    return _extract_from_text_store(open_store(path))
 
 
-def build_symspell_in_memory(store_or_source: Any | Path | str | None = None) -> SymSpell:
+def build_symspell_in_memory(
+    store_or_source: TextStore | Path | str | None = None,
+) -> SymSpell:
     """Build a SymSpell instance in memory from store records."""
     freqs = extract_term_frequencies(store_or_source)
     sym = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
@@ -157,9 +163,9 @@ def build_symspell_in_memory(store_or_source: Any | Path | str | None = None) ->
     return sym
 
 
-def _find_snapshot(source: Any | Path | str | None) -> str:
+def _find_snapshot(source: TextStore | Path | str | None) -> str:
     """Determine snapshot date string from store manifest, index manifest, or default."""
-    if isinstance(source, CompressedTextStore):
+    if isinstance(source, TextStore):
         return source.snapshot
     if source is not None:
         p = Path(source)
@@ -181,7 +187,7 @@ def _find_snapshot(source: Any | Path | str | None) -> str:
 
 
 def build_dictionary(
-    store_or_source: Any | Path | str | None = None,
+    store_or_source: TextStore | Path | str | None = None,
     out_dir: Path | str = Path("artefacts/symspell"),
 ) -> tuple[int, int, float, str]:
     """Build dictionary.txt and manifest.json from store records.

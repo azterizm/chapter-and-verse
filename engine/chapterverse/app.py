@@ -521,18 +521,18 @@ def load_modal_kv(
     return ModalKV(make_backend=make_backend, probe=probe, provider=provider.name)
 
 
-def _load_slice2_dictionary(env: Mapping[str, str], router: Router, settings: Settings) -> SymSpell:
+def _load_slice2_dictionary(env: Mapping[str, str], store: TextStore) -> SymSpell:
     symspell_path = _env(env, "SYMSPELL_DICT")
-    repo_root = Path(__file__).resolve().parents[2]
-    default_dict = repo_root / "artefacts" / "symspell" / "dictionary.txt"
+    t0 = time.perf_counter()
     if symspell_path is not None and Path(symspell_path).is_file():
-        return load_dictionary(Path(symspell_path))
-    if default_dict.is_file():
-        return load_dictionary(default_dict)
-    concepts = getattr(router, "_concepts", None) or getattr(router, "concepts", None)
-    if concepts is not None:
-        return build_symspell_in_memory(concepts)
-    return build_symspell_in_memory(settings.concepts_index)
+        sym = load_dictionary(Path(symspell_path))
+        elapsed = time.perf_counter() - t0
+        log.info("dictionary from file: %d terms in %.3fs", sym.word_count, elapsed)
+        return sym
+    sym = build_symspell_in_memory(store)
+    elapsed = time.perf_counter() - t0
+    log.info("dictionary built from store: %d terms in %.3fs", sym.word_count, elapsed)
+    return sym
 
 
 def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
@@ -579,10 +579,9 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         raise ConfigError("HOSTING_SHARE must be between 0 and 1")
 
     t_slice2 = time.perf_counter()
-    sym_dict = _load_slice2_dictionary(env, router, settings)
+    sym_dict = _load_slice2_dictionary(env, store)
     get_nlp()
     slice2_time_s = time.perf_counter() - t_slice2
-    log.info("Slice 2 startup: loaded SymSpell and spaCy in %.3fs", slice2_time_s)
     log.info("Slice 2 startup: loaded SymSpell and spaCy in %.3fs", slice2_time_s)
 
     pipeline = Pipeline(
