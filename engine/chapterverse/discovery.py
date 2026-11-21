@@ -139,7 +139,7 @@ def discover_step(
     router: Router,
     query: object,
     *,
-    limit: int = 8,
+    limit: int = 10,
 ) -> DiscoveryOutcome:
     """Discover candidate provisions from the concept index for a citation-less query.
 

@@ -80,11 +80,11 @@ def test_out_of_scope_cues(fixture_router: Router) -> None:
 
 def test_suggestion_path_confident(fixture_router: Router) -> None:
     # "unfair dismissal" in fixture index has confident matches
-    outcome = discover_step(fixture_router, "unfair dismissal", limit=8)
+    outcome = discover_step(fixture_router, "unfair dismissal", limit=10)
     assert isinstance(outcome, Suggest)
     assert outcome.confident is True
     assert outcome.question == "Did you mean one of these provisions?"
-    assert 1 <= len(outcome.candidates) <= 8
+    assert 1 <= len(outcome.candidates) <= 10
 
     # Check candidates format and ClarifyEvent
     event = outcome.event
@@ -120,13 +120,13 @@ def test_suggestion_limit_and_ordering(fixture_router: Router) -> None:
     assert isinstance(outcome_3, Suggest)
     assert len(outcome_3.candidates) == 3
 
-    outcome_8 = discover_step(fixture_router, "unfair dismissal", limit=8)
-    assert isinstance(outcome_8, Suggest)
-    assert len(outcome_8.candidates) <= 8
+    outcome_10 = discover_step(fixture_router, "unfair dismissal", limit=10)
+    assert isinstance(outcome_10, Suggest)
+    assert len(outcome_10.candidates) <= 10
 
     # Best-first ordering preserved
     for i in range(3):
-        assert outcome_3.candidates[i] == outcome_8.candidates[i]
+        assert outcome_3.candidates[i] == outcome_10.candidates[i]
 
 
 def test_no_evidence_path(fixture_router: Router) -> None:
@@ -200,5 +200,5 @@ def test_discovery_real_data(real_data_root: Path) -> None:
     assert len(test_rows) == 153
 
     for row in test_rows[:10]:
-        outcome = discover_step(router, row["query"], limit=8)
+        outcome = discover_step(router, row["query"], limit=10)
         assert isinstance(outcome, (Suggest, NoEvidence, RefusalEvent))
