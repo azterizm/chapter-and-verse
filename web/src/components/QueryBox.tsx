@@ -1,5 +1,6 @@
-import { type FormEvent, type KeyboardEvent, useState } from "react";
+import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { byteLength, MAX_QUERY_BYTES } from "../api/client";
+import { TURNSTILE_TIMEOUT_MESSAGE } from "./Turnstile";
 
 interface Props {
   busy: boolean;
@@ -12,13 +13,16 @@ interface Props {
 
 export function QueryBox({ busy, blocked, onAsk, onStop, inputRef }: Props) {
   const [text, setText] = useState("");
+  const lastSubmitted = useRef("");
   const bytes = byteLength(text);
   const over = bytes > MAX_QUERY_BYTES;
   const empty = text.trim() === "";
-  const canSend = !busy && !over && !empty && blocked === null;
+  const isBlocking = blocked !== null && blocked !== TURNSTILE_TIMEOUT_MESSAGE;
+  const canSend = !busy && !over && !empty && !isBlocking;
 
   const send = () => {
     if (!canSend) return;
+    lastSubmitted.current = text.trim();
     onAsk(text.trim());
     setText("");
   };
@@ -32,6 +36,12 @@ export function QueryBox({ busy, blocked, onAsk, onStop, inputRef }: Props) {
       send();
     }
   };
+
+  useEffect(() => {
+    if (blocked === TURNSTILE_TIMEOUT_MESSAGE && text === "" && lastSubmitted.current !== "") {
+      setText(lastSubmitted.current);
+    }
+  }, [blocked, text]);
 
   return (
     <form className="query" onSubmit={onSubmit} aria-label="Ask a question">
