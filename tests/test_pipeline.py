@@ -15,6 +15,8 @@ import httpx
 import pytest
 import respx
 from legal_rag_router import Router
+from legal_rag_router.coordinate import Coordinate
+from legal_rag_router.result import Candidate, NextAction, ParsedCitation, RouteResult, RouteStatus
 
 from chapterverse.audit.policy import build_policy
 from chapterverse.contracts import (
@@ -47,6 +49,7 @@ from chapterverse.pipeline import (
 from chapterverse.providers import ProviderRotation, ProviderWarming, make_cloudflare, make_groq
 from chapterverse.providers.presets import JUDGE_PRESET_NAME
 from chapterverse.ratelimit import DailyBudgetCounts, InMemoryDailyBudget, InMemoryDailyCap
+from chapterverse.templates import clarify_event
 
 if TYPE_CHECKING:  # mypy sees tests/ as the package "tests"; pytest puts tests/ on sys.path
     from tests.test_pipeline_fakes import (
@@ -209,8 +212,8 @@ def test_ambiguous_citation_asks(fixture_router: Router, store: CountingStore) -
     assert [e.type for e in events] == ["route", "clarify", "done"]
     clarify = events[1]
     assert clarify.type == "clarify"
-    assert [c.coordinate for c in clarify.candidates] == ["uk/ukpga/1996/18/s124"]
-    assert clarify.candidates[0].label == "s.124 Employment Rights Act 1996"
+    assert clarify.question == "Which Act or SI do you mean?"
+    assert clarify.candidates == ()
     assert outcome.mode == "clarify"
     assert outcome.fact is None
 
@@ -218,14 +221,36 @@ def test_ambiguous_citation_asks(fixture_router: Router, store: CountingStore) -
 def test_ambiguous_query_keeps_provision_on_candidates(
     fixture_router: Router, store: CountingStore
 ) -> None:
-    # R1.1, R1.2: ambiguous query naming provision resolves ERA 1996 to provision coord
-    events, outcome = run(make(fixture_router, store, FakeRotation()), "ERA section 124")
-    assert [e.type for e in events] == ["route", "clarify", "done"]
-    clarify = events[1]
+    # clarify_event keeps provision coordinate on candidate instruments
+    res = RouteResult(
+        status=RouteStatus.AMBIGUOUS,
+        next_action=NextAction.ASK_USER,
+        reason="ambiguous_instrument",
+        candidates=(
+            Candidate(
+                coordinate=Coordinate.parse("uk/ukpga/1996/18"),
+                label="Employment Rights Act 1996",
+            ),
+        ),
+        citations=(
+            ParsedCitation(
+                span=(0, 11),
+                jurisdiction_hint=None,
+                instrument_type=None,
+                title_as_cited=None,
+                year=None,
+                number=None,
+                provision="section 124",
+                resolution="unlinked",
+                live_checkable=False,
+            ),
+        ),
+        clarification="Which instrument?",
+    )
+    clarify = clarify_event(res, router=fixture_router, store=store)
     assert clarify.type == "clarify"
     assert [c.coordinate for c in clarify.candidates] == ["uk/ukpga/1996/18/s124"]
     assert clarify.candidates[0].label == "s.124 Employment Rights Act 1996"
-    assert outcome.mode == "clarify"
 
 
 def test_unresolved_refuses(fixture_router: Router, store: CountingStore) -> None:

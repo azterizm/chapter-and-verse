@@ -19,6 +19,8 @@ from chapterverse.discovery import (
     check_out_of_scope,
     discover_step,
     format_candidate_label,
+    is_named_private_document,
+    remove_bare_section,
 )
 
 
@@ -182,6 +184,32 @@ def test_format_candidate_label(fixture_router: Router) -> None:
     # Synthetic check with no router
     lbl4 = format_candidate_label("uk/ukpga/1996/18/s98", "Fairness", None)
     assert lbl4 == "s.98 1996 c. 18: Fairness"
+
+
+def test_private_doc_detection_rule(fixture_router: Router) -> None:
+    # Private documents detected
+    assert is_named_private_document("Mayfair Lease Agreement", fixture_router)
+    assert is_named_private_document("Under my lease", fixture_router)
+    assert is_named_private_document("Check my contract", fixture_router)
+    assert is_named_private_document("Check the agreement", fixture_router)
+    assert is_named_private_document("According to our policy", fixture_router)
+    assert is_named_private_document("In the attached file", fixture_router)
+    assert is_named_private_document("In the uploaded text", fixture_router)
+    assert is_named_private_document("Under this document", fixture_router)
+    assert is_named_private_document("Staff Handbook section 3", fixture_router)
+
+    # Legislation queries not detected
+    assert not is_named_private_document("Employment Rights Act 1996", fixture_router)
+    assert not is_named_private_document("unfair dismissal cap", fixture_router)
+
+
+def test_remove_bare_section() -> None:
+    assert (
+        remove_bare_section("What does section 4 say about the limit?")
+        == "What does say about the limit?"
+    )
+    assert remove_bare_section("Under Section 12, who pays?") == "who pays?"
+    assert remove_bare_section("tell me about s.124") == "tell me about"
 
 
 @pytest.mark.data
