@@ -583,7 +583,7 @@ def run_live_probe(
 # ---------------------------------------------------------------------------- main runner
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     default_out = Path(os.environ.get("CV_SCRATCH", "scratch")) / "probes-resilience"
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument(
@@ -599,7 +599,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--probes-repo", type=Path, default=PROBES_REPO)
     parser.add_argument("--out", type=Path, default=default_out, help="output directory")
-    args = parser.parse_args(argv)
+    parser.add_argument("--pace", type=float, default=3.0, help="seconds between live requests")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
 
     repo: Path = args.probes_repo.expanduser().resolve()
     out: Path = args.out.resolve()
@@ -635,7 +640,7 @@ def main(argv: list[str] | None = None) -> int:
         headers = load_access_headers()
         for idx, probe in enumerate(all_probes):
             if idx > 0:
-                time.sleep(3.0)  # Pace requests 3 s apart
+                time.sleep(args.pace)  # pause between live requests (--pace)
             res = run_live_probe(probe, args.base_url, headers, claim_shapes)
             results.append(res)
             counts[res["status"]] += 1
