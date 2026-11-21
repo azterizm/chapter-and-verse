@@ -13,7 +13,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from legal_rag_router.grammars.uk_grammar import GRAMMAR as UK_GRAMMAR
 from legal_rag_router.identifiers import scan_identifiers
@@ -47,6 +47,10 @@ _WORD_RE = re.compile(r"\b[A-Za-z]+\b")
 # Internal placeholder template
 _TAG_FMT = "\x00CV_PROTECTED_{}\x00"
 _TAG_SPLIT_RE = re.compile(r"(\x00CV_PROTECTED_\d+\x00)")
+
+_NEGATING_PREFIXES: Final = ("un", "in", "im", "il", "ir", "non", "dis", "mis")
+_MIN_INFLECTION_PREFIX_LEN: Final = 5
+_MIN_INFLECTION_WORD_LEN: Final = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,8 +140,35 @@ def _apply_casing(original: str, candidate: str) -> str:
     return candidate.lower()
 
 
-def _correct_word(word: str, sym: SymSpell) -> tuple[str, tuple[str, str] | None, bool, bool]:
-    """Check and correct a single word under R4 correction policy.
+def _is_middle_of_sentence(preceding: str) -> bool:
+    """Return True if word is in the middle of a sentence (not at sentence start)."""
+    cleaned = preceding.rstrip(" \t\n\r\"'\u201c\u201d\u2018\u2019([{\\-")
+    if not cleaned:
+        return False
+    return cleaned[-1] not in ".?!"
+
+
+def _has_prefix_added_or_removed(orig: str, sugg: str) -> bool:
+    """Return True if sugg adds or removes a negating prefix relative to orig."""
+    for p in _NEGATING_PREFIXES:
+        if orig.startswith(p) and not sugg.startswith(p):
+            rem = orig[len(p) :].lstrip("-")
+            if sugg == rem:
+                return True
+        if sugg.startswith(p) and not orig.startswith(p):
+            rem = sugg[len(p) :].lstrip("-")
+            if orig == rem:
+                return True
+    return False
+
+
+def _correct_word(  # noqa: PLR0911
+    word: str,
+    sym: SymSpell,
+    *,
+    is_middle_of_sentence: bool = False,
+) -> tuple[str, tuple[str, str] | None, bool, bool]:
+    """Check and correct a single word under R4 correction policy and R2 safety rules.
 
     Returns:
         (replacement_word, correction_pair_or_none, evaluated_bool, miss_bool)
@@ -145,7 +176,13 @@ def _correct_word(word: str, sym: SymSpell) -> tuple[str, tuple[str, str] | None
     if len(word) <= MIN_CORRECTION_WORD_LEN:
         return word, None, False, False
 
+    # R2 safety rule: never correct capitalised words in the middle of a sentence
+    if is_middle_of_sentence and word[0].isupper():
+        return word, None, False, False
+
     lower_word = word.lower()
+
+    # R2 safety rule: never apply a correction when original word is in the dictionary
     if lower_word in sym.words:
         return word, None, True, False
 
@@ -161,13 +198,45 @@ def _correct_word(word: str, sym: SymSpell) -> tuple[str, tuple[str, str] | None
         return word, None, True, False
 
     best_term = closest[0].term
+
+    # R2 safety rule: never apply a correction when original word is in the dictionary
+    if lower_word in sym.words:
+        return word, None, True, False
+
+    # R2 safety rule: never apply a correction when original and suggestion share the same first 5
+    # letters and differ only in the ending (inflection or derivation), unless the original has
+    # no dictionary entry and the edit distance is 1 and the word is 6 or more letters
+    if (
+        len(lower_word) >= _MIN_INFLECTION_PREFIX_LEN
+        and len(best_term) >= _MIN_INFLECTION_PREFIX_LEN
+        and lower_word[:_MIN_INFLECTION_PREFIX_LEN] == best_term[:_MIN_INFLECTION_PREFIX_LEN]
+    ):
+        allowed = (
+            (lower_word not in sym.words)
+            and (min_dist == 1)
+            and (len(lower_word) >= _MIN_INFLECTION_WORD_LEN)
+        )
+        if not allowed:
+            return word, None, True, False
+
+    # R2 safety rule: never apply a correction that adds or removes a negating prefix
+    # (un, in, im, il, ir, non, dis, mis) relative to the original
+    if _has_prefix_added_or_removed(lower_word, best_term):
+        return word, None, True, False
+
     corrected_word = _apply_casing(word, best_term)
     if corrected_word != word:
         return corrected_word, (word, corrected_word), True, False
     return word, None, True, False
 
 
-def _correct_segment(seg: str, sym: SymSpell) -> tuple[str, list[tuple[str, str]], int, int]:
+def _correct_segment(
+    seg: str,
+    sym: SymSpell,
+    *,
+    query_pos: int = 0,
+    query: str = "",
+) -> tuple[str, list[tuple[str, str]], int, int]:
     """Correct spelling in an unprotected text segment."""
     matches = list(_WORD_RE.finditer(seg))
     seg_chars = list(seg)
@@ -178,7 +247,13 @@ def _correct_segment(seg: str, sym: SymSpell) -> tuple[str, list[tuple[str, str]
     # Process right-to-left to safely modify character slices
     for m in reversed(matches):
         word = m.group()
-        corrected_word, corr, was_eval, was_miss = _correct_word(word, sym)
+        word_start = query_pos + m.start()
+        preceding = query[:word_start] if query else seg[: m.start()]
+        is_middle = _is_middle_of_sentence(preceding)
+
+        corrected_word, corr, was_eval, was_miss = _correct_word(
+            word, sym, is_middle_of_sentence=is_middle
+        )
         if was_eval:
             evaluated += 1
         if was_miss:
@@ -233,13 +308,18 @@ def normalise(
     corrections: list[tuple[str, str]] = []
     words_evaluated = 0
     miss_count = 0
+    query_pos = 0
 
     for seg in segments:
         if seg in reverse_map:
             corrected_segments.append(seg)
+            query_pos += len(reverse_map[seg])
             continue
 
-        c_seg, seg_corrs, seg_eval, seg_miss = _correct_segment(seg, sym)
+        c_seg, seg_corrs, seg_eval, seg_miss = _correct_segment(
+            seg, sym, query_pos=query_pos, query=query
+        )
+        query_pos += len(seg)
         corrected_segments.append(c_seg)
         corrections.extend(seg_corrs)
         words_evaluated += 1 if seg_eval else 0

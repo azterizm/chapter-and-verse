@@ -61,6 +61,8 @@ def symspell_dict(tmp_path_factory: pytest.TempPathFactory) -> SymSpell:
         "order": 10000,
         "section": 5000,
         "tribunal": 1000,
+        "redundancy": 5000,
+        "pay": 10000,
     }
     for word, count in test_words.items():
         sym.create_dictionary_entry(word, count)
@@ -258,3 +260,128 @@ def test_dictionary_builder_fixture(tmp_path: Path) -> None:
     manifest_file = tmp_path / "manifest.json"
     assert dict_file.is_file()
     assert manifest_file.is_file()
+
+
+def test_r2_never_correct_when_original_in_dictionary(symspell_dict: SymSpell) -> None:
+    """R2: never apply a correction when the original word is in the dictionary."""
+    words = [
+        "dismissed",
+        "automatically",
+        "unfairly",
+        "because",
+        "puts",
+        "unwanted",
+        "violating",
+        "arrested",
+        "defrauding",
+        "induced",
+        "refused",
+        "unmarried",
+    ]
+    for w in words:
+        res = normalise(f"check {w} here", dictionary=symspell_dict)
+        assert w in res.text
+        assert res.corrections == ()
+
+
+def test_r2_same_first_5_letters_ending_difference(tmp_path: Path) -> None:
+    """R2: never apply correction when original and suggestion share same first 5 letters
+
+    and differ only in ending, unless original has no dictionary entry, distance is 1, and len >= 6.
+    """
+    dict_file = tmp_path / "dict_r2_endings.txt"
+    dict_file.write_text(
+        "dismisses 1000\n"
+        "violation 1000\n"
+        "defraying 1000\n"
+        "employment 1000\n"
+        "dismissal 1000\n"
+        "orders 1000\n",
+        encoding="utf-8",
+    )
+    sym = load_dictionary(dict_file)
+
+    # violating -> violation differs by 2 edits: rejected
+    assert normalise("violating", dictionary=sym).text == "violating"
+
+    # defrauding -> defraying differs by 2 edits: rejected
+    assert normalise("defrauding", dictionary=sym).text == "defrauding"
+
+    # 5-letter word not in dict sharing first 5 letters cannot be corrected (requires len >= 6)
+    # "order" (5 letters) sharing first 5 letters with "orders" (6 letters) is rejected
+    assert normalise("order", dictionary=sym).text == "order"
+
+    # employmnet -> employment (len 10, dist 1, not in dict): allowed
+    assert normalise("employmnet", dictionary=sym).text == "employment"
+
+    # dismisal -> dismissal (len 8, dist 1, not in dict): allowed
+    assert normalise("dismisal", dictionary=sym).text == "dismissal"
+
+
+def test_r2_negating_prefix_protection(tmp_path: Path) -> None:
+    """R2: never apply a correction that adds or removes a negating prefix."""
+    dict_file = tmp_path / "dict_r2_prefix.txt"
+    dict_file.write_text(
+        "married 5000\n"
+        "unmarried 50\n"
+        "unfair 5000\n"
+        "domestic 5000\n"
+        "agree 5000\n"
+        "lawful 5000\n"
+        "active 5000\n"
+        "legal 5000\n"
+        "proper 5000\n"
+        "relevant 5000\n"
+        "leading 5000\n",
+        encoding="utf-8",
+    )
+    sym = load_dictionary(dict_file)
+
+    # unmarried never corrected to married (removes un)
+    assert normalise("unmarried", dictionary=sym).text == "unmarried"
+
+    # married never corrected to unmarried (adds un)
+    assert normalise("married", dictionary=sym).text == "married"
+
+    # non-domestic never corrected to domestic (removes non)
+    assert normalise("non-domestic", dictionary=sym).text == "non-domestic"
+
+    # disagree never corrected to agree (removes dis)
+    assert normalise("disagree", dictionary=sym).text == "disagree"
+
+    # unfiar still corrected to unfair (negating prefix neither added nor removed)
+    assert normalise("unfiar", dictionary=sym).text == "unfair"
+
+
+def test_r2_capitalised_words_in_middle_of_sentence(symspell_dict: SymSpell) -> None:
+    """R2: never correct capitalised words in the middle of a sentence."""
+    # Ravensbourne is in middle of sentence, capitalised: must not be corrected
+    q1 = "claims under the Ravensbourne Tenancies Act"
+    assert normalise(q1, dictionary=symspell_dict).text == q1
+
+    # Smith is in middle of sentence: must not be corrected; unfiar is lowercase and corrected
+    q2 = "Did Smith receive unfiar dismissal?"
+    assert normalise(q2, dictionary=symspell_dict).text == "Did Smith receive unfair dismissal?"
+
+    # Employmnet at the start of sentence IS corrected
+    q3 = "Employmnet Rights Act 1996 section 98"
+    assert normalise(q3, dictionary=symspell_dict).text == "Employment Rights Act 1996 section 98"
+
+    # Unfiar at the start of sentence IS corrected
+    q4 = "Unfiar dismissal"
+    assert normalise(q4, dictionary=symspell_dict).text == "Unfair dismissal"
+
+
+def test_r3_real_typos_fixed(symspell_dict: SymSpell) -> None:
+    """R3: real typos must still be fixed."""
+    res1 = normalise("unfiar dismisal compensatory award cap", dictionary=symspell_dict)
+    assert res1.text == "unfair dismissal compensatory award cap"
+    assert res1.corrections == (("unfiar", "unfair"), ("dismisal", "dismissal"))
+
+    res2 = normalise("Employmnet Rights Act 1996 section 98", dictionary=symspell_dict)
+    assert res2.text == "Employment Rights Act 1996 section 98"
+    assert res2.corrections == (("Employmnet", "Employment"),)
+
+    res3 = normalise("redundnacy pay", dictionary=symspell_dict)
+    assert res3.text == "redundancy pay"
+    assert res3.corrections == (("redundnacy", "redundancy"),)
