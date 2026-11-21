@@ -11,7 +11,9 @@ Thread-safe lazy-loaded spaCy pass yielding:
 from __future__ import annotations
 
 import functools
+import logging
 import re
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -27,6 +29,24 @@ __all__ = [
     "analyse",
     "get_nlp",
 ]
+
+log = logging.getLogger(__name__)
+
+
+class _FaultCounter:
+    """Thread-safe counter for logging retokenization fault counts."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def increment(self) -> int:
+        with self._lock:
+            self._count += 1
+            return self._count
+
+
+_retokenize_fault_counter = _FaultCounter()
 
 TARGET_POS: Final[frozenset[str]] = frozenset({"NOUN", "PROPN", "ADJ", "NUM"})
 NEGATION_WORDS: Final[frozenset[str]] = frozenset(
@@ -227,15 +247,35 @@ def _retokenize_protected(
     nlp: Language,
 ) -> Doc:
     """Merge protected character spans into single tokens and re-run pipeline."""
-    char_spans = []
+    token_spans: list[tuple[int, int]] = []
     for start, end in merged_protected:
         sp = doc.char_span(start, end, alignment_mode="expand")
-        if sp is not None:
-            char_spans.append(sp)
-    if char_spans:
-        with doc.retokenize() as retokenizer:
-            for sp in char_spans:
-                retokenizer.merge(sp)
+        if sp is not None and sp.end > sp.start:
+            token_spans.append((sp.start, sp.end))
+
+    if token_spans:
+        token_spans.sort(key=lambda x: (x[0], -x[1]))
+        merged_tokens: list[tuple[int, int]] = []
+        for s, e in token_spans:
+            if not merged_tokens:
+                merged_tokens.append((s, e))
+            else:
+                prev_s, prev_e = merged_tokens[-1]
+                if s <= prev_e:
+                    merged_tokens[-1] = (prev_s, max(prev_e, e))
+                else:
+                    merged_tokens.append((s, e))
+
+        spans_to_merge = [doc[s:e] for s, e in merged_tokens if e > s + 1]
+        if spans_to_merge:
+            try:
+                with doc.retokenize() as retokenizer:
+                    for sp in spans_to_merge:
+                        retokenizer.merge(sp)
+            except ValueError:
+                count = _retokenize_fault_counter.increment()
+                log.warning("retokenization failed (count=%d)", count)
+
     for _, proc in nlp.pipeline:
         doc = proc(doc)
     return doc

@@ -113,7 +113,7 @@ from chapterverse.discovery import (
 )
 from chapterverse.extractive import extractive_answer, highlight_span, query_terms
 from chapterverse.nlp import analyse
-from chapterverse.normalise import find_protected_spans, load_dictionary, normalise
+from chapterverse.normalise import Normalised, find_protected_spans, load_dictionary, normalise
 from chapterverse.pii import Masked, mask_pii
 from chapterverse.providers.judge_chat import RotationJudgeChat
 from chapterverse.providers.openai_compat import ProviderWarming
@@ -644,30 +644,30 @@ class Pipeline:
                     outcome.mode = "closed"
         return outcome
 
-    def _run(self, request: AskRequest, stream: _Stream, cancelled: Callable[[], bool]) -> None:
-        raw = request.query
-
-        # R1.1: Protected spans of the raw query (citations, identifiers, etc.)
+    def _normalise_and_route(
+        self, raw: str, context: RouteContext | None
+    ) -> tuple[Normalised, Masked, RouteResult]:
         citation_spans = find_protected_spans(raw)
-
-        # R1.2: nlp.analyse(raw, protected); take entity spans PII would mask
         analysis = analyse(raw, protected_spans=citation_spans)
         router_index = getattr(self.router, "index", None)
         masked = mask_pii(raw, analysis, router_index=router_index, protected_spans=citation_spans)
         name_spans = list(masked.name_spans)
 
-        # R1.3: normalise(raw, dictionary, protect=citation spans + name spans)
         dict_obj = self._get_dictionary()
         protect_spans = list(citation_spans) + name_spans
         norm = normalise(raw, dictionary=dict_obj, protect=protect_spans)
+        norm_result = self.router.route(norm.text, context=context)
+        return norm, masked, norm_result
 
-        # R1.4: Route the normalised text. Send corrections_applied as NoticeEvent
-        context = RouteContext(coordinates=request.context) if request.context else None
-        result = self.router.route(norm.text, context=context)
+    def _emit_route_with_corrections(
+        self,
+        stream: _Stream,
+        result: RouteResult,
+        norm_corrections: Sequence[tuple[str, str]],
+    ) -> None:
         stream.outcome.route_status = result.status.value
-
         combined_corrections = tuple(
-            dict.fromkeys((*norm.corrections, *((a, b) for a, b in result.corrections)))
+            dict.fromkeys((*norm_corrections, *((a, b) for a, b in result.corrections)))
         )
         route_event = RouteEvent.from_route_result(result)
         if combined_corrections:
@@ -678,46 +678,100 @@ class Pipeline:
         if notice is not None:
             stream(notice)
 
-        if result.status is RouteStatus.AMBIGUOUS:
+    def _discover_or_refuse(
+        self, stream: _Stream, raw: str, norm_text: str, norm_result: RouteResult
+    ) -> None:
+        router_index = getattr(self.router, "index", None)
+        snapshot = getattr(router_index, "snapshot", "") or self.store.snapshot
+        out_of_scope = check_out_of_scope(raw, snapshot) or check_out_of_scope(norm_text, snapshot)
+        if out_of_scope is not None:
+            stream(out_of_scope)
+            self._receipt(stream, norm_result, mode="refusal")
+            return
+
+        outcome = discover_step(self.router, norm_text)
+        if isinstance(outcome, RefusalEvent):  # out_of_scope
+            stream(outcome)
+            self._receipt(stream, norm_result, mode="refusal")
+            return
+        if isinstance(outcome, NoEvidence):
+            stream(outcome.receipt)
+            self._receipt(stream, norm_result, mode="refusal")
+            return
+        if isinstance(outcome, Suggest):
             stream.outcome.mode = "clarify"
-            stream(clarify_event(result, router=self.router, store=self.store))
+            stream(outcome.clarify_event)
             stream.done()
             return
 
-        # R1.5: On ROUTE_UNRESOLVED: out-of-scope rule, then discover_step
-        if result.status is RouteStatus.UNRESOLVED:
-            snapshot = (
-                getattr(getattr(self.router, "index", None), "snapshot", "") or self.store.snapshot
-            )
-            out_of_scope = check_out_of_scope(raw, snapshot) or check_out_of_scope(
-                norm.text, snapshot
-            )
-            if out_of_scope is not None:
-                stream(out_of_scope)
-                self._receipt(stream, result, mode="refusal")
-                return
+    def _handle_unresolved(
+        self,
+        stream: _Stream,
+        raw: str,
+        norm_text: str,
+        norm_result: RouteResult,
+        norm_corrections: Sequence[tuple[str, str]],
+    ) -> None:
+        self._emit_route_with_corrections(stream, norm_result, norm_corrections)
 
-            outcome = discover_step(self.router, norm.text)
-            if isinstance(outcome, RefusalEvent):  # out_of_scope
-                stream(outcome)
-                self._receipt(stream, result, mode="refusal")
-                return
-            if isinstance(outcome, NoEvidence):
-                stream(outcome.receipt)
-                self._receipt(stream, result, mode="refusal")
-                return
-            if isinstance(outcome, Suggest):
-                stream.outcome.mode = "clarify"
-                stream(outcome.clarify_event)
-                stream.done()
-                return
-
-        if result.status is not RouteStatus.BOUNDED:
-            stream(route_refusal(result))
-            self._receipt(stream, result, mode="refusal")
+        if norm_result.status is RouteStatus.AMBIGUOUS:
+            stream.outcome.mode = "clarify"
+            stream(clarify_event(norm_result, router=self.router, store=self.store))
+            stream.done()
             return
 
-        self._bounded(request, result, stream, cancelled, masked=masked, norm_text=norm.text)
+        if norm_result.status is RouteStatus.UNRESOLVED:
+            self._discover_or_refuse(stream, raw, norm_text, norm_result)
+            return
+
+        stream(route_refusal(norm_result))
+        self._receipt(stream, norm_result, mode="refusal")
+
+    def _handle_raw_fallback(self, stream: _Stream, raw_result: RouteResult) -> None:
+        stream.outcome.route_status = raw_result.status.value
+        stream(RouteEvent.from_route_result(raw_result))
+
+        if raw_result.status is RouteStatus.AMBIGUOUS:
+            stream.outcome.mode = "clarify"
+            stream(clarify_event(raw_result, router=self.router, store=self.store))
+            stream.done()
+            return
+
+        stream(route_refusal(raw_result))
+        self._receipt(stream, raw_result, mode="refusal")
+
+    def _run(self, request: AskRequest, stream: _Stream, cancelled: Callable[[], bool]) -> None:
+        raw = request.query
+        context = RouteContext(coordinates=request.context) if request.context else None
+
+        # R2: Route the RAW query first.
+        raw_result = self.router.route(raw, context=context)
+
+        # If the raw result is ROUTE_BOUNDED, use it and the raw text;
+        # spelling correction is not applied and no corrections notice is sent.
+        if raw_result.status is RouteStatus.BOUNDED:
+            stream.outcome.route_status = raw_result.status.value
+            stream(RouteEvent.from_route_result(raw_result))
+            self._bounded(request, raw_result, stream, cancelled, norm_text=raw)
+            return
+
+        norm, masked, norm_result = self._normalise_and_route(raw, context)
+
+        # R2: use the normalised result only if it is ROUTE_BOUNDED,
+        # or if the raw result was ROUTE_UNRESOLVED (then discovery runs on the normalised text);
+        # in every other case keep the raw result (raw abstentions and clarifications stand).
+        if norm_result.status is RouteStatus.BOUNDED:
+            self._emit_route_with_corrections(stream, norm_result, norm.corrections)
+            self._bounded(
+                request, norm_result, stream, cancelled, masked=masked, norm_text=norm.text
+            )
+            return
+
+        if raw_result.status is RouteStatus.UNRESOLVED:
+            self._handle_unresolved(stream, raw, norm.text, norm_result, norm.corrections)
+            return
+
+        self._handle_raw_fallback(stream, raw_result)
 
     # ------------------------------------------------------------------ bound
 

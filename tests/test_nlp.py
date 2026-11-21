@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from chapterverse.nlp import Analysis, Cues, Entity, analyse, get_nlp
+from chapterverse.normalise import find_protected_spans
 
 
 def test_lazy_load_nlp() -> None:
@@ -139,3 +140,66 @@ def test_analyse_cues_existence() -> None:
     assert analyse("Does a right to notice exist in UK law?").cues.has_existence_question is True
     assert analyse("Does whistleblowing protection exist").cues.has_existence_question is True
     assert analyse("Can my employer dismiss me?").cues.has_existence_question is False
+
+
+def test_analyse_overlapping_and_touching_protected_spans() -> None:
+    text = "Under s.124(1ZA)(a) Employment Rights Act 1996, the limit applies."
+    s1 = text.index("Employment Rights")
+    e1 = s1 + len("Employment Rights")
+    s2 = text.index("Rights Act 1996")
+    e2 = s2 + len("Rights Act 1996")
+    res = analyse(text, protected_spans=[(s1, e1), (s2, e2)])
+    assert res.doc is not None
+    assert (s1, e2) in res.protected_spans
+
+    s3 = text.index("s.124")
+    e3 = s3 + len("s.124")
+    s4 = e3
+    e4 = s4 + len("(1ZA)")
+    res_touching = analyse(text, protected_spans=[(s3, e3), (s4, e4)])
+    assert res_touching.doc is not None
+    assert (s3, e4) in res_touching.protected_spans
+
+
+def test_analyse_nine_fault_queries_no_exception() -> None:
+    queries = [
+        # uk-misroute-0054
+        (
+            "Act 2014, paragraph 129 of Schedule 46(4) to the Finance Act 2013 (c. 29), "
+            "article 7(3) of S.I. 2015/1810, article 178 of S.I. 2015/80 and regulation 5 of "
+            "S.I. 2017/468."
+        ),
+        # uk-misroute-0067
+        "1996 c. 56, ss. 582(2), 583(2),Sch. 38, Pt",
+        # uk-misroute-0265
+        (
+            "S.I. 2020/1495, regs. 1(2), 21), S.I. 2020/1545, Pt. 4 and 2020 c. 26, "
+            "Sch. 2 para. 7(7)-(9))"
+        ),
+        # uk-misroute-0293
+        (
+            "2000 c. 26, s. 19A(6)(8))(10)(11) (as inserted by Enterprise Act 2002 (c. 40), "
+            "ss. 278, 279, Sch. 25 para. 42(4)"
+        ),
+        # uk-misroute-0461
+        (
+            "The Town and Country Planning (Environmental Impact Assessment) (Wales) "
+            "Regulations 2017 (S.I. 2017/567), reg. 1(2), Sch. 8 para. 10(3)-(5) "
+            "(with regs. 1(4), 55(2)(3), 63, 65)"
+        ),
+        # uk-misroute-0465
+        "Finance Act 2007 (c. 11), Sch. 25 paras. 20(3)23(2)",
+        # uk-misroute-0567
+        (
+            "S.I. 2020/1495, regs. 1(2), 21), S.I. 2020/1545, Pt. 4 and 2020 c. 26, "
+            "Sch. 2 para. 7(7)-(9))"
+        ),
+        # uk-misroute-0653
+        "Finance Act 1998 (c. 36), Sch. 19 para. 12(5), Sch. 27 Pt. 3(28)",
+        # uk-identifier-0027
+        "uk/ukpga/1996/18' or '1'=='1",
+    ]
+    for q in queries:
+        citation_spans = find_protected_spans(q)
+        res = analyse(q, protected_spans=citation_spans)
+        assert res.doc is not None
