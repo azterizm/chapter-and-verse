@@ -30,6 +30,7 @@ from chapterverse.store import (
     open_store,
 )
 from chapterverse.store.format import DICT_NAME, FRAMES_NAME, MANIFEST_NAME, TEXT_NAME
+from chapterverse.store.reader import _map
 
 REPO = Path(__file__).resolve().parents[1]
 TEXTSTORE = REPO / "build" / "textstore.py"
@@ -290,6 +291,95 @@ def test_resident_and_mapped_give_byte_identical_results(
         assert mapped.has_text(instrument_coordinate(c)) is resident.has_text(
             instrument_coordinate(c)
         )
+
+
+def _single_stream_decompress(store: CompressedTextStore) -> bytes:
+    dctx = zstandard.ZstdDecompressor(dict_data=store._dictionary)
+    text_path = store.directory / TEXT_NAME
+    with text_path.open("rb") as fh:
+        reader = dctx.stream_reader(fh, read_across_frames=True)
+        chunks: list[bytes] = []
+        while True:
+            chunk = reader.read(4 * 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 7])
+def test_parallel_decompression_identity_with_threads(
+    stores: dict[str, Path],
+    fixture_data_root: Path,
+    coordinates: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    k: int,
+) -> None:
+    monkeypatch.setenv("STORE_DECOMPRESS_THREADS", str(k))
+    clear_resident_cache()
+    for variant in ("default", "dictionary"):
+        path = stores[variant]
+        mapped = CompressedTextStore(path, resident=False)
+        ref_buf = _single_stream_decompress(mapped)
+        ref_sha256 = hashlib.sha256(ref_buf).hexdigest()
+
+        resident = open_store(path, resident=True)
+        assert resident.is_resident is True
+        assert resident._decompressed is not None
+        assert isinstance(resident._decompressed, (bytearray, bytes))
+        assert hashlib.sha256(resident._decompressed).hexdigest() == ref_sha256
+
+        for coordinate in coordinates:
+            got = resident.get(coordinate)
+            want = load_provision(fixture_data_root, coordinate)
+            assert got == want
+            found = resident._locate(coordinate)
+            if found is not None:
+                _, base, head, _, _ = found
+                raw_bytes = resident._read([(base, base + head)])
+                assert isinstance(raw_bytes, bytes)
+                assert raw_bytes == ref_buf[base : base + head]
+        clear_resident_cache()
+
+
+def test_truncated_text_zst_raises_store_load_error(
+    stores: dict[str, Path], tmp_path: Path
+) -> None:
+    path = _copy(stores["default"], tmp_path / "trunc")
+    raw = (path / TEXT_NAME).read_bytes()
+    (path / TEXT_NAME).write_bytes(raw[: len(raw) // 2])
+    with pytest.raises(StoreLoadError):
+        open_store(path, resident=True)
+
+
+def test_corrupted_text_zst_raises_store_load_error(
+    stores: dict[str, Path], tmp_path: Path
+) -> None:
+    path = _copy(stores["default"], tmp_path / "corrupt")
+    (path / TEXT_NAME).write_bytes(b"\xff\x00" * 500)
+    with pytest.raises(StoreLoadError):
+        open_store(path, resident=True)
+
+
+def test_decompress_all_direct_corruption_raises_store_load_error(
+    stores: dict[str, Path], tmp_path: Path
+) -> None:
+    path = _copy(stores["default"], tmp_path / "direct_corrupt")
+    store = CompressedTextStore(path, resident=False)
+    target = path / TEXT_NAME
+    raw = bytearray(target.read_bytes())
+    raw[len(raw) // 2] ^= 0xFF
+    target.write_bytes(bytes(raw))
+    bad_store = CompressedTextStore.__new__(CompressedTextStore)
+    bad_store._root = path
+    bad_store._frame_count = store._frame_count
+    bad_store._ustart = store._ustart
+    bad_store._cstart = store._cstart
+    bad_store._dictionary = store._dictionary
+    bad_store._text = _map(target)
+    bad_store._text_view = memoryview(bad_store._text)
+    with pytest.raises(StoreLoadError):
+        bad_store._decompress_all(path)
 
 
 # ---------------------------------------------------------------------------- format

@@ -27,8 +27,9 @@ import re
 import sys
 import threading
 from array import array
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
@@ -62,7 +63,7 @@ _U64: Final = "Q"
 _CONTROL: Final = re.compile(r"[\x00-\x1f]")
 _CHUNK: Final = 1 << 22  # 4 MiB
 
-_RESIDENT_CACHE: dict[str, bytes] = {}
+_RESIDENT_CACHE: dict[str, bytearray | bytes] = {}
 _RESIDENT_LOCK = threading.Lock()
 
 
@@ -85,6 +86,20 @@ def _u64_view(raw: mmap.mmap | bytes) -> Sequence[int]:
     values = array(_U64, bytes(raw))  # pragma: no cover - big-endian hosts only
     values.byteswap()  # pragma: no cover
     return values  # pragma: no cover
+
+
+def _partition_frames(cstart: Sequence[int], frame_count: int, k_val: int) -> list[tuple[int, int]]:
+    total_c = cstart[-1]
+    boundaries = [0]
+    for j in range(1, k_val):
+        target = (j * total_c) // k_val
+        idx = bisect_left(cstart, target)
+        if 0 < idx < frame_count and abs(cstart[idx - 1] - target) < abs(cstart[idx] - target):
+            idx = idx - 1
+        idx = max(boundaries[-1], min(idx, frame_count))
+        boundaries.append(idx)
+    boundaries.append(frame_count)
+    return [(boundaries[i], boundaries[i + 1]) for i in range(k_val)]
 
 
 class CompressedTextStore:
@@ -270,24 +285,68 @@ class CompressedTextStore:
         base, head, size, has_text = decode_instrument(value)
         return instrument, base, head, size, has_text
 
-    def _decompress_all(self, root: Path) -> bytes:
+    def _decompress_all(self, root: Path) -> bytearray | bytes:
         if self._frame_count == 0:
             return b""
-        dctx = zstandard.ZstdDecompressor(dict_data=self._dictionary)
-        text_path = root / TEXT_NAME
-        with text_path.open("rb") as fh:
-            reader = dctx.stream_reader(fh, read_across_frames=True)
-            chunks: list[bytes] = []
-            while True:
-                chunk = reader.read(_CHUNK)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            buf = b"".join(chunks)
-        if len(buf) != self._ustart[-1]:
-            raise StoreLoadError(
-                f"store inconsistent: decompressed {len(buf)} bytes, expected {self._ustart[-1]}"
-            )
+        total_source_bytes = self._ustart[-1]
+        if total_source_bytes == 0:
+            return bytearray()
+
+        threads_env = os.environ.get("STORE_DECOMPRESS_THREADS", "").strip()
+        if threads_env:
+            try:
+                k_val = int(threads_env)
+            except ValueError:
+                k_val = min(os.cpu_count() or 1, 8)
+        else:
+            k_val = min(os.cpu_count() or 1, 8)
+        k_val = max(1, k_val)
+
+        ranges = _partition_frames(self._cstart, self._frame_count, k_val)
+        buf = bytearray(total_source_bytes)
+        buf_view = memoryview(buf)
+
+        def _decompress_range(f_start: int, f_end: int) -> None:
+            if f_start >= f_end:
+                return
+            c_begin = self._cstart[f_start]
+            c_end = self._cstart[f_end]
+            u_begin = self._ustart[f_start]
+            u_end = self._ustart[f_end]
+            expected_len = u_end - u_begin
+
+            try:
+                dctx = zstandard.ZstdDecompressor(dict_data=self._dictionary)
+                c_slice = self._text_view[c_begin:c_end]
+                out_slice = buf_view[u_begin:u_end]
+                reader = dctx.stream_reader(c_slice, read_across_frames=True)
+                total_read = 0
+                while total_read < expected_len:
+                    n = reader.readinto(out_slice[total_read:])
+                    if n == 0:
+                        break
+                    total_read += n
+                extra = reader.read(1)
+            except Exception as exc:
+                raise StoreLoadError(
+                    f"store inconsistent: decompression error in frames {f_start}..{f_end}: {exc}"
+                ) from exc
+
+            if total_read != expected_len:
+                raise StoreLoadError(
+                    f"store inconsistent: decompressed {total_read} bytes in frames "
+                    f"{f_start}..{f_end}, expected {expected_len}"
+                )
+            if extra != b"":
+                raise StoreLoadError(
+                    f"store inconsistent: extra decompressed bytes in frames {f_start}..{f_end}"
+                )
+
+        with ThreadPoolExecutor(max_workers=k_val) as pool:
+            futures = [pool.submit(_decompress_range, f_start, f_end) for f_start, f_end in ranges]
+            for fut in futures:
+                fut.result()
+
         return buf
 
     def _decompressor(self) -> zstandard.ZstdDecompressor:
@@ -306,8 +365,8 @@ class CompressedTextStore:
         if self._decompressed is not None:
             if len(spans) == 1:
                 begin, end = spans[0]
-                return self._decompressed[begin:end]
-            return b"".join(self._decompressed[begin:end] for begin, end in spans)
+                return bytes(self._decompressed[begin:end])
+            return b"".join(bytes(self._decompressed[begin:end]) for begin, end in spans)
         ustart = self._ustart
         blocks: dict[int, bytes] = {}
         parts: list[bytes | memoryview] = []
