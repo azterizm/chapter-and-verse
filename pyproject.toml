@@ -23,6 +23,7 @@ dependencies = [
     "symspellpy==6.10.2",
     "spacy==3.8.18",
     "en-core-web-sm",
+    "onnxruntime==1.32.0",
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
