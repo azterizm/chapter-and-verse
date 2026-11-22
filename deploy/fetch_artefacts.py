@@ -27,6 +27,8 @@ Behaviour:
 - Downloads go to ``<file>.part`` and resume with an HTTP Range request after an interruption.
   A file is moved into place only after its hash matches. The manifest is written last.
 - With ``HF_DATASET`` unset, the script only verifies a mounted ``DATA_DIR`` (read-only is fine).
+- With ``--copy-to DIR``, copies the whole ``DATA_DIR`` tree to ``DIR`` and verifies all listed
+  files in one pass while copying. Requires source marker match on ``DATA_DIR`` (else exit 3).
 
 Environment:
 
@@ -68,6 +70,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 CHUNK = 1 << 20
+COPY_CHUNK = 4 << 20
 MAX_MANIFEST_BYTES = 64 << 20
 RETRIES = 5
 TIMEOUT_S = 60
@@ -469,12 +472,153 @@ def run(root: Path, settings: Settings) -> int:
     return 0
 
 
+def copy_one(src_path: Path, dst_path: Path, entry: Entry | None) -> None:
+    """Copy src_path to dst_path, hashing bytes while copying if entry is given."""
+    try:
+        if not src_path.is_file() or src_path.is_symlink():
+            raise FetchError(f"missing or invalid file: {src_path}")
+        if entry is not None and entry.size is not None:
+            actual_size = src_path.stat().st_size
+            if actual_size != entry.size:
+                raise FetchError(
+                    f"{entry.path}: size mismatch (expected {entry.size}, got {actual_size})"
+                )
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        h = hashlib.sha256() if entry is not None else None
+        bytes_copied = 0
+        with src_path.open("rb") as fsrc, dst_path.open("wb") as fdst:
+            while chunk := fsrc.read(COPY_CHUNK):
+                if h is not None:
+                    h.update(chunk)
+                fdst.write(chunk)
+                bytes_copied += len(chunk)
+        if entry is not None and h is not None:
+            if entry.size is not None and bytes_copied != entry.size:
+                raise FetchError(
+                    f"{entry.path}: size mismatch (expected {entry.size}, got {bytes_copied})"
+                )
+            digest = h.hexdigest()
+            if digest != entry.sha256:
+                raise FetchError(
+                    f"{entry.path}: checksum mismatch (expected {entry.sha256}, got {digest})"
+                )
+        shutil.copymode(src_path, dst_path)
+    except OSError as exc:
+        raise FetchError(f"I/O error copying {src_path} to {dst_path}: {exc}") from exc
+
+
+def _copy_and_expand_manifests(
+    src_root: Path,
+    dst_root: Path,
+    settings: Settings,
+    local_raw: bytes,
+    extras: dict[str, str],
+) -> tuple[list[Entry], set[str]]:
+    manifest_name = settings.manifest_name
+    manifest_path = src_root / manifest_name
+    local_sha = hashlib.sha256(local_raw).hexdigest()
+
+    copy_one(
+        manifest_path,
+        dst_root / manifest_name,
+        Entry(manifest_name, local_sha, len(local_raw)),
+    )
+    entries = parse_files(load_manifest(local_raw, settings.pinned, "local"))
+    extra_entries = [Entry(n, extras[n], None) for n in settings.extras]
+    entries = merge(entries, extra_entries)
+    copied_relpaths: set[str] = {manifest_name}
+
+    manifest_queue: list[Entry] = list(extra_entries)
+    manifest_queue.extend(
+        e for e in entries if e.path.endswith("-manifest.json") and e.path not in copied_relpaths
+    )
+    expanded: set[str] = set()
+    while manifest_queue:
+        m_entry = manifest_queue.pop(0)
+        if m_entry.path in expanded:
+            continue
+        expanded.add(m_entry.path)
+        if m_entry.path not in copied_relpaths:
+            copy_one(src_root / m_entry.path, dst_root / m_entry.path, m_entry)
+            copied_relpaths.add(m_entry.path)
+        nested = nested_manifest_entries(dst_root, m_entry)
+        if nested:
+            entries = merge(entries, nested)
+            manifest_queue.extend(
+                child
+                for child in nested
+                if child.path.endswith("-manifest.json") and child.path not in expanded
+            )
+    return entries, copied_relpaths
+
+
+def _discover_copy_tasks(
+    src_root: Path,
+    dst_root: Path,
+    entries_by_path: dict[str, Entry],
+    copied_relpaths: set[str],
+) -> tuple[list[tuple[Path, Path, Entry | None]], tuple[Path, Path, Entry | None] | None]:
+    tasks: list[tuple[Path, Path, Entry | None]] = []
+    marker_task: tuple[Path, Path, Entry | None] | None = None
+    for root, _dirs, files in os.walk(src_root):
+        rel_dir = os.path.relpath(root, src_root)
+        if rel_dir != ".":
+            (dst_root / rel_dir).mkdir(parents=True, exist_ok=True)
+        for fname in files:
+            src_file = Path(root) / fname
+            rel_posix = PurePosixPath(os.path.relpath(src_file, src_root)).as_posix()
+            if rel_posix in copied_relpaths:
+                continue
+            entry = entries_by_path.get(rel_posix)
+            if rel_posix == SOURCE_MARKER:
+                marker_task = (src_file, dst_root / rel_posix, entry)
+            else:
+                tasks.append((src_file, dst_root / rel_posix, entry))
+            copied_relpaths.add(rel_posix)
+    return tasks, marker_task
+
+
+def copy_tree(src_root: Path, dst_root: Path, settings: Settings) -> int:
+    """Copy the SRC tree to DIR, verifying all listed files in one pass."""
+    if not check_marker(src_root, settings):
+        return 3
+
+    manifest_path = src_root / settings.manifest_name
+    extras = local_extras(src_root, settings)
+    if not manifest_path.is_file() or extras is None:
+        return 3
+
+    local_raw = manifest_path.read_bytes()
+    entries, copied_relpaths = _copy_and_expand_manifests(
+        src_root, dst_root, settings, local_raw, extras
+    )
+
+    for entry in entries:
+        if not (src_root / entry.path).is_file():
+            raise FetchError(f"missing listed file in source: {entry.path}")
+
+    entries_by_path = {e.path: e for e in entries}
+    tasks, marker_task = _discover_copy_tasks(src_root, dst_root, entries_by_path, copied_relpaths)
+
+    if tasks:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=settings.workers) as pool:
+            futures = [pool.submit(copy_one, src_f, dst_f, ent) for src_f, dst_f, ent in tasks]
+            for fut in concurrent.futures.as_completed(futures):
+                fut.result()
+
+    if marker_task is not None:
+        copy_one(marker_task[0], marker_task[1], marker_task[2])
+
+    log(f"copied and verified {len(entries)} files into {dst_root}")
+    return 0
+
+
 DEFAULT_EXTRAS = (
     "index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json"
 )
 
 
-def config_from_env(env: dict[str, str]) -> Settings:
+def config_from_env(env: dict[str, str], default_workers: int = 4) -> Settings:
     dataset = env.get("HF_DATASET", "").strip()
     revision = env.get("HF_REVISION", "").strip()
     endpoint = env.get("HF_ENDPOINT", "https://huggingface.co").strip().rstrip("/")
@@ -490,7 +634,7 @@ def config_from_env(env: dict[str, str]) -> Settings:
     if pinned and not HEX64.match(pinned):
         raise ConfigError("MANIFEST_SHA256 is not 64 hex characters")
     try:
-        workers = int(env.get("ARTEFACTS_WORKERS", "4"))
+        workers = int(env.get("ARTEFACTS_WORKERS", str(default_workers)))
     except ValueError:
         raise ConfigError("ARTEFACTS_WORKERS is not an integer") from None
     if not 1 <= workers <= MAX_WORKERS:
@@ -517,6 +661,11 @@ def check_root(root: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--data-dir", default=os.environ.get("DATA_DIR", "/data"))
+    parser.add_argument(
+        "--copy-to",
+        metavar="DIR",
+        help="copy SRC tree to DIR and verify listed files in one pass",
+    )
     parser.add_argument("--verify-only", action="store_true", help="never download")
     parser.add_argument(
         "--marker-only",
@@ -526,12 +675,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(args.data_dir)
     try:
-        settings = config_from_env(dict(os.environ))
-        if args.verify_only:
+        default_workers = min(os.cpu_count() or 1, 8) if args.copy_to else 4
+        settings = config_from_env(dict(os.environ), default_workers=default_workers)
+        if args.verify_only and not args.copy_to:
             settings = Settings(None, settings.manifest_name, settings.pinned, settings.extras, 1)
         check_root(root)
         if args.marker_only:
             return 0 if check_marker(root, settings) else 3
+        if args.copy_to:
+            return copy_tree(root, Path(args.copy_to), settings)
         return run(root, settings)
     except ConfigError as exc:
         log(f"configuration error: {exc}")

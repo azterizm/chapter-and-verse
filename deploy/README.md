@@ -10,7 +10,7 @@ The Hugging Face Space standby, Worker failover and Terraform come in Slice 4.
 |---|---|
 | `Dockerfile` | Engine image, `linux/arm64` and `linux/amd64`. Build context is the repo root |
 | `Dockerfile.dockerignore` | Allow-list for that context. BuildKit reads it in preference to a root `.dockerignore` |
-| `entrypoint.sh` | Fast restart: checks source marker, copies to tmpfs and verifies once; then `uvicorn` with one worker |
+| `entrypoint.sh` | Fast restart: copies to tmpfs and verifies in one pass (--copy-to); then `uvicorn` with one worker |
 | `fetch_artefacts.py` | Downloads the artefacts into `/data`, checks every SHA-256, resumes, fails closed. Standard library only |
 | `compose.yml` | Engine on the A1: read-only root filesystem, 20 GB memory limit, artefacts volume, port bound to 127.0.0.1 |
 | `engine.env.example`, `cloudflared.env.example` | Templates for the env files kept outside the repo |
@@ -149,7 +149,7 @@ sudo REPO_URL=https://github.com/OWNER/chapter-and-verse.git bash /opt/chapter-a
 sudo -iu deploy docker compose -f /opt/chapter-and-verse/deploy/compose.yml logs -f engine
 ```
 
-The first start downloads about 4 GB of artefacts into the `chapter-and-verse-artefacts` volume. Later starts check the source marker (`--marker-only`), copy to `/ram`, verify the RAM copy once (`--verify-only`), and skip the volume re-hash. A checksum mismatch stops the container before uvicorn starts.
+The first start downloads about 4 GB of artefacts into the `chapter-and-verse-artefacts` volume. Later starts check the source marker and copy to `/ram` with verification in one pass (`--copy-to`), skipping the volume re-hash. A checksum mismatch stops the container before uvicorn starts.
 
 What `setup.sh` does, in order:
 

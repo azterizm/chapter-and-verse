@@ -8,13 +8,11 @@ DATA_DIR="${DATA_DIR:-/data}"
 RAM_DIR="${RAM_DIR:-/ram}"
 
 served_from_ram=0
-if [ -d "$RAM_DIR" ] && python /opt/app/fetch_artefacts.py --data-dir "$DATA_DIR" --marker-only >/dev/null 2>&1; then
-  if cp -R "$DATA_DIR"/. "$RAM_DIR"/ 2>/dev/null && python /opt/app/fetch_artefacts.py --data-dir "$RAM_DIR" --verify-only >/dev/null 2>&1; then
-    STORE_DIR="$RAM_DIR"
-    ROUTER_INDEX="$RAM_DIR/index"
-    CONCEPTS_INDEX="$RAM_DIR/concepts"
-    served_from_ram=1
-  fi
+if [ -d "$RAM_DIR" ] && python /opt/app/fetch_artefacts.py --copy-to "$RAM_DIR" --data-dir "$DATA_DIR" >/dev/null 2>&1; then
+  STORE_DIR="$RAM_DIR"
+  ROUTER_INDEX="$RAM_DIR/index"
+  CONCEPTS_INDEX="$RAM_DIR/concepts"
+  served_from_ram=1
 fi
 
 if [ "$served_from_ram" -eq 0 ]; then
