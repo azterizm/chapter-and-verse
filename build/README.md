@@ -158,4 +158,5 @@ reads it:
 | `corpus-manifest.json` and the store files | The text store, at the root |
 | `index/index-manifest.json` and the files it lists | The router index |
 | `concepts/concepts-manifest.json` and the files it lists | The router concept index |
+| `symspell/symspell-manifest.json` and the files it lists | The SymSpell spelling dictionary |
 | `README.md` | The dataset card |

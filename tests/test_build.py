@@ -19,6 +19,7 @@ import pytest
 from chapterverse.contracts import canonical_json
 from chapterverse.store import CompressedTextStore, open_store
 from chapterverse.store.format import MANIFEST_NAME, TEXT_NAME
+from chapterverse.symspell_build import build_dictionary
 
 REPO = Path(__file__).resolve().parents[1]
 BUILD = REPO / "build"
@@ -55,6 +56,13 @@ def textstore() -> ModuleType:
 def built(tmp_path_factory: pytest.TempPathFactory, fixture_data_root: Path) -> Path:
     out = tmp_path_factory.mktemp("built") / "store"
     build(fixture_data_root, out)
+    return out
+
+
+@pytest.fixture(scope="module")
+def built_symspell(built: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    out = tmp_path_factory.mktemp("symspell")
+    build_dictionary(open_store(built), out)
     return out
 
 
@@ -280,8 +288,10 @@ def publish(built: Path, data: Path, *extra: str) -> subprocess.CompletedProcess
     )
 
 
-def test_publish_is_a_dry_run_by_default(built: Path, fixture_data_root: Path) -> None:
-    result = publish(built, fixture_data_root)
+def test_publish_is_a_dry_run_by_default(
+    built: Path, fixture_data_root: Path, built_symspell: Path
+) -> None:
+    result = publish(built, fixture_data_root, "--symspell", str(built_symspell))
     assert result.returncode == 0, result.stderr
     plan_text, _, card = result.stdout.partition("\n---\n")
     plan = json.loads(plan_text)
@@ -298,21 +308,53 @@ def test_publish_is_a_dry_run_by_default(built: Path, fixture_data_root: Path) -
         router_names |= {f"{name}/{rel}" for rel in json.loads(manifest_path.read_bytes())["files"]}
         digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         assert plan["extra_manifests"][f"{name}/{manifest_name}"] == digest
+    symspell_manifest_path = built_symspell / "symspell-manifest.json"
+    symspell_digest = hashlib.sha256(symspell_manifest_path.read_bytes()).hexdigest()
+    assert plan["extra_manifests"]["symspell/symspell-manifest.json"] == symspell_digest
+    symspell_names = {"symspell/symspell-manifest.json", "symspell/dictionary.txt"}
     names = [f["path"] for f in plan["files"]]
     assert len(names) == len(set(names))
-    assert set(names) == store_names | router_names | {"README.md"}
+    assert set(names) == store_names | router_names | symspell_names | {"README.md"}
     for entry in plan["files"][:-1]:  # every file but the card carries the hash it will have
-        local = (
-            built / entry["path"]
-            if entry["path"] in store_names
-            else fixture_data_root / entry["path"]
-        )
+        if entry["path"] in store_names:
+            local = built / entry["path"]
+        elif entry["path"] in symspell_names:
+            local = built_symspell / Path(entry["path"]).name
+        else:
+            local = fixture_data_root / entry["path"]
         assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
     assert "license_name: ogl-3.0" in card
     assert "Open Government Licence v3.0" in card
     assert plan["corpus_id"] in card
+    assert "| `symspell/` |" in card
     assert not _FORBIDDEN.search(card)
     assert "**" not in card
+
+
+def test_publish_refuses_symspell_of_another_corpus_id(
+    built: Path, fixture_data_root: Path, built_symspell: Path, tmp_path: Path
+) -> None:
+    sym_copy = tmp_path / "sym"
+    shutil.copytree(built_symspell, sym_copy)
+    mpath = sym_copy / "symspell-manifest.json"
+    manifest = json.loads(mpath.read_bytes())
+    manifest["corpus_id"] = "0" * 64
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    result = publish(built, fixture_data_root, "--symspell", str(sym_copy))
+    assert result.returncode == 1
+    assert "symspell/symspell-manifest.json has corpus_id" in result.stderr
+
+
+def test_publish_refuses_a_damaged_symspell_dictionary(
+    built: Path, fixture_data_root: Path, built_symspell: Path, tmp_path: Path
+) -> None:
+    sym_copy = tmp_path / "sym"
+    shutil.copytree(built_symspell, sym_copy)
+    dpath = sym_copy / "dictionary.txt"
+    dpath.write_bytes(dpath.read_bytes() + b"extra")
+    result = publish(built, fixture_data_root, "--symspell", str(sym_copy))
+    assert result.returncode == 1
+    assert "symspell/dictionary.txt: does not match symspell-manifest.json" in result.stderr
 
 
 def test_publish_needs_repo_with_yes(built: Path, fixture_data_root: Path) -> None:

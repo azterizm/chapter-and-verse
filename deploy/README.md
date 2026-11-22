@@ -262,7 +262,7 @@ Artefact environment variables (`fetch_artefacts.py`):
 | `HF_REVISION` | 40-hex dataset commit. A branch name is refused unless `ARTEFACTS_ALLOW_BRANCH=1` |
 | `MANIFEST_SHA256` | Pin of `corpus-manifest.json` itself. Recommended |
 | `MANIFEST_NAME` | Default `corpus-manifest.json` |
-| `EXTRA_MANIFESTS` | Default `index/index-manifest.json,concepts/concepts-manifest.json`. Empty for none |
+| `EXTRA_MANIFESTS` | Default `index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json`. Empty for none |
 | `ARTEFACTS_WORKERS` | Parallel downloads, default 4 |
 
 Dataset layout, which is also the layout of `/data`:
@@ -272,6 +272,7 @@ Dataset layout, which is also the layout of `/data`:
 | `corpus-manifest.json` and the files it lists | Text store, as `build/publish_dataset.py` uploads it (files at the root, `files` entries with `size` and `sha256`) | `STORE_DIR=/data` |
 | `index/index-manifest.json` and its files | Router index | `LEGAL_DATA_ROOT=/data` |
 | `concepts/concepts-manifest.json` and its files | Concepts index | `LEGAL_DATA_ROOT=/data` |
+| `symspell/symspell-manifest.json` and its files | SymSpell dictionary | `SYMSPELL_DICT=/data/symspell/dictionary.txt` (via entrypoint.sh) |
 
 `MANIFEST_SHA256` pins the store manifest. The router manifests are fetched at the pinned dataset commit, their hashes are recorded in `/data/.artefacts-source.json`, and every file they list is checked. `build/publish_dataset.py` uploads the store only, so `index/` and `concepts/` must be uploaded to the same dataset commit by another step.
 
@@ -281,7 +282,7 @@ Dataset layout, which is also the layout of `/data`:
 |---|---|
 | Engine | Each build is tagged by commit. On the VM: `sudo REPO_REF=<previous commit or tag> REPO_URL=... bash /opt/chapter-and-verse/deploy/oracle/setup.sh`. That checks out the old commit and rebuilds. The image cache makes this quick when that commit was built before |
 | Engine, without rebuild | `docker tag` each image before replacing it (for example `chapter-and-verse-engine:<sha>`), then `ENGINE_IMAGE=chapter-and-verse-engine:<sha> docker compose -f deploy/compose.yml up -d` as `deploy` |
-| Artefacts | Set `HF_REVISION` (and `MANIFEST_SHA256`) in `engine.env` back to the previous dataset commit and restart the engine. Files are fetched again where they differ |
+| Artefacts | Set `HF_REVISION` (and `MANIFEST_SHA256`) in `engine.env` back to the previous dataset commit and restart the engine. Files are fetched again where they differ. Rolling artefacts back to a dataset revision without `symspell/` needs `EXTRA_MANIFESTS=index/index-manifest.json,concepts/concepts-manifest.json` |
 | Worker | `npx wrangler rollback` (choose the version), or `npx wrangler deployments list` then `npx wrangler rollback <version-id>` |
 | Pages | Dashboard, Workers and Pages, the project, Deployments: "Rollback to this deployment" |
 | Modal | `modal app rollback chapter-and-verse-judge`, or `modal app stop chapter-and-verse-judge` to take Modal out (the engine drops it from the rotation when it fails) |

@@ -16,13 +16,17 @@ from symspellpy import SymSpell  # type: ignore[import-untyped]
 
 from chapterverse.contracts import TextStore
 from chapterverse.store import open_store
+from chapterverse.store.manifest import corpus_id, read_manifest
 
 __all__ = [
+    "MANIFEST_NAME",
     "WORD_RE",
     "build_dictionary",
     "build_symspell_in_memory",
     "extract_term_frequencies",
 ]
+
+MANIFEST_NAME: Final = "symspell-manifest.json"
 
 # Surface word forms: lower-cased, letters and internal hyphens or apostrophes only
 WORD_RE = re.compile(r"[a-z]+(?:['\-][a-z]+)*")
@@ -102,10 +106,7 @@ def _find_jsonl_files(path: Path) -> list[Path]:
     return []
 
 
-def _extract_from_concepts(path: Path) -> Counter[str]:
-    from legal_rag_router import load_concepts  # noqa: PLC0415
-
-    concepts = load_concepts(path)
+def _extract_from_concepts_obj(concepts: Any) -> Counter[str]:
     freqs: Counter[str] = Counter()
     for term, raw in concepts.term_table.items():
         count = int(raw.split(",")[1])
@@ -119,6 +120,12 @@ def _extract_from_concepts(path: Path) -> Counter[str]:
             for word in WORD_RE.findall(clean):
                 freqs[word] += 1
     return freqs
+
+
+def _extract_from_concepts(path: Path) -> Counter[str]:
+    from legal_rag_router import load_concepts  # noqa: PLC0415
+
+    return _extract_from_concepts_obj(load_concepts(path))
 
 
 def extract_term_frequencies(
@@ -135,12 +142,13 @@ def extract_term_frequencies(
     if isinstance(store_or_source, TextStore):
         return _extract_from_text_store(store_or_source)
 
-    path = Path(store_or_source)
-    if (path / "text.zst").is_file() and (path / "corpus-manifest.json").is_file():
-        return _extract_from_text_store(open_store(path))
+    if hasattr(store_or_source, "term_table"):
+        return _extract_from_concepts_obj(store_or_source)
 
-    if (path / "store" / "text.zst").is_file():
-        return _extract_from_text_store(open_store(path / "store"))
+    try:
+        path = Path(store_or_source)
+    except TypeError:
+        return Counter()
 
     jsonl_files = _find_jsonl_files(path)
     if jsonl_files:
@@ -149,7 +157,8 @@ def extract_term_frequencies(
     if (path / "terms.tbl").is_file() or (path / "concepts-manifest.json").is_file():
         return _extract_from_concepts(path)
 
-    return _extract_from_text_store(open_store(path))
+    target = path / "store" if (path / "store" / "text.zst").is_file() else path
+    return _extract_from_text_store(open_store(target))
 
 
 def build_symspell_in_memory(
@@ -168,29 +177,36 @@ def _find_snapshot(source: TextStore | Path | str | None) -> str:
     if isinstance(source, TextStore):
         return source.snapshot
     if source is not None:
-        p = Path(source)
-        manifest_candidates = [
-            p / "corpus-manifest.json",
-            p / "store" / "corpus-manifest.json",
-            p / "index" / "index-manifest.json",
-            p / "concepts" / "concepts-manifest.json",
-            p.parent / "index" / "index-manifest.json",
-            p.parent / "concepts" / "concepts-manifest.json",
-        ]
-        for mc in manifest_candidates:
-            if mc.is_file():
-                with contextlib.suppress(OSError, json.JSONDecodeError, KeyError):
-                    data = json.loads(mc.read_text(encoding="utf-8"))
-                    if "snapshot" in data:
-                        return str(data["snapshot"])
+        snap = getattr(source, "snapshot", None)
+        if snap is not None:
+            return str(snap)
+    if source is not None:
+        try:
+            p = Path(source)
+            manifest_candidates = [
+                p / "corpus-manifest.json",
+                p / "store" / "corpus-manifest.json",
+                p / "index" / "index-manifest.json",
+                p / "concepts" / "concepts-manifest.json",
+                p.parent / "index" / "index-manifest.json",
+                p.parent / "concepts" / "concepts-manifest.json",
+            ]
+            for mc in manifest_candidates:
+                if mc.is_file():
+                    with contextlib.suppress(OSError, json.JSONDecodeError, KeyError):
+                        data = json.loads(mc.read_text(encoding="utf-8"))
+                        if "snapshot" in data:
+                            return str(data["snapshot"])
+        except (TypeError, ValueError):
+            pass
     return "2026-09-28"
 
 
 def build_dictionary(
     store_or_source: TextStore | Path | str | None = None,
-    out_dir: Path | str = Path("artefacts/symspell"),
+    out_dir: Path | str = Path("symspell"),
 ) -> tuple[int, int, float, str]:
-    """Build dictionary.txt and manifest.json from store records.
+    """Build dictionary.txt and symspell-manifest.json from store records.
 
     Returns:
         (term_count, file_size_bytes, elapsed_seconds, sha256_hex)
@@ -217,7 +233,18 @@ def build_dictionary(
     file_size = dict_path.stat().st_size
     sha256_digest = hasher.hexdigest()
 
-    manifest = {
+    corpus_id_val: str | None = None
+    if isinstance(store_or_source, TextStore):
+        corpus_id_val = store_or_source.corpus_id
+    elif store_or_source is not None:
+        p = Path(store_or_source)
+        for cand in (p, p / "store"):
+            if (cand / "corpus-manifest.json").is_file():
+                with contextlib.suppress(Exception):
+                    corpus_id_val = corpus_id(read_manifest(cand))
+                    break
+
+    manifest: dict[str, Any] = {
         "counts": {
             "terms": len(sorted_terms),
         },
@@ -231,12 +258,15 @@ def build_dictionary(
         "kind": "symspell-dictionary",
         "snapshot": snapshot,
     }
+    if corpus_id_val is not None:
+        manifest["corpus_id"] = corpus_id_val
 
-    manifest_path = out_path / "manifest.json"
+    manifest_path = out_path / MANIFEST_NAME
     manifest_bytes = (
         json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8") + b"\n"
     )
     manifest_path.write_bytes(manifest_bytes)
+    (out_path / "manifest.json").unlink(missing_ok=True)
 
     elapsed = time.perf_counter() - start_time
     return len(sorted_terms), file_size, elapsed, sha256_digest

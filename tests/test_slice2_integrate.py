@@ -37,6 +37,9 @@ else:
 POLICY = build_policy(JUDGE_PRESET_NAME)
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 @pytest.fixture
 def store(fixture_text_store: TextStore) -> CountingStore:
     return CountingStore(fixture_text_store)
@@ -44,12 +47,24 @@ def store(fixture_text_store: TextStore) -> CountingStore:
 
 @pytest.fixture(scope="session")
 def symspell_dict() -> Any:
-    repo_root = Path(__file__).resolve().parents[1]
-    return load_dictionary(repo_root / "artefacts" / "symspell" / "dictionary.txt")
+    return load_dictionary(REPO_ROOT / "artefacts" / "symspell" / "dictionary.txt")
 
 
-def _make_pipeline(router: Router, store: TextStore, rotation: Any, **kwargs: Any) -> Pipeline:
-    return Pipeline(router=router, store=store, rotation=rotation, policy=POLICY, **kwargs)
+def _make_pipeline(
+    router: Router, store: TextStore, rotation: Any, dictionary: Any = None, **kwargs: Any
+) -> Pipeline:
+    if dictionary is None:
+        dict_path = REPO_ROOT / "artefacts" / "symspell" / "dictionary.txt"
+        if dict_path.is_file():
+            dictionary = load_dictionary(dict_path)
+    return Pipeline(
+        router=router,
+        store=store,
+        rotation=rotation,
+        policy=POLICY,
+        dictionary=dictionary,
+        **kwargs,
+    )
 
 
 def _run(pipeline: Pipeline, query: str, **kwargs: Any) -> tuple[list[Event], Outcome]:
@@ -184,7 +199,14 @@ def test_name_protection_prevents_false_spelling_corrections(
     citation_spans = find_protected_spans(raw, router=fixture_router)
     analysis = analyse(raw, protected_spans=citation_spans)
     router_index = getattr(fixture_router, "index", None)
-    masked = mask_pii(raw, analysis, router_index=router_index, protected_spans=citation_spans)
+    vocab = frozenset(k.lower() for k in symspell_dict.words)
+    masked = mask_pii(
+        raw,
+        analysis,
+        router_index=router_index,
+        protected_spans=citation_spans,
+        vocabulary=vocab,
+    )
     name_spans = list(masked.name_spans)
     protect_spans = list(citation_spans) + name_spans
 

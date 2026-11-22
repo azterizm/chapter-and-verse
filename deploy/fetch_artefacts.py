@@ -8,6 +8,7 @@ published as a public Hugging Face Dataset. Layout of the dataset (and of ``DATA
     <store files>                    as listed in it (STORE_DIR=/data)
     index/index-manifest.json, ...   router index (LEGAL_DATA_ROOT=/data)
     concepts/concepts-manifest.json, ...
+    symspell/symspell-manifest.json, ... spelling dictionary
 
 A manifest holds ``files``, either a mapping ``{"relative/path": {"sha256": "<hex>",
 "size": <int>}}`` (``bytes`` is accepted for ``size``; either is optional) or a list of
@@ -38,7 +39,7 @@ HF_ENDPOINT         default ``https://huggingface.co``
 MANIFEST_NAME       default ``corpus-manifest.json``
 MANIFEST_SHA256     optional pin of the manifest's own SHA-256; strongly recommended
 EXTRA_MANIFESTS     comma list (empty for none), default
-                    ``index/index-manifest.json,concepts/concepts-manifest.json``
+                    ``index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json``
 ARTEFACTS_WORKERS   parallel downloads (default 4)
 ==================  =========================================================================
 
@@ -451,7 +452,9 @@ def run(root: Path, settings: Settings) -> int:
     return 0
 
 
-DEFAULT_EXTRAS = "index/index-manifest.json,concepts/concepts-manifest.json"
+DEFAULT_EXTRAS = (
+    "index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json"
+)
 
 
 def config_from_env(env: dict[str, str]) -> Settings:

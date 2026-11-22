@@ -24,6 +24,13 @@ else
   CONCEPTS_INDEX="$DATA_DIR/concepts"
 fi
 
+if [ -f "$STORE_DIR/symspell/dictionary.txt" ]; then
+  SYMSPELL_DICT="$STORE_DIR/symspell/dictionary.txt"
+  export SYMSPELL_DICT
+else
+  echo "warning: $STORE_DIR/symspell/dictionary.txt not found; running without prebuilt dictionary" >&2
+fi
+
 export STORE_DIR ROUTER_INDEX CONCEPTS_INDEX
 
 exec uvicorn chapterverse.app:app \

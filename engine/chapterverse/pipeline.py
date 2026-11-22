@@ -586,6 +586,20 @@ class Pipeline:
         self.hosting_share = hosting_share
         self._clock = clock
         self.dictionary = dictionary
+        self._vocabulary: frozenset[str] | None = None
+        if (
+            self.dictionary is not None
+            and hasattr(self.dictionary, "words")
+            and self.dictionary.words
+        ):
+            self._vocabulary = frozenset(k.lower() for k in self.dictionary.words)
+
+    def _get_vocabulary(self) -> frozenset[str] | None:
+        if self._vocabulary is None:
+            dict_obj = self._get_dictionary()
+            if dict_obj is not None and hasattr(dict_obj, "words") and dict_obj.words:
+                self._vocabulary = frozenset(k.lower() for k in dict_obj.words)
+        return self._vocabulary
 
     def _get_dictionary(self) -> SymSpell:
         if self.dictionary is not None:
@@ -593,11 +607,6 @@ class Pipeline:
         env_dict = os.environ.get("SYMSPELL_DICT")
         if env_dict and Path(env_dict).is_file():
             self.dictionary = load_dictionary(Path(env_dict))
-            return self.dictionary
-        repo_root = Path(__file__).resolve().parents[2]
-        default_dict = repo_root / "artefacts" / "symspell" / "dictionary.txt"
-        if default_dict.is_file():
-            self.dictionary = load_dictionary(default_dict)
             return self.dictionary
         concepts = getattr(self.router, "_concepts", None) or getattr(self.router, "concepts", None)
         if concepts is not None:
@@ -656,7 +665,14 @@ class Pipeline:
         citation_spans = find_protected_spans(raw)
         analysis = analyse(raw, protected_spans=citation_spans)
         router_index = getattr(self.router, "index", None)
-        masked = mask_pii(raw, analysis, router_index=router_index, protected_spans=citation_spans)
+        vocab = self._get_vocabulary()
+        masked = mask_pii(
+            raw,
+            analysis,
+            router_index=router_index,
+            protected_spans=citation_spans,
+            vocabulary=vocab,
+        )
         name_spans = list(masked.name_spans)
 
         dict_obj = self._get_dictionary()
@@ -928,11 +944,13 @@ class Pipeline:
         if masked is None:
             citation_spans = find_protected_spans(request.query)
             analysis = analyse(request.query, protected_spans=citation_spans)
+            vocab = self._get_vocabulary()
             masked = mask_pii(
                 request.query,
                 analysis,
                 router_index=getattr(self.router, "index", None),
                 protected_spans=citation_spans,
+                vocabulary=vocab,
             )
         if norm_text is None:
             norm_text = request.query

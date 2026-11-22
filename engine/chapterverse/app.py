@@ -123,6 +123,7 @@ from chapterverse.ratelimit import (
     client_key_hash,
 )
 from chapterverse.store import open_store
+from chapterverse.store.manifest import sha256_file
 from chapterverse.symspell_build import build_symspell_in_memory
 
 __all__ = [
@@ -521,14 +522,54 @@ def load_modal_kv(
     return ModalKV(make_backend=make_backend, probe=probe, provider=provider.name)
 
 
+def _verify_symspell_file(dict_file: Path, store: TextStore) -> bool:
+    manifest_path = dict_file.parent / "symspell-manifest.json"
+    if not manifest_path.is_file():
+        log.warning("symspell-manifest.json missing, falling back to store")
+        return False
+    try:
+        manifest_data = json.loads(manifest_path.read_bytes())
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "symspell-manifest.json invalid JSON (%s), falling back to store",
+            type(exc).__name__,
+        )
+        return False
+    if not isinstance(manifest_data, dict) or manifest_data.get("corpus_id") != store.corpus_id:
+        cid = manifest_data.get("corpus_id") if isinstance(manifest_data, dict) else None
+        log.warning(
+            "symspell manifest corpus_id mismatch (%s vs %s), falling back to store",
+            cid,
+            store.corpus_id,
+        )
+        return False
+    files_entry = manifest_data.get("files")
+    dict_meta = (
+        files_entry.get(dict_file.name, files_entry.get("dictionary.txt"))
+        if isinstance(files_entry, dict)
+        else None
+    )
+    expected_sha = dict_meta.get("sha256") if isinstance(dict_meta, dict) else None
+    if not expected_sha or sha256_file(dict_file) != expected_sha:
+        log.warning("symspell dictionary sha256 mismatch or missing, falling back to store")
+        return False
+    return True
+
+
 def _load_slice2_dictionary(env: Mapping[str, str], store: TextStore) -> SymSpell:
     symspell_path = _env(env, "SYMSPELL_DICT")
     t0 = time.perf_counter()
-    if symspell_path is not None and Path(symspell_path).is_file():
-        sym = load_dictionary(Path(symspell_path))
-        elapsed = time.perf_counter() - t0
-        log.info("dictionary from file: %d terms in %.3fs", sym.word_count, elapsed)
-        return sym
+    if symspell_path is not None:
+        dict_file = Path(symspell_path)
+        if dict_file.is_file():
+            if _verify_symspell_file(dict_file, store):
+                sym = load_dictionary(dict_file)
+                elapsed = time.perf_counter() - t0
+                log.info("dictionary from file: %d terms in %.3fs", sym.word_count, elapsed)
+                return sym
+        else:
+            log.warning("SYMSPELL_DICT path does not exist, falling back to store")
+
     sym = build_symspell_in_memory(store)
     elapsed = time.perf_counter() - t0
     log.info("dictionary built from store: %d terms in %.3fs", sym.word_count, elapsed)

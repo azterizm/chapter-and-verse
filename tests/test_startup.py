@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -213,6 +215,17 @@ def test_startup_logs_when_loading_dictionary_from_file(
     caplog.set_level(logging.INFO)
     dict_file = tmp_path / "custom_dict.txt"
     dict_file.write_text("compensation 100\naward 200\nlimit 50\n", encoding="utf-8")
+    dict_bytes = dict_file.read_bytes()
+    manifest = {
+        "corpus_id": fixture_text_store.corpus_id,
+        "files": {
+            "custom_dict.txt": {
+                "sha256": hashlib.sha256(dict_bytes).hexdigest(),
+                "size": len(dict_bytes),
+            }
+        },
+    }
+    (tmp_path / "symspell-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     env: Mapping[str, str] = {"SYMSPELL_DICT": str(dict_file)}
     sym = _load_slice2_dictionary(env, fixture_text_store)
