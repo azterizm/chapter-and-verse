@@ -42,7 +42,7 @@ MANIFEST_NAME       default ``corpus-manifest.json``
 MANIFEST_SHA256     optional pin of the manifest's own SHA-256; strongly recommended
 EXTRA_MANIFESTS     comma list (empty for none), default
                     ``index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json``
-ARTEFACTS_WORKERS   parallel downloads (default 4)
+ARTEFACTS_WORKERS   parallel downloads (default 4); verify defaults to min(cpu, 8)
 ==================  =========================================================================
 
 Exit codes: 0 verified, 1 verification or download failure, 2 configuration error,
@@ -198,24 +198,51 @@ def verify_local(root: Path, entry: Entry) -> bool:
         return False
 
 
-def verify_all(root: Path, entries: list[Entry]) -> tuple[list[Entry], list[Entry]]:
+def verify_all(
+    root: Path, entries: list[Entry], workers: int | None = None
+) -> tuple[list[Entry], list[Entry]]:
     """(all entries, entries that failed), expanding verified nested manifests."""
+    if workers is None:
+        env_workers = os.environ.get("ARTEFACTS_WORKERS", "").strip()
+        if env_workers:
+            try:
+                workers = int(env_workers)
+            except ValueError:
+                workers = min(os.cpu_count() or 1, 8)
+        else:
+            workers = min(os.cpu_count() or 1, 8)
+    workers = max(1, min(workers, MAX_WORKERS))
+
     bad: list[Entry] = []
     checked: set[str] = set()
-    queue = list(entries)
-    while queue:
-        entry = queue.pop()
-        if entry.path in checked:
-            continue
-        checked.add(entry.path)
-        if not verify_local(root, entry):
-            bad.append(entry)
-            continue
-        nested = nested_manifest_entries(root, entry)
-        if nested:
-            entries = merge(entries, nested)
-            queue.extend(nested)
-    return entries, bad
+    all_entries = list(entries)
+    pending = [e for e in all_entries if e.path not in checked]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        while pending:
+            unique_pending: list[Entry] = []
+            for entry in pending:
+                if entry.path not in checked:
+                    checked.add(entry.path)
+                    unique_pending.append(entry)
+
+            if not unique_pending:
+                break
+
+            futures = [pool.submit(verify_local, root, entry) for entry in unique_pending]
+            new_nested: list[Entry] = []
+            for entry, fut in zip(unique_pending, futures, strict=True):
+                if not fut.result():
+                    bad.append(entry)
+                    continue
+                nested = nested_manifest_entries(root, entry)
+                if nested:
+                    all_entries = merge(all_entries, nested)
+                    new_nested.extend(nested)
+
+            pending = [e for e in new_nested if e.path not in checked]
+
+    return all_entries, bad
 
 
 # ---------------------------------------------------------------- download
@@ -396,7 +423,10 @@ def already_verified(root: Path, settings: Settings) -> bool:
         return False
     entries = parse_files(load_manifest(local_raw, pinned, "local"))
     entries = merge(entries, [Entry(n, h, None) for n, h in extras.items()])
-    entries, bad = verify_all(root, entries)
+    verify_workers = (
+        settings.workers if "ARTEFACTS_WORKERS" in os.environ else min(os.cpu_count() or 1, 8)
+    )
+    entries, bad = verify_all(root, entries, workers=verify_workers)
     if not bad:
         log(f"verified {len(entries)} files in {root}; no download needed")
         return True
@@ -462,7 +492,10 @@ def run(root: Path, settings: Settings) -> int:
         # 3. Final full verification, then the manifest and source marker.
         (root / SOURCE_MARKER).unlink(missing_ok=True)
         write_atomic(manifest_path, raw)
-        _, bad = verify_all(root, base)
+        verify_workers = (
+            settings.workers if "ARTEFACTS_WORKERS" in os.environ else min(os.cpu_count() or 1, 8)
+        )
+        _, bad = verify_all(root, base, workers=verify_workers)
         if bad:
             manifest_path.unlink(missing_ok=True)
             raise FetchError(f"{len(bad)} files failed final verification, e.g. {bad[0].path}")
@@ -675,10 +708,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(args.data_dir)
     try:
-        default_workers = min(os.cpu_count() or 1, 8) if args.copy_to else 4
+        default_workers = min(os.cpu_count() or 1, 8) if (args.copy_to or args.verify_only) else 4
         settings = config_from_env(dict(os.environ), default_workers=default_workers)
         if args.verify_only and not args.copy_to:
-            settings = Settings(None, settings.manifest_name, settings.pinned, settings.extras, 1)
+            settings = Settings(
+                None, settings.manifest_name, settings.pinned, settings.extras, settings.workers
+            )
         check_root(root)
         if args.marker_only:
             return 0 if check_marker(root, settings) else 3

@@ -101,3 +101,44 @@ def test_marker_only_not_a_directory(tmp_path: Path) -> None:
     non_existent = tmp_path / "does_not_exist"
     code = fetch_artefacts.main(["--data-dir", str(non_existent), "--marker-only"])
     assert code == 2
+
+
+def test_marker_only_ram_copy_passes_and_fails_after_marker_changed(
+    fake_artefacts_root: Path, tmp_path: Path
+) -> None:
+    ram_dir = tmp_path / "ram"
+    ram_dir.mkdir()
+    (ram_dir / "index").mkdir()
+    (ram_dir / "concepts").mkdir()
+    (ram_dir / "symspell").mkdir()
+
+    (ram_dir / "corpus-manifest.json").write_bytes(
+        (fake_artefacts_root / "corpus-manifest.json").read_bytes()
+    )
+    (ram_dir / "index" / "index-manifest.json").write_bytes(
+        (fake_artefacts_root / "index" / "index-manifest.json").read_bytes()
+    )
+    (ram_dir / "concepts" / "concepts-manifest.json").write_bytes(
+        (fake_artefacts_root / "concepts" / "concepts-manifest.json").read_bytes()
+    )
+    (ram_dir / "symspell" / "symspell-manifest.json").write_bytes(
+        (fake_artefacts_root / "symspell" / "symspell-manifest.json").read_bytes()
+    )
+    (ram_dir / ".artefacts-source.json").write_bytes(
+        (fake_artefacts_root / ".artefacts-source.json").read_bytes()
+    )
+
+    code = fetch_artefacts.main(["--data-dir", str(ram_dir), "--marker-only"])
+    assert code == 0
+
+    marker_file = ram_dir / ".artefacts-source.json"
+    data = json.loads(marker_file.read_text(encoding="utf-8"))
+    data["revision"] = "c" * 40
+    marker_file.write_text(json.dumps(data), encoding="utf-8")
+    code_after = fetch_artefacts.main(["--data-dir", str(ram_dir), "--marker-only"])
+    assert code_after == 3
+
+
+def test_verify_only_parallel_on_marker_fixture(fake_artefacts_root: Path) -> None:
+    code = fetch_artefacts.main(["--data-dir", str(fake_artefacts_root), "--verify-only"])
+    assert code == 0

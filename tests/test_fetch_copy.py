@@ -159,3 +159,40 @@ def test_copy_to_missing_listed_file(fake_copy_root: Path, tmp_path: Path) -> No
     dst = tmp_path / "dst"
     code = fetch_artefacts.main(["--data-dir", str(fake_copy_root), "--copy-to", str(dst)])
     assert code == 1
+
+
+def test_verify_only_parallel_pass(fake_copy_root: Path) -> None:
+    code = fetch_artefacts.main(["--data-dir", str(fake_copy_root), "--verify-only"])
+    assert code == 0
+
+
+def test_verify_only_parallel_tampered_file(fake_copy_root: Path) -> None:
+    (fake_copy_root / "store" / "file1.txt").write_bytes(b"tampered content")
+    code = fetch_artefacts.main(["--data-dir", str(fake_copy_root), "--verify-only"])
+    assert code == 1
+
+
+def test_verify_only_parallel_tampered_nested_manifest(fake_copy_root: Path) -> None:
+    nested = fake_copy_root / "index" / "nested" / "nested-manifest.json"
+    nested.write_bytes(b'{"files": {}}')
+    code = fetch_artefacts.main(["--data-dir", str(fake_copy_root), "--verify-only"])
+    assert code == 1
+
+
+def test_verify_only_parallel_matches_sequential(
+    fake_copy_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both pass on clean tree
+    code_par = fetch_artefacts.main(["--data-dir", str(fake_copy_root), "--verify-only"])
+    monkeypatch.setenv("ARTEFACTS_WORKERS", "1")
+    code_seq = fetch_artefacts.main(["--data-dir", str(fake_copy_root), "--verify-only"])
+    assert code_par == 0
+    assert code_seq == 0
+
+    # Tamper deep nested file: both fail
+    (fake_copy_root / "index" / "nested" / "deep.txt").write_bytes(b"tampered deep")
+    code_seq_bad = fetch_artefacts.main(["--data-dir", str(fake_copy_root), "--verify-only"])
+    monkeypatch.delenv("ARTEFACTS_WORKERS", raising=False)
+    code_par_bad = fetch_artefacts.main(["--data-dir", str(fake_copy_root), "--verify-only"])
+    assert code_seq_bad == 1
+    assert code_par_bad == 1

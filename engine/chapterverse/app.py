@@ -750,7 +750,7 @@ class _Maintenance:
     def stop(self) -> None:
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=5.0)
+            self._thread.join(timeout=0.5)
 
     def _run(self) -> None:
         if not self._tasks:

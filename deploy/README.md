@@ -12,7 +12,7 @@ The Hugging Face Space standby, Worker failover and Terraform come in Slice 4.
 | `Dockerfile.dockerignore` | Allow-list for that context. BuildKit reads it in preference to a root `.dockerignore` |
 | `entrypoint.sh` | Fast restart: copies to tmpfs and verifies in one pass (--copy-to); then `uvicorn` with one worker |
 | `fetch_artefacts.py` | Downloads the artefacts into `/data`, checks every SHA-256, resumes, fails closed. Standard library only |
-| `compose.yml` | Engine on the A1: read-only root filesystem, 20 GB memory limit, artefacts volume, port bound to 127.0.0.1 |
+| `compose.yml` | Engine on the A1: read-only root filesystem, 20 GB memory limit, artefacts volume, host tmpfs /ram bind mount, port bound to 127.0.0.1 |
 | `engine.env.example`, `cloudflared.env.example` | Templates for the env files kept outside the repo |
 | `worker/` | Cloudflare Worker on `/api/*`, in TypeScript, with vitest tests |
 | `pages/_headers` | CSP and security headers for the Pages site |
@@ -149,12 +149,12 @@ sudo REPO_URL=https://github.com/OWNER/chapter-and-verse.git bash /opt/chapter-a
 sudo -iu deploy docker compose -f /opt/chapter-and-verse/deploy/compose.yml logs -f engine
 ```
 
-The first start downloads about 4 GB of artefacts into the `chapter-and-verse-artefacts` volume. Later starts check the source marker and copy to `/ram` with verification in one pass (`--copy-to`), skipping the volume re-hash. A checksum mismatch stops the container before uvicorn starts.
+The first start downloads about 4 GB of artefacts into the `chapter-and-verse-artefacts` volume. Later starts check the source marker and copy to `/ram` with verification in one pass (`--copy-to`), skipping the volume re-hash. The RAM copy is held on host tmpfs (`/var/lib/chapter-and-verse-ram` bind-mounted at `/ram`) and persists across container restarts until host reboot or dataset change; the 3 GB counts against host RAM as before. A checksum mismatch stops the container before uvicorn starts.
 
 What `setup.sh` does, in order:
 
 1. Base packages, then unattended-upgrades for security updates, with an automatic reboot at 04:30 UTC when one is needed.
-2. A 4 GB swap file with `vm.swappiness = 10`, and journald capped at 500 MB and 1 month.
+2. A 4 GB swap file with `vm.swappiness = 10`, host RAM tmpfs at `/var/lib/chapter-and-verse-ram` (3 GB), and journald capped at 500 MB and 1 month.
 3. The firewall. Oracle's Ubuntu image ships iptables INPUT and FORWARD REJECT rules that clash with ufw and Docker. The script keeps only Oracle's `InstanceServices` egress chain (metadata and boot-volume services) and keeps the original as `/etc/iptables/rules.v4.oracle-orig`.
 4. Docker Engine and the compose plugin from download.docker.com, with log rotation and `live-restore` in `daemon.json`.
 5. `cloudflared` from pkg.cloudflare.com, run as `cloudflared-cv.service`. The service runs as a dynamic unprivileged user, and the token reaches it through `LoadCredential`, never through the command line.
@@ -165,7 +165,7 @@ Membership of the `docker` group is root-equivalent on the host. The `deploy` us
 
 ### Idle reclamation
 
-Oracle reclaims an Always Free A1 instance as idle when, over 7 days, all three of these hold: 95th percentile CPU under 20%, network under 20%, memory under 20%. The instance stays safe if any one of them is above 20%. Memory is the one this deployment keeps up: the decompressed text store (about 3.97 GB) is held in heap memory, and the router index (0.38 GB) and concepts index (0.57 GB) are held in tmpfs (/ram). Expected resident memory is about 5.8 GB (about 24% of 24 GB), which keeps usage above the 20% reclamation threshold. On the VM, read memory with `free -m` (the used column) or check the OCI Monitoring MemoryUtilization metric. Check it after the first week to verify the 7-day 95th percentile stays above 20%.
+Oracle reclaims an Always Free A1 instance as idle when, over 7 days, all three of these hold: 95th percentile CPU under 20%, network under 20%, memory under 20%. The instance stays safe if any one of them is above 20%. Memory is the one this deployment keeps up: the decompressed text store (about 3.97 GB) is held in heap memory, and the router index (0.38 GB) and concepts index (0.57 GB) are held in host tmpfs (/ram, bind-mounted from /var/lib/chapter-and-verse-ram). The copy now persists until host reboot or dataset change; the 3 GB counts against host RAM as before. Expected resident memory is about 5.8 GB (about 24% of 24 GB), which keeps usage above the 20% reclamation threshold. On the VM, read memory with `free -m` (the used column) or check the OCI Monitoring MemoryUtilization metric. Check it after the first week to verify the 7-day 95th percentile stays above 20%.
 
 ## 5. Worker (Command)
 
