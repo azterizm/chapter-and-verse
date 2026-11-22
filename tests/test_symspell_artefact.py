@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import random
 import re
 import shutil
 import subprocess
@@ -15,8 +16,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 from fastapi.testclient import TestClient
+from symspellpy import SymSpell, Verbosity  # type: ignore[import-untyped]
 
 from chapterverse.app import _load_slice2_dictionary, build_runtime, create_app
+from chapterverse.normalise import load_dictionary
 from chapterverse.store import open_store
 from chapterverse.symspell_build import build_dictionary
 
@@ -256,3 +259,60 @@ def test_r7f_no_module_under_engine_references_artefacts_symspell() -> None:
         if "artefacts/symspell" in content:
             offenders.append(str(p.relative_to(REPO)))
     assert not offenders, f"Modules under engine/ reference artefacts/symspell: {offenders}"
+
+
+def _apply_one_edit(word: str, rng: random.Random) -> str:
+    if len(word) <= 1:
+        return word + "x"
+    op = rng.choice(["delete", "insert", "replace", "transpose"])
+    idx = rng.randint(0, len(word) - 1)
+    if op == "delete":
+        return word[:idx] + word[idx + 1 :]
+    if op == "insert":
+        char = rng.choice("abcdefghijklmnopqrstuvwxyz")
+        return word[:idx] + char + word[idx:]
+    if op == "replace":
+        char = rng.choice("abcdefghijklmnopqrstuvwxyz")
+        return word[:idx] + char + word[idx + 1 :]
+    if idx == len(word) - 1:
+        idx -= 1
+    return word[:idx] + word[idx + 1] + word[idx] + word[idx + 2 :]
+
+
+def test_r3_dictionary_loader_identical_results(fixture_symspell: Path) -> None:
+    """R3: 2,000 words sampled from dictionary with one edit applied (fixed seed) return
+
+    identical suggestions for lookup(Verbosity.CLOSEST, max_edit_distance=2) and lookup_compound.
+    """
+    dict_path = fixture_symspell / "dictionary.txt"
+
+    words: list[str] = []
+    with dict_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if parts:
+                words.append(parts[0])
+
+    rng = random.Random(42)
+    sample_count = min(2000, len(words))
+    sample = rng.sample(words, sample_count)
+    edited = [_apply_one_edit(w, rng) for w in sample]
+
+    sym_new = load_dictionary(dict_path)
+    sym_old = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
+    sym_old.load_dictionary(
+        str(dict_path), term_index=0, count_index=1, separator=" ", encoding="utf-8"
+    )
+
+    for w in edited:
+        r_new = sym_new.lookup(w, Verbosity.CLOSEST, max_edit_distance=2)
+        r_old = sym_old.lookup(w, Verbosity.CLOSEST, max_edit_distance=2)
+        assert [(s.term, s.distance, s.count) for s in r_new] == [
+            (s.term, s.distance, s.count) for s in r_old
+        ]
+
+        c_new = sym_new.lookup_compound(w, max_edit_distance=2)
+        c_old = sym_old.lookup_compound(w, max_edit_distance=2)
+        assert [(s.term, s.distance, s.count) for s in c_new] == [
+            (s.term, s.distance, s.count) for s in c_old
+        ]

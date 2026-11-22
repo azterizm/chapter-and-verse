@@ -43,7 +43,8 @@ EXTRA_MANIFESTS     comma list (empty for none), default
 ARTEFACTS_WORKERS   parallel downloads (default 4)
 ==================  =========================================================================
 
-Exit codes: 0 verified, 1 verification or download failure, 2 configuration error.
+Exit codes: 0 verified, 1 verification or download failure, 2 configuration error,
+3 marker mismatch.
 """
 
 from __future__ import annotations
@@ -358,6 +359,22 @@ def local_extras(root: Path, settings: Settings) -> dict[str, str] | None:
     return out
 
 
+def check_marker(root: Path, settings: Settings) -> bool:
+    """True when root holds the manifests of the wanted source with matching marker."""
+    source, pinned = settings.source, settings.pinned
+    if source is None:
+        return False
+    manifest_path = root / settings.manifest_name
+    extras = local_extras(root, settings)
+    if not manifest_path.is_file() or extras is None:
+        return False
+    local_raw = manifest_path.read_bytes()
+    local_sha = hashlib.sha256(local_raw).hexdigest()
+    if pinned is not None and pinned != local_sha:
+        return False
+    return read_marker(root) == source.marker(local_sha, extras)
+
+
 def already_verified(root: Path, settings: Settings) -> bool:
     """True when ``root`` holds a verified copy of the wanted source (no network needed)."""
     source, pinned = settings.source, settings.pinned
@@ -501,6 +518,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--data-dir", default=os.environ.get("DATA_DIR", "/data"))
     parser.add_argument("--verify-only", action="store_true", help="never download")
+    parser.add_argument(
+        "--marker-only",
+        action="store_true",
+        help="exit 0 only when source marker and manifests match, else 3",
+    )
     args = parser.parse_args(argv)
     root = Path(args.data_dir)
     try:
@@ -508,6 +530,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.verify_only:
             settings = Settings(None, settings.manifest_name, settings.pinned, settings.extras, 1)
         check_root(root)
+        if args.marker_only:
+            return 0 if check_marker(root, settings) else 3
         return run(root, settings)
     except ConfigError as exc:
         log(f"configuration error: {exc}")

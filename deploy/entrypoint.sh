@@ -4,24 +4,31 @@
 # unverified data. One uvicorn worker: the router, store and quota state are shared in-process.
 set -eu
 
-python /opt/app/fetch_artefacts.py
-
 DATA_DIR="${DATA_DIR:-/data}"
 RAM_DIR="${RAM_DIR:-/ram}"
 
-STORE_DIR="$DATA_DIR"
-ROUTER_INDEX="$DATA_DIR/index"
-CONCEPTS_INDEX="$DATA_DIR/concepts"
+served_from_ram=0
+if [ -d "$RAM_DIR" ] && python /opt/app/fetch_artefacts.py --data-dir "$DATA_DIR" --marker-only >/dev/null 2>&1; then
+  if cp -R "$DATA_DIR"/. "$RAM_DIR"/ 2>/dev/null && python /opt/app/fetch_artefacts.py --data-dir "$RAM_DIR" --verify-only >/dev/null 2>&1; then
+    STORE_DIR="$RAM_DIR"
+    ROUTER_INDEX="$RAM_DIR/index"
+    CONCEPTS_INDEX="$RAM_DIR/concepts"
+    served_from_ram=1
+  fi
+fi
 
-if [ -d "$RAM_DIR" ] && cp -R "$DATA_DIR"/. "$RAM_DIR"/ 2>/dev/null && python /opt/app/fetch_artefacts.py --data-dir "$RAM_DIR" --verify-only >/dev/null 2>&1; then
-  STORE_DIR="$RAM_DIR"
-  ROUTER_INDEX="$RAM_DIR/index"
-  CONCEPTS_INDEX="$RAM_DIR/concepts"
-else
-  echo "warning: tmpfs copy or verification failed; falling back to volume paths" >&2
+if [ "$served_from_ram" -eq 0 ]; then
+  python /opt/app/fetch_artefacts.py --data-dir "$DATA_DIR"
   STORE_DIR="$DATA_DIR"
   ROUTER_INDEX="$DATA_DIR/index"
   CONCEPTS_INDEX="$DATA_DIR/concepts"
+  if [ -d "$RAM_DIR" ] && cp -R "$DATA_DIR"/. "$RAM_DIR"/ 2>/dev/null && python /opt/app/fetch_artefacts.py --data-dir "$RAM_DIR" --verify-only >/dev/null 2>&1; then
+    STORE_DIR="$RAM_DIR"
+    ROUTER_INDEX="$RAM_DIR/index"
+    CONCEPTS_INDEX="$RAM_DIR/concepts"
+  else
+    echo "warning: tmpfs copy or verification failed; falling back to volume paths" >&2
+  fi
 fi
 
 if [ -f "$STORE_DIR/symspell/dictionary.txt" ]; then
