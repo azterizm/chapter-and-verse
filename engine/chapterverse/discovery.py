@@ -250,6 +250,36 @@ _PERSONAL_ADVICE_RE: Final = re.compile(
     r"\b(?:should\s+i|my\s+lawyer)\b",
     re.IGNORECASE,
 )
+_SYSTEM_SEARCH_RE: Final = re.compile(
+    r"\bconnected\s+repositor(?:y|ies)\b"
+    r"|\bvector\s+stores?\b"
+    r"|\bknowledge\s+bases?\b"
+    r"|\bcanary\b"
+    r"|\bsearch\s+all(?:\s+connected)?\s+(?:repositories|systems|stores|documents|files|databases)\b"
+    r"|\b(?:api|secret)\s+keys?\b"
+    r"|\bsystem\s+prompts?\b",
+    re.IGNORECASE,
+)
+_CANDIDATE_CV_RE: Final = re.compile(r"\bcandidate\s+cv\b", re.IGNORECASE)
+_PERSON_VERB_RE: Final = re.compile(
+    r"\b(?:summari[sz]e|describe|tell\s+me\s+about|what\s+(?:is|are))\b",
+    re.IGNORECASE,
+)
+_PERSON_TOPIC_RE: Final = re.compile(
+    r"\b(?:backgrounds?|experiences?|cvs?|curriculum\s+vitae|careers?|biograph(?:y|ies)|r[eé]sum[eé]s?|qualifications?)\b",
+    re.IGNORECASE,
+)
+_PERSON_TITLE_RE: Final = re.compile(r"\b(?:Miss|Prof|Mrs|Mr|Dr|Ms|Mx)(?:\.|\b)\s+[A-Z][a-zA-Z]*\b")
+
+
+def _is_named_person_query(query: str) -> bool:
+    if _CANDIDATE_CV_RE.search(query):
+        return True
+    if not _PERSON_VERB_RE.search(query):
+        return False
+    if not _PERSON_TOPIC_RE.search(query):
+        return False
+    return bool(_PERSON_TITLE_RE.search(query))
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,7 +320,8 @@ DiscoveryOutcome: TypeAlias = Suggest | NoEvidence | RefusalEvent
 
 
 def check_out_of_scope(query: str, snapshot: str = "") -> RefusalEvent | None:
-    """Check whether a query is out of scope (case law, foreign law, personal advice).
+    """Check whether a query is out of scope (case law, foreign law, personal advice,
+    system search, or named persons).
 
     Returns a ``RefusalEvent`` of kind ``out_of_scope`` if matched, else None.
     """
@@ -300,6 +331,10 @@ def check_out_of_scope(query: str, snapshot: str = "") -> RefusalEvent | None:
         return out_of_scope_refusal(snapshot, reason="non_uk_law")
     if _PERSONAL_ADVICE_RE.search(query):
         return out_of_scope_refusal(snapshot, reason="personal_advice")
+    if _SYSTEM_SEARCH_RE.search(query):
+        return out_of_scope_refusal(snapshot, reason="system_search")
+    if _is_named_person_query(query):
+        return out_of_scope_refusal(snapshot, reason="named_person")
     return None
 
 
@@ -461,7 +496,7 @@ def discover_step(
         norm_terms = terms(query) if isinstance(query, str) else []
         query_terms = " ".join(dict.fromkeys(norm_terms))
         msg = (
-            f"Searched {n} provisions in the statute book as of {snapshot} for: "
+            f"Searched {n:,} provisions in the statute book as of {snapshot} for: "
             f"{query_terms}. No provision matched."
         )
         receipt = RefusalEvent(

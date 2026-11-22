@@ -354,6 +354,28 @@ def test_extractive_banners() -> None:
     assert "starting up" in extractive_banner("provider_warming")
 
 
+def test_out_of_scope_new_reasons() -> None:
+    assert "system_search" in OUT_OF_SCOPE_REASONS
+    assert "named_person" in OUT_OF_SCOPE_REASONS
+
+    ref_sys = out_of_scope_refusal(SNAPSHOT, "system_search")
+    assert ref_sys.kind == "out_of_scope"
+    assert (
+        ref_sys.message
+        == "Only UK legislation is searched; connected systems, stores and repositories are not. "
+        + REFUSAL_MESSAGES["out_of_scope"]
+    )
+    assert _plain(ref_sys.message)
+
+    ref_person = out_of_scope_refusal(SNAPSHOT, "named_person")
+    assert ref_person.kind == "out_of_scope"
+    assert (
+        ref_person.message
+        == "Information about individual people is not given. " + REFUSAL_MESSAGES["out_of_scope"]
+    )
+    assert _plain(ref_person.message)
+
+
 def test_helpers() -> None:
     assert format_date("2026-07-29") == "29 July 2026"
     assert format_date(date(2020, 4, 6)) == "6 April 2020"
