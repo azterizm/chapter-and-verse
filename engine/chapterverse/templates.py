@@ -31,6 +31,8 @@ from chapterverse.status import StatusDecision
 
 __all__ = [
     "CLARIFY_DEFAULT",
+    "CLARIFY_RELATED_PROVISIONS",
+    "CLARIFY_WHICH_ACT",
     "DAILY_CAP_MESSAGE",
     "DISCLAIMER_NOTICE",
     "EXTRACTIVE_BANNERS",
@@ -39,6 +41,7 @@ __all__ = [
     "NOTICE_CODES",
     "OUT_OF_SCOPE_REASONS",
     "PRIVACY_NOTICE",
+    "PRIVATE_DOCUMENTS_MESSAGE",
     "REFUSAL_MESSAGES",
     "OutOfScopeReason",
     "clarify_event",
@@ -49,6 +52,7 @@ __all__ = [
     "global_budget_notice",
     "out_of_scope_refusal",
     "plain_text",
+    "private_document_refusal",
     "provider_fallback_notice",
     "provider_warming_notice",
     "providers_unavailable_notice",
@@ -64,12 +68,21 @@ PRIVACY_NOTICE: Final = "Do not enter client details or any other personal data.
 """Shown by the question box."""
 
 CLARIFY_DEFAULT: Final = "Which of these do you mean?"
+CLARIFY_RELATED_PROVISIONS: Final = "Which Act or SI do you mean? These provisions may be related."
+CLARIFY_WHICH_ACT: Final = "Which Act or SI do you mean?"
 
-OutOfScopeReason = Literal["case_law", "non_uk_law", "personal_advice"]
+PRIVATE_DOCUMENTS_MESSAGE: Final = (
+    "Chapter & Verse covers UK legislation only. It cannot read private documents such as "
+    "leases, contracts or policies. Ask about the law that applies, or name an Act or SI "
+    "and a section."
+)
+
+OutOfScopeReason = Literal["case_law", "non_uk_law", "personal_advice", "private_document"]
 OUT_OF_SCOPE_REASONS: Final[tuple[OutOfScopeReason, ...]] = (
     "case_law",
     "non_uk_law",
     "personal_advice",
+    "private_document",
 )
 
 _OUT_OF_SCOPE_LEADS: Final[dict[OutOfScopeReason, str]] = {
@@ -292,8 +305,21 @@ def status_refusal(decision: StatusDecision, *, subject: str, snapshot: str) -> 
     )
 
 
+def private_document_refusal(snapshot: str) -> RefusalEvent:
+    """The ``out_of_scope`` refusal for private documents (leases, contracts, policies)."""
+    return RefusalEvent(
+        kind="out_of_scope",
+        message=PRIVATE_DOCUMENTS_MESSAGE,
+        suggestions=(),
+        snapshot=snapshot,
+        link=None,
+    )
+
+
 def out_of_scope_refusal(snapshot: str, reason: OutOfScopeReason | None = None) -> RefusalEvent:
-    """The ``out_of_scope`` refusal: case law, non-UK law or personal advice."""
+    """The ``out_of_scope`` refusal: case law, non-UK law, personal advice, or private documents."""
+    if reason == "private_document":
+        return private_document_refusal(snapshot)
     base = REFUSAL_MESSAGES["out_of_scope"]
     message = f"{_OUT_OF_SCOPE_LEADS[reason]} {base}" if reason is not None else base
     return RefusalEvent(kind="out_of_scope", message=message, suggestions=(), snapshot=snapshot)

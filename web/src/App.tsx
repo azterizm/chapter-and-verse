@@ -91,6 +91,7 @@ export function App() {
     (query: string) => {
       const gate = getGate();
       if (busy || gate.isWaiting()) return;
+      setBotError(null);
       gate.ask(query, Boolean(TURNSTILE_SITE_KEY));
     },
     [busy, getGate],
@@ -119,6 +120,8 @@ export function App() {
     blocked = checking;
   }
 
+  const isBlocked = busy || (blocked !== null && blocked !== TURNSTILE_TIMEOUT_MESSAGE);
+
   const active = state.turns.find((t) => t.id === state.activeTurnId) ?? null;
 
   return (
@@ -146,7 +149,7 @@ export function App() {
               <ul className="chips">
                 {EXAMPLES.map((q) => (
                   <li key={q}>
-                    <button type="button" className="chip" disabled={blocked !== null} onClick={() => askQuery(q)}>
+                    <button type="button" className="chip" disabled={isBlocked} onClick={() => askQuery(q)}>
                       {q}
                     </button>
                   </li>
@@ -156,7 +159,7 @@ export function App() {
           ) : (
             <div className="transcript">
               {state.turns.map((t) => (
-                <Turn key={t.id} turn={t} busy={busy || blocked !== null} onAsk={askQuery} onShowSource={showSource} />
+                <Turn key={t.id} turn={t} busy={isBlocked} onAsk={askQuery} onShowSource={showSource} />
               ))}
             </div>
           )}
@@ -167,10 +170,13 @@ export function App() {
               resetKey={resetKey}
               onToken={(t) => {
                 getGate().onToken(t);
-                if (t && botError !== TURNSTILE_TIMEOUT_MESSAGE) setBotError(null);
+                if (t) setBotError(null);
               }}
               onError={(err) => {
                 getGate().onFailure(err);
+              }}
+              onTimeout={() => {
+                getGate().onTimeout();
               }}
             />
           )}
