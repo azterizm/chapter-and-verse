@@ -104,6 +104,7 @@ from chapterverse.contracts import (
     UnavailableKind,
     encode_sse,
 )
+from chapterverse.dense.colbert import ColbertScorer
 from chapterverse.dense.embed import load_model
 from chapterverse.dense.retriever import DenseRetriever
 from chapterverse.dense.store import BinaryInt8Store
@@ -661,6 +662,22 @@ def _init_dense_retriever(
     return None
 
 
+def _init_colbert_scorer(
+    env: Mapping[str, str],
+) -> ColbertScorer | None:
+    colbert_dir_val = _env(env, "COLBERT_DIR")
+    if colbert_dir_val is not None:
+        t_colbert = time.perf_counter()
+        model_dir = Path(colbert_dir_val)
+        manifest_path = model_dir.parent / "models-manifest.json"
+        scorer = ColbertScorer.load(model_dir, manifest_path)
+        elapsed_colbert = time.perf_counter() - t_colbert
+        log.info("ColBERT reranking on: loaded in %.3fs", elapsed_colbert)
+        return scorer
+    log.info("ColBERT reranking off: COLBERT_DIR unset")
+    return None
+
+
 def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     """Build everything from the environment (module docstring, "Startup").
 
@@ -712,6 +729,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     log.info("Slice 2 startup: loaded SymSpell and spaCy in %.3fs", slice2_time_s)
 
     dense_retriever = _init_dense_retriever(env, store, router)
+    colbert_scorer = _init_colbert_scorer(env)
 
     pipeline = Pipeline(
         router=router,
@@ -726,6 +744,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         hosting_share=hosting_share,
         dictionary=sym_dict,
         dense=dense_retriever,
+        colbert=colbert_scorer,
     )
     limiter = TokenBucket(
         per_minute=_env_number(env, "RATE_LIMIT_PER_MINUTE", 10.0),

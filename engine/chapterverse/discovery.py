@@ -17,13 +17,17 @@ from legal_rag_router import Coordinate, Router
 from legal_rag_router.concepts import terms
 from legal_rag_router.normalise import split_title_year, title_key, title_words
 from legal_rag_router.result import ParsedCitation
+from legal_rag_verifier.premise import Premise
 
 from chapterverse.citations import instrument_name, provision_label
 from chapterverse.contracts import (
     ClarifyEvent,
     LabelledCoordinate,
     RefusalEvent,
+    TextStore,
 )
+from chapterverse.dense.colbert import ColbertScorer, split_section_windows
+from chapterverse.dense.doctext import _DEFAULTS
 from chapterverse.dense.retriever import DenseRetriever
 from chapterverse.templates import (
     out_of_scope_refusal,
@@ -290,6 +294,7 @@ class Suggest:
     candidates: tuple[LabelledCoordinate, ...]
     confident: bool
     question: str
+    spans: tuple[tuple[int, int], ...] | None = None
     event: ClarifyEvent = field(init=False)
 
     def __post_init__(self) -> None:
@@ -540,6 +545,71 @@ def _rrf_fuse_candidates(
     )
 
 
+def _get_candidate_windows(
+    coord_str: str,
+    heading: str | None,
+    store: TextStore | None,
+    router: Router,
+) -> list[str]:
+    active_store = store if store is not None else _DEFAULTS.get("store")
+
+    if active_store is not None:
+        try:
+            rows = active_store.get(coord_str)
+            prov_row = rows[1] if len(rows) > 1 else {}
+            p_heading = heading or str(prov_row.get("title") or "")
+            premise = Premise.from_records(rows)
+            if premise.passages:
+                return [
+                    f"{p_heading} {p.text}".strip()
+                    if p_heading and not p.text.startswith(p_heading)
+                    else p.text.strip()
+                    for p in premise.passages
+                    if p.text
+                ]
+            body = " ".join(
+                str(t)
+                for r in rows[1:]
+                for t in (r.get("text"), r.get("text_after"))
+                if t and not str(t).startswith(". . .")
+            )
+            return split_section_windows(body, heading=p_heading)
+        except (KeyError, IndexError, ValueError, TypeError, OSError, RuntimeError):
+            return [heading or coord_str]
+
+    h = heading or coord_str
+    return [h]
+
+
+def _get_initial_candidates(
+    discovered_candidates: Sequence[Any],
+    query: object,
+    limit: int,
+    dense: DenseRetriever | None,
+    *,
+    pool: int,
+    rrf_k: int,
+    router: Router,
+) -> tuple[LabelledCoordinate, ...]:
+    if dense is None:
+        return tuple(
+            LabelledCoordinate(
+                coordinate=str(c.coordinate),
+                label=format_candidate_label(c.coordinate, c.heading, router),
+            )
+            for c in discovered_candidates[:limit]
+        )
+    dense_hits = dense.search(str(query), k=pool) if isinstance(query, str) else []
+    return _rrf_fuse_candidates(
+        discovered_candidates,
+        dense_hits,
+        pool=pool,
+        rrf_k=rrf_k,
+        limit=limit,
+        router=router,
+    )
+
+
 def discover_step(
     router: Router,
     query: object,
@@ -548,6 +618,9 @@ def discover_step(
     dense: DenseRetriever | None = None,
     pool: int = 50,
     rrf_k: int = 60,
+    colbert: ColbertScorer | None = None,
+    rerank_n: int = 24,
+    store: TextStore | None = None,
 ) -> DiscoveryOutcome:
     """Discover candidate provisions from the concept index for a citation-less query.
 
@@ -555,7 +628,7 @@ def discover_step(
     - ``RefusalEvent`` of kind ``out_of_scope`` if the query cues case law, non-UK law, or
       personal advice.
     - ``NoEvidence(receipt)`` with a negative-evidence ``RefusalEvent`` if no provision matched.
-    - ``Suggest(candidates, confident, question)`` with up to ``limit`` candidate provisions.
+    - ``Suggest(candidates, confident, question, spans)`` with up to ``limit`` candidate provisions.
     """
     snapshot = ""
     if hasattr(router, "index") and router.index is not None:
@@ -566,7 +639,7 @@ def discover_step(
         if out_of_scope is not None:
             return out_of_scope
 
-    bm25_limit = pool if dense is not None else limit
+    bm25_limit = pool if dense is not None else (rerank_n if colbert is not None else limit)
     discovered = router.discover(query, limit=bm25_limit)
     if discovered.index_snapshot:
         snapshot = discovered.index_snapshot
@@ -574,24 +647,45 @@ def discover_step(
     if not discovered.candidates or discovered.reason in ("no_match", "no_terms"):
         return _build_no_evidence(snapshot, router, query)
 
-    if dense is None:
-        candidates = tuple(
-            LabelledCoordinate(
-                coordinate=str(c.coordinate),
-                label=format_candidate_label(c.coordinate, c.heading, router),
-            )
-            for c in discovered.candidates[:limit]
-        )
-    else:
-        dense_hits = dense.search(str(query), k=pool) if isinstance(query, str) else []
-        candidates = _rrf_fuse_candidates(
+    candidates: tuple[LabelledCoordinate, ...]
+    spans: tuple[tuple[int, int], ...] | None = None
+
+    if colbert is None:
+        candidates = _get_initial_candidates(
             discovered.candidates,
-            dense_hits,
+            query,
+            limit,
+            dense,
             pool=pool,
             rrf_k=rrf_k,
-            limit=limit,
             router=router,
         )
+    else:
+        initial_cands = _get_initial_candidates(
+            discovered.candidates,
+            query,
+            rerank_n,
+            dense,
+            pool=pool,
+            rrf_k=rrf_k,
+            router=router,
+        )
+        if not initial_cands:
+            candidates = ()
+            spans = ()
+        else:
+            cands_windows = [
+                _get_candidate_windows(str(c.coordinate), c.label, store, router)
+                for c in initial_cands
+            ]
+            matches = colbert.score(str(query), cands_windows)
+            scored = [
+                (matches[i].score, i + 1, c, matches[i].span) for i, c in enumerate(initial_cands)
+            ]
+            scored.sort(key=lambda item: (-item[0], item[1]))
+            top_scored = scored[:limit]
+            candidates = tuple(item[2] for item in top_scored)
+            spans = tuple(item[3] for item in top_scored)
 
     if discovered.confident:
         question = "Did you mean one of these provisions?"
@@ -602,4 +696,5 @@ def discover_step(
         candidates=candidates,
         confident=discovered.confident,
         question=question,
+        spans=spans,
     )

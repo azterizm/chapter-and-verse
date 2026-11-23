@@ -36,6 +36,7 @@ from chapterverse.contracts import (
     Event,
     RouteEvent,
 )
+from chapterverse.dense.colbert import ColbertScorer
 from chapterverse.dense.embed import load_model
 from chapterverse.dense.retriever import DenseRetriever
 from chapterverse.dense.store import BinaryInt8Store
@@ -126,6 +127,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--split", choices=("dev", "test"), default="dev")
     parser.add_argument(
         "--dense-dir", type=Path, default=None, help="Path to dense index directory"
+    )
+    parser.add_argument(
+        "--colbert-dir", type=Path, default=None, help="Path to ColBERT model directory"
     )
     parser.add_argument(
         "--models-dir",
@@ -388,16 +392,31 @@ def _run_gate_eval(
     rows: list[Any],
     pipeline_nodense: Pipeline,
     pipeline_dense: Pipeline | None,
-    dense_retriever: DenseRetriever | None,
+    pipeline_colbert: Pipeline | None,
     *,
+    dense_retriever: DenseRetriever | None,
+    colbert_scorer: ColbertScorer | None,
     router: Router,
     code: RouterDiscoveryCode,
-) -> tuple[list[Any], list[Any], list[Any], list[dict[str, Any]], list[str], dict[str, float]]:
+) -> tuple[
+    list[Any],
+    list[Any],
+    list[Any],
+    list[Any],
+    list[dict[str, Any]],
+    list[str],
+    dict[str, float],
+    dict[str, Any],
+]:
     results_p: list[Any] = []
     results_p_dense: list[Any] = []
+    results_p_colbert: list[Any] = []
     results_d: list[Any] = []
     dense_embed_ms_list: list[float] = []
     dense_search_ms_list: list[float] = []
+    colbert_latency_ms_list: list[float] = []
+    colbert_windows_list: list[int] = []
+    colbert_tokens_list: list[int] = []
     norm_changed_ids: list[str] = []
     per_row: list[dict[str, Any]] = []
     dict_obj = pipeline_nodense._get_dictionary()
@@ -422,14 +441,53 @@ def _run_gate_eval(
             dense_search_ms_list.append(dense_retriever.last_search_ms)
             per_row_item["pipeline_dense"] = per_row_dense["pipeline"]
 
+        if pipeline_colbert is not None and colbert_scorer is not None:
+            res_pc, _, per_row_colbert = _evaluate_row(
+                row, pipeline_colbert, router, code, changed=changed
+            )
+            results_p_colbert.append(res_pc)
+            colbert_latency_ms_list.append(colbert_scorer.last_latency_ms)
+            colbert_windows_list.append(colbert_scorer.last_windows_count)
+            colbert_tokens_list.append(colbert_scorer.last_tokens_count)
+            per_row_item["pipeline_colbert"] = per_row_colbert["pipeline"]
+
         per_row.append(per_row_item)
 
-    latencies = (
+    latencies_dense = (
         _compute_dense_latencies(dense_embed_ms_list, dense_search_ms_list)
         if pipeline_dense is not None
         else {}
     )
-    return results_p, results_p_dense, results_d, per_row, norm_changed_ids, latencies
+
+    colbert_stats: dict[str, Any] = {}
+    if pipeline_colbert is not None and colbert_latency_ms_list:
+        lat_sorted = sorted(colbert_latency_ms_list)
+        n_times = len(lat_sorted)
+        p50_lat = round(statistics.median(lat_sorted), 2) if n_times else 0.0
+        p95_lat = round(lat_sorted[int(0.95 * n_times)], 2) if n_times else 0.0
+        colbert_stats = {
+            "latency_ms": {
+                "p50": p50_lat,
+                "p95": p95_lat,
+            },
+            "mean_windows_per_query": (
+                round(statistics.mean(colbert_windows_list), 2) if colbert_windows_list else 0.0
+            ),
+            "mean_tokens_scored_per_query": (
+                round(statistics.mean(colbert_tokens_list), 2) if colbert_tokens_list else 0.0
+            ),
+        }
+
+    return (
+        results_p,
+        results_p_dense,
+        results_p_colbert,
+        results_d,
+        per_row,
+        norm_changed_ids,
+        latencies_dense,
+        colbert_stats,
+    )
 
 
 def _build_pipelines(
@@ -437,7 +495,14 @@ def _build_pipelines(
     store: Any,
     dense_dir: Path | None,
     models_dir: Path,
-) -> tuple[DenseRetriever | None, Pipeline, Pipeline | None]:
+    colbert_dir: Path | None = None,
+) -> tuple[
+    DenseRetriever | None,
+    ColbertScorer | None,
+    Pipeline,
+    Pipeline | None,
+    Pipeline | None,
+]:
     dense_retriever: DenseRetriever | None = None
     if dense_dir is not None:
         dense_store = BinaryInt8Store.open(dense_dir, corpus_id=store.corpus_id)
@@ -445,12 +510,20 @@ def _build_pipelines(
         concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
         dense_retriever = DenseRetriever(dense_embedder, dense_store, concepts)
 
+    colbert_scorer: ColbertScorer | None = None
+    if colbert_dir is not None:
+        manifest_path = colbert_dir.parent / "models-manifest.json"
+        if not manifest_path.is_file():
+            manifest_path = colbert_dir / "models-manifest.json"
+        colbert_scorer = ColbertScorer.load(colbert_dir, manifest_path, threads=4)
+
     pipeline_nodense = Pipeline(
         router=router,
         store=store,
         rotation=EmptyRotation(),
         policy=build_policy(JUDGE_PRESET_NAME),
         dense=None,
+        colbert=None,
     )
     pipeline_dense = (
         Pipeline(
@@ -459,11 +532,120 @@ def _build_pipelines(
             rotation=EmptyRotation(),
             policy=build_policy(JUDGE_PRESET_NAME),
             dense=dense_retriever,
+            colbert=None,
         )
         if dense_retriever is not None
         else None
     )
-    return dense_retriever, pipeline_nodense, pipeline_dense
+    pipeline_colbert = (
+        Pipeline(
+            router=router,
+            store=store,
+            rotation=EmptyRotation(),
+            policy=build_policy(JUDGE_PRESET_NAME),
+            dense=dense_retriever,
+            colbert=colbert_scorer,
+        )
+        if (colbert_scorer is not None)
+        else None
+    )
+    return (
+        dense_retriever,
+        colbert_scorer,
+        pipeline_nodense,
+        pipeline_dense,
+        pipeline_colbert,
+    )
+
+
+def _print_dev_comparison(
+    report_dense: dict[str, Any],
+    report_colbert: dict[str, Any],
+    colbert_stats: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
+    print("\n=== Discovery Dev Split Evaluation ===")
+    print(f"{'Stage':<16} {'Hit@1':<8} {'Hit@5':<8} {'Hit@10':<8} {'MRR':<8}")
+    r_d_all = report_dense["all"]
+    r_c_all = report_colbert["all"]
+    print(
+        f"{'RRF alone':<16} {r_d_all['hit@1']:<8.3f} {r_d_all['hit@5']:<8.3f} "
+        f"{r_d_all['hit@10']:<8.3f} {r_d_all['mrr']:<8.3f}"
+    )
+    print(
+        f"{'RRF + ColBERT':<16} {r_c_all['hit@1']:<8.3f} {r_c_all['hit@5']:<8.3f} "
+        f"{r_c_all['hit@10']:<8.3f} {r_c_all['mrr']:<8.3f}"
+    )
+
+    print("\nBy Source (MRR / Hit@10):")
+    sources = sorted(
+        set(report_dense["by_source"].keys()) | set(report_colbert["by_source"].keys())
+    )
+    for src in sources:
+        src_d = report_dense["by_source"].get(src, {})
+        src_c = report_colbert["by_source"].get(src, {})
+        print(
+            f"  {src:<12} RRF: MRR={src_d.get('mrr', 0.0):.3f}, "
+            f"Hit@10={src_d.get('hit@10', 0.0):.3f} | ColBERT: "
+            f"MRR={src_c.get('mrr', 0.0):.3f}, Hit@10={src_c.get('hit@10', 0.0):.3f}"
+        )
+
+    lat_p50 = colbert_stats.get("latency_ms", {}).get("p50", 0.0)
+    lat_p95 = colbert_stats.get("latency_ms", {}).get("p95", 0.0)
+    print(f"\nColBERT stage latency (4 threads): p50 = {lat_p50}ms, p95 = {lat_p95}ms")
+    print(f"Mean windows per query: {colbert_stats.get('mean_windows_per_query', 0.0)}")
+    tok_scored = colbert_stats.get("mean_tokens_scored_per_query", 0.0)
+    print(f"Mean tokens scored per query: {tok_scored}")
+    beats = summary.get("colbert_beats_rrf", False)
+    print(f"ColBERT beats RRF on dev: {'YES' if beats else 'NO'}\n")
+
+
+def _prepare_settings(repo: Path) -> Settings:
+    env_dict = dict(os.environ)
+    if "LEGAL_DATA_ROOT" not in env_dict and (repo / "data").is_dir():
+        env_dict["LEGAL_DATA_ROOT"] = str(repo / "data")
+    if "STORE_DIR" not in env_dict and Path("artefacts/store").is_dir():
+        env_dict["STORE_DIR"] = "artefacts/store"
+    return Settings.from_env(env_dict)
+
+
+def _enrich_summary_with_stages(
+    summary: dict[str, Any],
+    report_nodense: dict[str, Any],
+    *,
+    pipeline_dense: Pipeline | None,
+    report_dense: dict[str, Any] | None,
+    pipeline_colbert: Pipeline | None,
+    report_colbert: dict[str, Any] | None,
+    latencies: dict[str, float],
+    colbert_stats: dict[str, Any],
+) -> None:
+    summary["without_dense"] = {
+        "all": report_nodense["all"],
+        "by_source": report_nodense["by_source"],
+    }
+
+    if pipeline_dense is not None and report_dense is not None:
+        summary["dense"] = {
+            "all": report_dense["all"],
+            "by_source": report_dense["by_source"],
+            "latency_ms": latencies,
+        }
+
+    if pipeline_colbert is not None and report_colbert is not None:
+        summary["colbert"] = {
+            "all": report_colbert["all"],
+            "by_source": report_colbert["by_source"],
+            "latency_ms": colbert_stats.get("latency_ms", {}),
+            "mean_windows_per_query": colbert_stats.get("mean_windows_per_query", 0.0),
+            "mean_tokens_scored_per_query": colbert_stats.get("mean_tokens_scored_per_query", 0.0),
+        }
+        if pipeline_dense is not None and report_dense is not None:
+            rrf_mrr = report_dense["all"]["mrr"]
+            colbert_mrr = report_colbert["all"]["mrr"]
+            rrf_hit10 = report_dense["all"]["hit@10"]
+            colbert_hit10 = report_colbert["all"]["hit@10"]
+            summary["colbert_beats_rrf"] = (colbert_mrr > rrf_mrr) and (colbert_hit10 >= rrf_hit10)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -479,10 +661,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     code = load_router_discovery_code(repo)
-    env_dict = dict(os.environ)
-    if "LEGAL_DATA_ROOT" not in env_dict and (repo / "data").is_dir():
-        env_dict["LEGAL_DATA_ROOT"] = str(repo / "data")
-    settings = Settings.from_env(env_dict)
+    settings = _prepare_settings(repo)
     index_dir = Path(settings.router_index)
 
     seal_result = _verify_seal(code, repo, args.seal, index_dir)
@@ -504,8 +683,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"REFUSED: store {store.snapshot} and router {router.index.snapshot} differ")
         return 1
 
-    dense_retriever, pipeline_nodense, pipeline_dense = _build_pipelines(
-        router, store, args.dense_dir, args.models_dir
+    (
+        dense_retriever,
+        colbert_scorer,
+        pipeline_nodense,
+        pipeline_dense,
+        pipeline_colbert,
+    ) = _build_pipelines(
+        router,
+        store,
+        args.dense_dir,
+        args.models_dir,
+        colbert_dir=args.colbert_dir,
     )
 
     rows = [r for r in code.schema.read_concepts(repo / args.battery) if r.split == args.split]
@@ -514,15 +703,19 @@ def main(argv: list[str] | None = None) -> int:
     (
         results_p,
         results_p_dense,
+        results_p_colbert,
         results_d,
         per_row,
         norm_changed_ids,
         latencies,
+        colbert_stats,
     ) = _run_gate_eval(
         rows,
         pipeline_nodense,
         pipeline_dense,
-        dense_retriever,
+        pipeline_colbert,
+        dense_retriever=dense_retriever,
+        colbert_scorer=colbert_scorer,
         router=router,
         code=code,
     )
@@ -530,12 +723,20 @@ def main(argv: list[str] | None = None) -> int:
     report_nodense = code.discovery.report(results_p)
     report_d = code.discovery.report(results_d)
 
-    active_report_p = report_nodense
-    active_results_p = results_p
-    if pipeline_dense is not None:
-        report_dense = code.discovery.report(results_p_dense)
+    report_dense = code.discovery.report(results_p_dense) if pipeline_dense is not None else None
+    report_colbert = (
+        code.discovery.report(results_p_colbert) if pipeline_colbert is not None else None
+    )
+
+    if pipeline_colbert is not None and report_colbert is not None:
+        active_report_p = report_colbert
+        active_results_p = results_p_colbert
+    elif pipeline_dense is not None and report_dense is not None:
         active_report_p = report_dense
         active_results_p = results_p_dense
+    else:
+        active_report_p = report_nodense
+        active_results_p = results_p
 
     summary, overall_pass = _compute_summary(
         args.split,
@@ -549,17 +750,16 @@ def main(argv: list[str] | None = None) -> int:
         results_d=results_d,
     )
 
-    summary["without_dense"] = {
-        "all": report_nodense["all"],
-        "by_source": report_nodense["by_source"],
-    }
-
-    if pipeline_dense is not None:
-        summary["dense"] = {
-            "all": report_dense["all"],
-            "by_source": report_dense["by_source"],
-            "latency_ms": latencies,
-        }
+    _enrich_summary_with_stages(
+        summary,
+        report_nodense,
+        pipeline_dense=pipeline_dense,
+        report_dense=report_dense,
+        pipeline_colbert=pipeline_colbert,
+        report_colbert=report_colbert,
+        latencies=latencies,
+        colbert_stats=colbert_stats,
+    )
 
     out.mkdir(parents=True, exist_ok=True)
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -568,6 +768,15 @@ def main(argv: list[str] | None = None) -> int:
             f.write(json.dumps(item) + "\n")
 
     print(json.dumps(summary, indent=2))
+
+    if (
+        pipeline_dense is not None
+        and report_dense is not None
+        and pipeline_colbert is not None
+        and report_colbert is not None
+    ):
+        _print_dev_comparison(report_dense, report_colbert, colbert_stats, summary)
+
     return 0 if overall_pass else 1
 
 
