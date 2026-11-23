@@ -257,7 +257,7 @@ def test_dictionary_builder_fixture(tmp_path: Path) -> None:
     assert len(sha256_digest) == 64
 
     dict_file = tmp_path / "dictionary.txt"
-    manifest_file = tmp_path / "manifest.json"
+    manifest_file = tmp_path / "symspell-manifest.json"
     assert dict_file.is_file()
     assert manifest_file.is_file()
 

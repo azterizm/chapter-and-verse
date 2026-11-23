@@ -11,7 +11,7 @@
 #
 # What it does, in order:
 #   1. base packages, unattended-upgrades with automatic reboot at 04:30 UTC
-#   2. swap file and journald size limits
+#   2. swap file, host tmpfs and journald size limits
 #   3. firewall: ufw denies all incoming (SSH only from SSH_ALLOW_FROM, default the VCN range)
 #   4. Docker Engine and the compose plugin (download.docker.com)
 #   5. cloudflared (pkg.cloudflare.com) as the systemd service cloudflared-cv
@@ -109,6 +109,18 @@ configure_swap() {
 "$MARKER
 vm.swappiness = 10"; then
     sysctl --system >/dev/null
+  fi
+}
+
+configure_host_ram() {
+  log "host tmpfs /var/lib/chapter-and-verse-ram"
+  local mount_point=/var/lib/chapter-and-verse-ram
+  grep -qE '[[:space:]]/var/lib/chapter-and-verse-ram[[:space:]]' /etc/fstab || \
+    printf 'tmpfs /var/lib/chapter-and-verse-ram tmpfs size=3g,mode=0700,uid=1000,gid=1000,nosuid,nodev,noexec 0 0\n' >> /etc/fstab
+  install -d -m 0700 "$mount_point"
+  chown 1000:1000 "$mount_point"
+  if ! mountpoint -q "$mount_point"; then
+    mount "$mount_point"
   fi
 }
 
@@ -317,6 +329,7 @@ main() {
   install_base
   configure_unattended_upgrades
   configure_swap
+  configure_host_ram
   configure_journald
   configure_firewall
   install_docker

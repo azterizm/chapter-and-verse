@@ -13,6 +13,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from chapterverse.contracts import TextStore
+from chapterverse.store import open_store
 from chapterverse.symspell_build import build_dictionary
 
 
@@ -90,7 +92,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(msg, file=sys.stderr)
         return 1
 
-    term_count, file_size, elapsed, sha256_digest = build_dictionary(store_path, args.out)
+    source: TextStore | Path
+    if (store_path / "corpus-manifest.json").is_file():
+        source = open_store(store_path)
+    elif (store_path / "store" / "corpus-manifest.json").is_file():
+        source = open_store(store_path / "store")
+    else:
+        source = store_path
+
+    term_count, file_size, elapsed, sha256_digest = build_dictionary(source, args.out)
 
     peak_rss_mb = _peak_rss_bytes() / (1024 * 1024)
 

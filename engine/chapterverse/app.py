@@ -26,14 +26,20 @@ Turnstile is checked by the Worker, which mints the session the request carries.
 Startup (lifespan): open the text store (every file's SHA-256 checked), the router index and
 the concept index once; refuse to start when the store and router snapshots differ; build the
 rotation from the environment (``GEN_PROVIDERS``, ``JUDGE_PROVIDERS``) over the quota ledger
-(Postgres when ``DATABASE_URL`` is set); load the Modal KV path when Modal is configured; run the
-provider pin check once, then every ``PIN_CHECK_INTERVAL_S`` (a day) on a daemon thread, which
-also runs the database retention purge hourly.
+(Postgres when ``DATABASE_URL`` is set); load the Modal KV path when Modal is configured; schedule
+the provider pin check and the database retention purge as immediate first runs on the maintenance
+daemon thread (off the readiness path), then every ``PIN_CHECK_INTERVAL_S`` (a day) and hourly.
+Until the first check finishes, the providers keep their configured initial state: every provider is
+pinned (in rotation); native prefill is enabled for Cloudflare and disabled (folded into the user
+turn) for Groq and Modal. An inconclusive or failed check leaves the pins as they were, equal to the
+state between daily checks.
 
 The pin check is :func:`chapterverse.providers.pinning.check_provider` and ``apply_checks`` (the
 two halves of ``run_daily_check``) for every provider except Modal: Modal serves our own pinned
 revision (``serve.py`` refuses to start on any other), and any request to a cold Modal endpoint
 starts a billed container, so checking it daily would cost about a cold start a day for nothing.
+Checks run concurrently across a small thread pool (one thread per provider), and ``apply_checks``
+is called once with all results.
 
 Each answer runs in a worker thread from a bounded pool (``ASK_WORKERS``, default 4); events
 cross to the event loop with ``loop.call_soon_threadsafe``. When the client disconnects the
@@ -123,6 +129,7 @@ from chapterverse.ratelimit import (
     client_key_hash,
 )
 from chapterverse.store import open_store
+from chapterverse.store.manifest import sha256_file
 from chapterverse.symspell_build import build_symspell_in_memory
 
 __all__ = [
@@ -266,24 +273,42 @@ def check_snapshots(store: TextStore, router: Router) -> None:
 
 
 def pin_check(rotation: ProviderRotation) -> dict[str, PinCheck]:
-    """Check every provider's pinned model except Modal's (module docstring) and apply it."""
-    checks: dict[str, PinCheck] = {}
+    """Check every provider's pinned model except Modal's (module docstring) and apply it.
+
+    Runs provider checks concurrently across a small thread pool (one thread per provider).
+    """
+    providers_to_check: list[tuple[str, OpenAICompatProvider]] = []
     for name, provider in rotation.providers.items():
         if not isinstance(provider, OpenAICompatProvider):
             continue
         if provider.adapter.health_url() is not None:
             log.info("pin check %s skipped: it serves its own pinned revision", name)
             continue
-        check = check_provider(provider)
-        checks[name] = check
-        log.info(
-            "pin check %s: listed=%s thinking_off=%s prefill=%s conclusive=%s",
-            name,
-            check.model_listed,
-            check.thinking_off_ok,
-            check.prefill_ok,
-            is_conclusive(check),
-        )
+        providers_to_check.append((name, provider))
+
+    checks: dict[str, PinCheck] = {}
+    if providers_to_check:
+        with ThreadPoolExecutor(
+            max_workers=len(providers_to_check), thread_name_prefix="pin-check"
+        ) as pool:
+            futures = {
+                name: pool.submit(check_provider, provider) for name, provider in providers_to_check
+            }
+            for name, fut in futures.items():
+                try:
+                    check = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("pin check %s failed: %s", name, type(exc).__name__)
+                    continue
+                checks[name] = check
+                log.info(
+                    "pin check %s: listed=%s thinking_off=%s prefill=%s conclusive=%s",
+                    name,
+                    check.model_listed,
+                    check.thinking_off_ok,
+                    check.prefill_ok,
+                    is_conclusive(check),
+                )
     apply_checks(rotation, checks.values())
     return checks
 
@@ -521,18 +546,92 @@ def load_modal_kv(
     return ModalKV(make_backend=make_backend, probe=probe, provider=provider.name)
 
 
-def _load_slice2_dictionary(env: Mapping[str, str], store: TextStore) -> SymSpell:
+def _verify_symspell_file(dict_file: Path, store: TextStore) -> bool:
+    manifest_path = dict_file.parent / "symspell-manifest.json"
+    if not manifest_path.is_file():
+        log.warning("symspell-manifest.json missing, falling back to store")
+        return False
+    try:
+        manifest_data = json.loads(manifest_path.read_bytes())
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "symspell-manifest.json invalid JSON (%s), falling back to store",
+            type(exc).__name__,
+        )
+        return False
+    if not isinstance(manifest_data, dict) or manifest_data.get("corpus_id") != store.corpus_id:
+        cid = manifest_data.get("corpus_id") if isinstance(manifest_data, dict) else None
+        log.warning(
+            "symspell manifest corpus_id mismatch (%s vs %s), falling back to store",
+            cid,
+            store.corpus_id,
+        )
+        return False
+    files_entry = manifest_data.get("files")
+    dict_meta = (
+        files_entry.get(dict_file.name, files_entry.get("dictionary.txt"))
+        if isinstance(files_entry, dict)
+        else None
+    )
+    expected_sha = dict_meta.get("sha256") if isinstance(dict_meta, dict) else None
+    if not expected_sha or sha256_file(dict_file) != expected_sha:
+        log.warning("symspell dictionary sha256 mismatch or missing, falling back to store")
+        return False
+    return True
+
+
+def _load_slice2_dictionary(
+    env: Mapping[str, str],
+    store: TextStore,
+    preloaded: tuple[threading.Thread, list[Any], float] | None = None,
+) -> SymSpell:
     symspell_path = _env(env, "SYMSPELL_DICT")
-    t0 = time.perf_counter()
-    if symspell_path is not None and Path(symspell_path).is_file():
-        sym = load_dictionary(Path(symspell_path))
-        elapsed = time.perf_counter() - t0
-        log.info("dictionary from file: %d terms in %.3fs", sym.word_count, elapsed)
-        return sym
+    t0 = time.perf_counter() if preloaded is None else preloaded[2]
+    if symspell_path is not None:
+        dict_file = Path(symspell_path)
+        if dict_file.is_file():
+            if _verify_symspell_file(dict_file, store):
+                if preloaded is not None:
+                    preloaded[0].join()
+                    if preloaded[1] and isinstance(preloaded[1][0], SymSpell):
+                        sym = preloaded[1][0]
+                    else:
+                        sym = load_dictionary(dict_file)
+                else:
+                    sym = load_dictionary(dict_file)
+                elapsed = time.perf_counter() - t0
+                log.info("dictionary from file: %d terms in %.3fs", sym.word_count, elapsed)
+                return sym
+        else:
+            log.warning("SYMSPELL_DICT path does not exist, falling back to store")
+
     sym = build_symspell_in_memory(store)
     elapsed = time.perf_counter() - t0
     log.info("dictionary built from store: %d terms in %.3fs", sym.word_count, elapsed)
     return sym
+
+
+def _preload_symspell(
+    env: Mapping[str, str],
+) -> tuple[threading.Thread, list[Any], float] | None:
+    symspell_path = _env(env, "SYMSPELL_DICT")
+    if symspell_path is None:
+        return None
+    dict_file = Path(symspell_path)
+    if not dict_file.is_file():
+        return None
+    dict_res: list[Any] = []
+    t_preload = time.perf_counter()
+
+    def _preload() -> None:
+        try:
+            dict_res.append(load_dictionary(dict_file))
+        except Exception as exc:  # noqa: BLE001
+            dict_res.append(exc)
+
+    th = threading.Thread(target=_preload, name="symspell-preload", daemon=True)
+    th.start()
+    return (th, dict_res, t_preload)
 
 
 def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
@@ -545,6 +644,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     """
     env = os.environ if environ is None else environ
     settings = Settings.from_env(env)
+    dict_preload = _preload_symspell(env)
     t0 = time.perf_counter()
     store = open_store(settings.store_dir)
     router = Router.from_path(settings.router_index, concepts=settings.concepts_index)
@@ -579,7 +679,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         raise ConfigError("HOSTING_SHARE must be between 0 and 1")
 
     t_slice2 = time.perf_counter()
-    sym_dict = _load_slice2_dictionary(env, store)
+    sym_dict = _load_slice2_dictionary(env, store, preloaded=dict_preload)
     get_nlp()
     slice2_time_s = time.perf_counter() - t_slice2
     log.info("Slice 2 startup: loaded SymSpell and spaCy in %.3fs", slice2_time_s)
@@ -650,20 +750,27 @@ class _Maintenance:
     def stop(self) -> None:
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=5.0)
+            self._thread.join(timeout=0.5)
 
     def _run(self) -> None:
-        due = {name: time.monotonic() + interval for name, interval, _ in self._tasks}
+        if not self._tasks:
+            return
+        due = {name: 0.0 for name, _, _ in self._tasks}
         while not self._stop.is_set():
             now = time.monotonic()
             for name, interval, task in self._tasks:
+                if self._stop.is_set():
+                    break
                 if now >= due[name]:
                     due[name] = now + interval
                     try:
                         task()
                     except Exception as exc:  # noqa: BLE001 - a failed task waits for its next turn
                         log.warning("maintenance task %s failed: %s", name, type(exc).__name__)
-            self._stop.wait(max(1.0, min(due.values()) - time.monotonic()))
+            if self._stop.is_set():
+                break
+            delay = min(due.values()) - time.monotonic()
+            self._stop.wait(max(0.001, delay))
 
 
 # ---------------------------------------------------------------------------- edge
@@ -876,13 +983,8 @@ def _lifespan(
         rt = await anyio.to_thread.run_sync(factory)
         tasks: list[tuple[str, float, Callable[[], object]]] = []
         if rt.pin_check is not None:
-            try:
-                await anyio.to_thread.run_sync(rt.pin_check)
-            except Exception as exc:  # noqa: BLE001 - a failed check leaves the pins as they are
-                log.warning("startup pin check failed: %s", type(exc).__name__)
             tasks.append(("pin_check", rt.pin_interval_s, rt.pin_check))
         if rt.purge is not None:
-            await anyio.to_thread.run_sync(rt.purge)
             tasks.append(("purge", PURGE_INTERVAL_S, rt.purge))
         maintenance = _Maintenance(tasks)
         maintenance.start()

@@ -8,6 +8,7 @@ published as a public Hugging Face Dataset. Layout of the dataset (and of ``DATA
     <store files>                    as listed in it (STORE_DIR=/data)
     index/index-manifest.json, ...   router index (LEGAL_DATA_ROOT=/data)
     concepts/concepts-manifest.json, ...
+    symspell/symspell-manifest.json, ... spelling dictionary
 
 A manifest holds ``files``, either a mapping ``{"relative/path": {"sha256": "<hex>",
 "size": <int>}}`` (``bytes`` is accepted for ``size``; either is optional) or a list of
@@ -26,6 +27,8 @@ Behaviour:
 - Downloads go to ``<file>.part`` and resume with an HTTP Range request after an interruption.
   A file is moved into place only after its hash matches. The manifest is written last.
 - With ``HF_DATASET`` unset, the script only verifies a mounted ``DATA_DIR`` (read-only is fine).
+- With ``--copy-to DIR``, copies the whole ``DATA_DIR`` tree to ``DIR`` and verifies all listed
+  files in one pass while copying. Requires source marker match on ``DATA_DIR`` (else exit 3).
 
 Environment:
 
@@ -38,11 +41,12 @@ HF_ENDPOINT         default ``https://huggingface.co``
 MANIFEST_NAME       default ``corpus-manifest.json``
 MANIFEST_SHA256     optional pin of the manifest's own SHA-256; strongly recommended
 EXTRA_MANIFESTS     comma list (empty for none), default
-                    ``index/index-manifest.json,concepts/concepts-manifest.json``
-ARTEFACTS_WORKERS   parallel downloads (default 4)
+                    ``index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json``
+ARTEFACTS_WORKERS   parallel downloads (default 4); verify defaults to min(cpu, 8)
 ==================  =========================================================================
 
-Exit codes: 0 verified, 1 verification or download failure, 2 configuration error.
+Exit codes: 0 verified, 1 verification or download failure, 2 configuration error,
+3 marker mismatch.
 """
 
 from __future__ import annotations
@@ -66,6 +70,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 CHUNK = 1 << 20
+COPY_CHUNK = 4 << 20
 MAX_MANIFEST_BYTES = 64 << 20
 RETRIES = 5
 TIMEOUT_S = 60
@@ -193,24 +198,51 @@ def verify_local(root: Path, entry: Entry) -> bool:
         return False
 
 
-def verify_all(root: Path, entries: list[Entry]) -> tuple[list[Entry], list[Entry]]:
+def verify_all(
+    root: Path, entries: list[Entry], workers: int | None = None
+) -> tuple[list[Entry], list[Entry]]:
     """(all entries, entries that failed), expanding verified nested manifests."""
+    if workers is None:
+        env_workers = os.environ.get("ARTEFACTS_WORKERS", "").strip()
+        if env_workers:
+            try:
+                workers = int(env_workers)
+            except ValueError:
+                workers = min(os.cpu_count() or 1, 8)
+        else:
+            workers = min(os.cpu_count() or 1, 8)
+    workers = max(1, min(workers, MAX_WORKERS))
+
     bad: list[Entry] = []
     checked: set[str] = set()
-    queue = list(entries)
-    while queue:
-        entry = queue.pop()
-        if entry.path in checked:
-            continue
-        checked.add(entry.path)
-        if not verify_local(root, entry):
-            bad.append(entry)
-            continue
-        nested = nested_manifest_entries(root, entry)
-        if nested:
-            entries = merge(entries, nested)
-            queue.extend(nested)
-    return entries, bad
+    all_entries = list(entries)
+    pending = [e for e in all_entries if e.path not in checked]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        while pending:
+            unique_pending: list[Entry] = []
+            for entry in pending:
+                if entry.path not in checked:
+                    checked.add(entry.path)
+                    unique_pending.append(entry)
+
+            if not unique_pending:
+                break
+
+            futures = [pool.submit(verify_local, root, entry) for entry in unique_pending]
+            new_nested: list[Entry] = []
+            for entry, fut in zip(unique_pending, futures, strict=True):
+                if not fut.result():
+                    bad.append(entry)
+                    continue
+                nested = nested_manifest_entries(root, entry)
+                if nested:
+                    all_entries = merge(all_entries, nested)
+                    new_nested.extend(nested)
+
+            pending = [e for e in new_nested if e.path not in checked]
+
+    return all_entries, bad
 
 
 # ---------------------------------------------------------------- download
@@ -357,6 +389,22 @@ def local_extras(root: Path, settings: Settings) -> dict[str, str] | None:
     return out
 
 
+def check_marker(root: Path, settings: Settings) -> bool:
+    """True when root holds the manifests of the wanted source with matching marker."""
+    source, pinned = settings.source, settings.pinned
+    if source is None:
+        return False
+    manifest_path = root / settings.manifest_name
+    extras = local_extras(root, settings)
+    if not manifest_path.is_file() or extras is None:
+        return False
+    local_raw = manifest_path.read_bytes()
+    local_sha = hashlib.sha256(local_raw).hexdigest()
+    if pinned is not None and pinned != local_sha:
+        return False
+    return read_marker(root) == source.marker(local_sha, extras)
+
+
 def already_verified(root: Path, settings: Settings) -> bool:
     """True when ``root`` holds a verified copy of the wanted source (no network needed)."""
     source, pinned = settings.source, settings.pinned
@@ -375,7 +423,10 @@ def already_verified(root: Path, settings: Settings) -> bool:
         return False
     entries = parse_files(load_manifest(local_raw, pinned, "local"))
     entries = merge(entries, [Entry(n, h, None) for n, h in extras.items()])
-    entries, bad = verify_all(root, entries)
+    verify_workers = (
+        settings.workers if "ARTEFACTS_WORKERS" in os.environ else min(os.cpu_count() or 1, 8)
+    )
+    entries, bad = verify_all(root, entries, workers=verify_workers)
     if not bad:
         log(f"verified {len(entries)} files in {root}; no download needed")
         return True
@@ -441,7 +492,10 @@ def run(root: Path, settings: Settings) -> int:
         # 3. Final full verification, then the manifest and source marker.
         (root / SOURCE_MARKER).unlink(missing_ok=True)
         write_atomic(manifest_path, raw)
-        _, bad = verify_all(root, base)
+        verify_workers = (
+            settings.workers if "ARTEFACTS_WORKERS" in os.environ else min(os.cpu_count() or 1, 8)
+        )
+        _, bad = verify_all(root, base, workers=verify_workers)
         if bad:
             manifest_path.unlink(missing_ok=True)
             raise FetchError(f"{len(bad)} files failed final verification, e.g. {bad[0].path}")
@@ -451,10 +505,153 @@ def run(root: Path, settings: Settings) -> int:
     return 0
 
 
-DEFAULT_EXTRAS = "index/index-manifest.json,concepts/concepts-manifest.json"
+def copy_one(src_path: Path, dst_path: Path, entry: Entry | None) -> None:
+    """Copy src_path to dst_path, hashing bytes while copying if entry is given."""
+    try:
+        if not src_path.is_file() or src_path.is_symlink():
+            raise FetchError(f"missing or invalid file: {src_path}")
+        if entry is not None and entry.size is not None:
+            actual_size = src_path.stat().st_size
+            if actual_size != entry.size:
+                raise FetchError(
+                    f"{entry.path}: size mismatch (expected {entry.size}, got {actual_size})"
+                )
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        h = hashlib.sha256() if entry is not None else None
+        bytes_copied = 0
+        with src_path.open("rb") as fsrc, dst_path.open("wb") as fdst:
+            while chunk := fsrc.read(COPY_CHUNK):
+                if h is not None:
+                    h.update(chunk)
+                fdst.write(chunk)
+                bytes_copied += len(chunk)
+        if entry is not None and h is not None:
+            if entry.size is not None and bytes_copied != entry.size:
+                raise FetchError(
+                    f"{entry.path}: size mismatch (expected {entry.size}, got {bytes_copied})"
+                )
+            digest = h.hexdigest()
+            if digest != entry.sha256:
+                raise FetchError(
+                    f"{entry.path}: checksum mismatch (expected {entry.sha256}, got {digest})"
+                )
+        shutil.copymode(src_path, dst_path)
+    except OSError as exc:
+        raise FetchError(f"I/O error copying {src_path} to {dst_path}: {exc}") from exc
 
 
-def config_from_env(env: dict[str, str]) -> Settings:
+def _copy_and_expand_manifests(
+    src_root: Path,
+    dst_root: Path,
+    settings: Settings,
+    local_raw: bytes,
+    extras: dict[str, str],
+) -> tuple[list[Entry], set[str]]:
+    manifest_name = settings.manifest_name
+    manifest_path = src_root / manifest_name
+    local_sha = hashlib.sha256(local_raw).hexdigest()
+
+    copy_one(
+        manifest_path,
+        dst_root / manifest_name,
+        Entry(manifest_name, local_sha, len(local_raw)),
+    )
+    entries = parse_files(load_manifest(local_raw, settings.pinned, "local"))
+    extra_entries = [Entry(n, extras[n], None) for n in settings.extras]
+    entries = merge(entries, extra_entries)
+    copied_relpaths: set[str] = {manifest_name}
+
+    manifest_queue: list[Entry] = list(extra_entries)
+    manifest_queue.extend(
+        e for e in entries if e.path.endswith("-manifest.json") and e.path not in copied_relpaths
+    )
+    expanded: set[str] = set()
+    while manifest_queue:
+        m_entry = manifest_queue.pop(0)
+        if m_entry.path in expanded:
+            continue
+        expanded.add(m_entry.path)
+        if m_entry.path not in copied_relpaths:
+            copy_one(src_root / m_entry.path, dst_root / m_entry.path, m_entry)
+            copied_relpaths.add(m_entry.path)
+        nested = nested_manifest_entries(dst_root, m_entry)
+        if nested:
+            entries = merge(entries, nested)
+            manifest_queue.extend(
+                child
+                for child in nested
+                if child.path.endswith("-manifest.json") and child.path not in expanded
+            )
+    return entries, copied_relpaths
+
+
+def _discover_copy_tasks(
+    src_root: Path,
+    dst_root: Path,
+    entries_by_path: dict[str, Entry],
+    copied_relpaths: set[str],
+) -> tuple[list[tuple[Path, Path, Entry | None]], tuple[Path, Path, Entry | None] | None]:
+    tasks: list[tuple[Path, Path, Entry | None]] = []
+    marker_task: tuple[Path, Path, Entry | None] | None = None
+    for root, _dirs, files in os.walk(src_root):
+        rel_dir = os.path.relpath(root, src_root)
+        if rel_dir != ".":
+            (dst_root / rel_dir).mkdir(parents=True, exist_ok=True)
+        for fname in files:
+            src_file = Path(root) / fname
+            rel_posix = PurePosixPath(os.path.relpath(src_file, src_root)).as_posix()
+            if rel_posix in copied_relpaths:
+                continue
+            entry = entries_by_path.get(rel_posix)
+            if rel_posix == SOURCE_MARKER:
+                marker_task = (src_file, dst_root / rel_posix, entry)
+            else:
+                tasks.append((src_file, dst_root / rel_posix, entry))
+            copied_relpaths.add(rel_posix)
+    return tasks, marker_task
+
+
+def copy_tree(src_root: Path, dst_root: Path, settings: Settings) -> int:
+    """Copy the SRC tree to DIR, verifying all listed files in one pass."""
+    if not check_marker(src_root, settings):
+        return 3
+
+    manifest_path = src_root / settings.manifest_name
+    extras = local_extras(src_root, settings)
+    if not manifest_path.is_file() or extras is None:
+        return 3
+
+    local_raw = manifest_path.read_bytes()
+    entries, copied_relpaths = _copy_and_expand_manifests(
+        src_root, dst_root, settings, local_raw, extras
+    )
+
+    for entry in entries:
+        if not (src_root / entry.path).is_file():
+            raise FetchError(f"missing listed file in source: {entry.path}")
+
+    entries_by_path = {e.path: e for e in entries}
+    tasks, marker_task = _discover_copy_tasks(src_root, dst_root, entries_by_path, copied_relpaths)
+
+    if tasks:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=settings.workers) as pool:
+            futures = [pool.submit(copy_one, src_f, dst_f, ent) for src_f, dst_f, ent in tasks]
+            for fut in concurrent.futures.as_completed(futures):
+                fut.result()
+
+    if marker_task is not None:
+        copy_one(marker_task[0], marker_task[1], marker_task[2])
+
+    log(f"copied and verified {len(entries)} files into {dst_root}")
+    return 0
+
+
+DEFAULT_EXTRAS = (
+    "index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json"
+)
+
+
+def config_from_env(env: dict[str, str], default_workers: int = 4) -> Settings:
     dataset = env.get("HF_DATASET", "").strip()
     revision = env.get("HF_REVISION", "").strip()
     endpoint = env.get("HF_ENDPOINT", "https://huggingface.co").strip().rstrip("/")
@@ -470,7 +667,7 @@ def config_from_env(env: dict[str, str]) -> Settings:
     if pinned and not HEX64.match(pinned):
         raise ConfigError("MANIFEST_SHA256 is not 64 hex characters")
     try:
-        workers = int(env.get("ARTEFACTS_WORKERS", "4"))
+        workers = int(env.get("ARTEFACTS_WORKERS", str(default_workers)))
     except ValueError:
         raise ConfigError("ARTEFACTS_WORKERS is not an integer") from None
     if not 1 <= workers <= MAX_WORKERS:
@@ -497,14 +694,31 @@ def check_root(root: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--data-dir", default=os.environ.get("DATA_DIR", "/data"))
+    parser.add_argument(
+        "--copy-to",
+        metavar="DIR",
+        help="copy SRC tree to DIR and verify listed files in one pass",
+    )
     parser.add_argument("--verify-only", action="store_true", help="never download")
+    parser.add_argument(
+        "--marker-only",
+        action="store_true",
+        help="exit 0 only when source marker and manifests match, else 3",
+    )
     args = parser.parse_args(argv)
     root = Path(args.data_dir)
     try:
-        settings = config_from_env(dict(os.environ))
-        if args.verify_only:
-            settings = Settings(None, settings.manifest_name, settings.pinned, settings.extras, 1)
+        default_workers = min(os.cpu_count() or 1, 8) if (args.copy_to or args.verify_only) else 4
+        settings = config_from_env(dict(os.environ), default_workers=default_workers)
+        if args.verify_only and not args.copy_to:
+            settings = Settings(
+                None, settings.manifest_name, settings.pinned, settings.extras, settings.workers
+            )
         check_root(root)
+        if args.marker_only:
+            return 0 if check_marker(root, settings) else 3
+        if args.copy_to:
+            return copy_tree(root, Path(args.copy_to), settings)
         return run(root, settings)
     except ConfigError as exc:
         log(f"configuration error: {exc}")

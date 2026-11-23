@@ -10,6 +10,23 @@ from chapterverse.pii import Masked, mask_pii
 if TYPE_CHECKING:
     from legal_rag_router import Router
 
+from pathlib import Path
+
+import pytest
+
+
+def _repo_vocab() -> frozenset[str]:
+    p = Path("artefacts/symspell/dictionary.txt")
+    if not p.is_file():
+        pytest.skip("artefacts/symspell/dictionary.txt not present")
+    words: set[str] = set()
+    with p.open(encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split()
+            if parts:
+                words.add(parts[0].lower())
+    return frozenset(words)
+
 
 def test_mask_pii_r4_acme_john_smith() -> None:
     text = "Can my employer Acme Ltd dismiss John Smith for whistleblowing?"
@@ -96,17 +113,18 @@ def test_mask_pii_protected_citation_spans() -> None:
 
 
 def test_mask_pii_fac_corporate_suffixes() -> None:
+    vocab = _repo_vocab()
     # FAC ending in corporate suffix gets masked as ORG
     text = "The meeting took place at Apex Tower Ltd yesterday."
     res = analyse(text)
-    masked = mask_pii(text, res)
+    masked = mask_pii(text, res, vocabulary=vocab)
     assert "[ORG 1]" in masked.text
     assert "Apex Tower Ltd" not in masked.text
 
     # FAC without corporate suffix should NOT be masked
     text_building = "The meeting took place at Big Ben yesterday."
     res_building = analyse(text_building)
-    masked_building = mask_pii(text_building, res_building)
+    masked_building = mask_pii(text_building, res_building, vocabulary=vocab)
     assert "Big Ben" in masked_building.text
 
 
@@ -146,12 +164,13 @@ def test_mask_pii_empty() -> None:
 
 
 def test_mask_pii_r5_priya_nkemelu_and_stoplist() -> None:
+    vocab = _repo_vocab()
     text = (
         "Can Priya Nkemelu claim redundancy pay from Zentrix Ltd at the "
         "Employment Tribunal in Scotland?"
     )
     res = analyse(text)
-    masked = mask_pii(text, res)
+    masked = mask_pii(text, res, vocabulary=vocab)
 
     # Priya Nkemelu masked as NAME
     assert "Priya Nkemelu" not in masked.text
@@ -170,9 +189,10 @@ def test_mask_pii_r5_priya_nkemelu_and_stoplist() -> None:
 
 
 def test_mask_pii_r5_repeated_fallback_names() -> None:
+    vocab = _repo_vocab()
     text = "Can Priya Nkemelu claim redundancy from Zentrix Ltd? Priya Nkemelu reported concerns."
     res = analyse(text)
-    masked = mask_pii(text, res)
+    masked = mask_pii(text, res, vocabulary=vocab)
     assert "[NAME 1]" in masked.text
     assert "[NAME 2]" not in masked.text
     assert masked.reverse_map["[NAME 1]"] == "Priya Nkemelu"

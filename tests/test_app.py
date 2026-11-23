@@ -681,6 +681,51 @@ def test_pin_check_unpins_a_missing_model() -> None:
     assert rotation.is_pinned("groq")
 
 
+@respx.mock
+def test_pin_check_runs_concurrently() -> None:
+    barrier = threading.Barrier(2, timeout=5)
+
+    def groq_models(request: httpx.Request) -> httpx.Response:
+        barrier.wait()
+        return _models(["qwen/qwen3.8-27b"])
+
+    def cf_models(request: httpx.Request) -> httpx.Response:
+        barrier.wait()
+        return httpx.Response(200, json={"result": [{"name": "@cf/qwen/qwen3.8-27b"}]})
+
+    respx.get(f"{GROQ}/models").mock(side_effect=groq_models)
+    respx.get(f"{CF}/models/search").mock(side_effect=cf_models)
+    respx.post(f"{GROQ}/chat/completions").mock(return_value=_completion("Paris."))
+    respx.post(f"{CF}/v1/chat/completions").mock(return_value=_completion("Paris."))
+
+    cf_env = {"CLOUDFLARE_ACCOUNT_ID": ACCOUNT, "CLOUDFLARE_AI_WORKER_TOKEN": "cf_test"}
+    rotation = ProviderRotation(
+        [
+            make_groq(environ=ENV),
+            make_cloudflare(ACCOUNT, environ=cf_env),
+        ]
+    )
+    checks = pin_check(rotation)
+    assert set(checks) == {"groq", "cloudflare"}
+    assert checks["groq"].pinned is True
+    assert checks["cloudflare"].pinned is True
+
+
+def test_provider_initial_state_equals_state_between_daily_checks() -> None:
+    cf_env = {"CLOUDFLARE_ACCOUNT_ID": ACCOUNT, "CLOUDFLARE_AI_WORKER_TOKEN": "cf_test"}
+    modal_env = {**ENV, "MODAL_API_KEY": "mk"}
+    groq = make_groq(environ=ENV)
+    cf = make_cloudflare(ACCOUNT, environ=cf_env)
+    modal = make_modal("https://modal.example", environ=modal_env)
+    rotation = ProviderRotation([groq, cf, modal])
+    assert rotation.is_pinned("groq") is True
+    assert rotation.is_pinned("cloudflare") is True
+    assert rotation.is_pinned("modal") is True
+    assert groq.supports_prefill is False
+    assert cf.supports_prefill is True
+    assert modal.supports_prefill is False
+
+
 def test_maintenance_runs_tasks_until_stopped() -> None:
     ran = threading.Event()
     failed: list[int] = []

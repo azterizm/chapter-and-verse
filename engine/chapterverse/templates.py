@@ -77,18 +77,31 @@ PRIVATE_DOCUMENTS_MESSAGE: Final = (
     "and a section."
 )
 
-OutOfScopeReason = Literal["case_law", "non_uk_law", "personal_advice", "private_document"]
-OUT_OF_SCOPE_REASONS: Final[tuple[OutOfScopeReason, ...]] = (
+OutOfScopeReason = Literal[
     "case_law",
+    "named_person",
     "non_uk_law",
     "personal_advice",
     "private_document",
+    "system_search",
+]
+OUT_OF_SCOPE_REASONS: Final[tuple[OutOfScopeReason, ...]] = (
+    "case_law",
+    "named_person",
+    "non_uk_law",
+    "personal_advice",
+    "private_document",
+    "system_search",
 )
 
 _OUT_OF_SCOPE_LEADS: Final[dict[OutOfScopeReason, str]] = {
     "case_law": "Case law is not covered.",
+    "named_person": "Information about individual people is not given.",
     "non_uk_law": "Only UK legislation is covered.",
     "personal_advice": "Advice on a personal situation is not given.",
+    "system_search": (
+        "Only UK legislation is searched; connected systems, stores and repositories are not."
+    ),
 }
 
 REFUSAL_MESSAGES: Final[Mapping[str, str]] = {
@@ -317,7 +330,9 @@ def private_document_refusal(snapshot: str) -> RefusalEvent:
 
 
 def out_of_scope_refusal(snapshot: str, reason: OutOfScopeReason | None = None) -> RefusalEvent:
-    """The ``out_of_scope`` refusal: case law, non-UK law, personal advice, or private documents."""
+    """The ``out_of_scope`` refusal: case law, non-UK law, personal advice, private documents,
+    system search, or named persons.
+    """
     if reason == "private_document":
         return private_document_refusal(snapshot)
     base = REFUSAL_MESSAGES["out_of_scope"]

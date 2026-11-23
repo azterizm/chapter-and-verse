@@ -8,7 +8,6 @@ for the request and never logged.
 
 from __future__ import annotations
 
-import functools
 import re
 from collections import defaultdict
 from collections.abc import Sequence
@@ -173,27 +172,23 @@ class Masked:
         return target
 
 
-@functools.lru_cache(maxsize=1)
-def _load_symspell_words() -> frozenset[str] | None:
-    """Load vocabulary from SymSpell dictionary if available."""
-    repo_root = Path(__file__).resolve().parents[2]
-    candidates = [
-        repo_root / "artefacts" / "symspell" / "dictionary.txt",
-        Path("artefacts/symspell/dictionary.txt"),
-    ]
-    for p in candidates:
-        if p.is_file():
-            try:
-                words: set[str] = set()
-                with p.open(encoding="utf-8") as f:
-                    for line in f:
-                        parts = line.strip().split()
-                        if parts:
-                            words.add(parts[0].lower())
-                return frozenset(words)
-            except OSError:
-                return None
-    return None
+def _load_symspell_words(path: Path | str | None = None) -> frozenset[str] | None:
+    """Load vocabulary from SymSpell dictionary file if given."""
+    if path is None:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        words: set[str] = set()
+        with p.open(encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if parts:
+                    words.add(parts[0].lower())
+        return frozenset(words)
+    except OSError:
+        return None
 
 
 def _has_corporate_suffix(text: str) -> bool:
@@ -337,7 +332,7 @@ def _process_run(
 
 def _is_fallback_token(
     tok: Token,
-    symspell_words: frozenset[str] | None,
+    vocabulary: frozenset[str] | None,
     all_protected: list[tuple[int, int]],
     existing_candidates: list[Candidate],
 ) -> bool:
@@ -353,8 +348,8 @@ def _is_fallback_token(
         return False
     if any(_overlaps(tok_start, tok_end, c[0], c[1]) for c in existing_candidates):
         return False
-    if symspell_words is not None:
-        return (tok.pos_ == "PROPN" or tok.text[:1].isupper()) and (tok_lower not in symspell_words)
+    if vocabulary is not None:
+        return (tok.pos_ == "PROPN" or tok.text[:1].isupper()) and (tok_lower not in vocabulary)
     return tok.pos_ == "PROPN"
 
 
@@ -364,12 +359,13 @@ def _collect_fallback_candidates(
     existing_candidates: list[Candidate],
     all_protected: list[tuple[int, int]],
     router_index: Any,
+    *,
+    vocabulary: frozenset[str] | None = None,
 ) -> list[Candidate]:
-    """R5 recall fallback for names: PROPN / capitalised words absent from SymSpell."""
+    """R5 recall fallback for names: PROPN / capitalised words absent from vocabulary."""
     if doc is None:
         return []
 
-    symspell_words = _load_symspell_words()
     candidates: list[Candidate] = []
 
     for sent in doc.sents:
@@ -379,7 +375,7 @@ def _collect_fallback_candidates(
         current_run: list[Token] = []
 
         for tok in sent:
-            if not _is_fallback_token(tok, symspell_words, all_protected, existing_candidates):
+            if not _is_fallback_token(tok, vocabulary, all_protected, existing_candidates):
                 if current_run:
                     cand = _process_run(current_run, first_word_i, text, router_index)
                     if cand is not None:
@@ -436,6 +432,7 @@ def mask_pii(
     *,
     router_index: Any = None,
     protected_spans: Sequence[tuple[int, int]] = (),
+    vocabulary: frozenset[str] | None = None,
 ) -> Masked:
     """Mask PII entities with stable placeholders [PERSON 1], [ORG 1], [EMAIL 1], [NAME 1]...
 
@@ -444,6 +441,7 @@ def mask_pii(
         analysis: Analysis object from `analyse(text)`.
         router_index: Optional RouterIndex or Router instance to verify instrument titles.
         protected_spans: Additional character spans never to mask.
+        vocabulary: Optional set of known lower-cased vocabulary words for name recall fallback.
 
     Returns:
         Masked dataclass containing masked text and in-memory reverse map.
@@ -482,6 +480,7 @@ def mask_pii(
         candidates,
         all_protected,
         router_index,
+        vocabulary=vocabulary,
     )
     candidates.extend(fallback_candidates)
 

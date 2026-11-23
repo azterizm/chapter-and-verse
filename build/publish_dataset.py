@@ -9,11 +9,14 @@ Layout of the dataset (what ``deploy/fetch_artefacts.py`` fetches for one boot):
     corpus-manifest.json, <store files>     the text store, at the root
     index/index-manifest.json, ...          the router index, as the router wrote it
     concepts/concepts-manifest.json, ...    the router concept index, as the router wrote it
+    symspell/symspell-manifest.json, ...    the SymSpell dictionary and manifest
     README.md                               the dataset card
 
 ``--data`` (default ``$LEGAL_DATA_ROOT``) is the data root holding ``index/`` and
-``concepts/``. Every file is checked against its own manifest first, and both router manifests
-must carry the store's snapshot date.
+``concepts/``. ``--symspell`` (default ``artefacts/symspell``) holds the spelling
+dictionary and manifest. Every file is checked against its own manifest first, both
+router manifests must carry the store's snapshot date, and the symspell manifest must
+carry the store's snapshot date and corpus_id.
 
 Without ``--yes`` it is a dry run: it runs the checks and prints what would be uploaded and the
 dataset card. A real upload needs both ``--repo`` and ``--yes``, and puts everything in one
@@ -125,6 +128,47 @@ def router_dir(data: Path, name: str, manifest_name: str, snapshot: str) -> Rout
     return RouterDir(name, manifest_name, manifest, tuple(uploads))
 
 
+def symspell_dir(data: Path, snapshot: str, cid: str) -> RouterDir:
+    """The symspell directory, checked against its manifest and the store's snapshot/corpus_id."""
+    name = "symspell"
+    manifest_name = "symspell-manifest.json"
+    path = data / manifest_name
+    try:
+        manifest = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        raise PublishError(f"no {name}/{manifest_name} under {data}") from None
+    except ValueError as exc:
+        raise PublishError(f"{name}/{manifest_name} is not valid JSON") from exc
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    if not isinstance(files, dict) or not files:
+        raise PublishError(f"{name}/{manifest_name} lists no files")
+    if manifest.get("snapshot") != snapshot:
+        raise PublishError(
+            f"{name}/{manifest_name} has snapshot {manifest.get('snapshot')!r}, "
+            f"the store has {snapshot!r}"
+        )
+    if manifest.get("corpus_id") != cid:
+        raise PublishError(
+            f"{name}/{manifest_name} has corpus_id {manifest.get('corpus_id')!r}, "
+            f"the store has {cid!r}"
+        )
+    dict_entry = files.get("dictionary.txt")
+    if not isinstance(dict_entry, dict):
+        raise PublishError(f"{name}/{manifest_name} has no entry for dictionary.txt")
+    dict_local = data / "dictionary.txt"
+    if not dict_local.is_file():
+        raise PublishError(f"{name}/dictionary.txt: missing")
+    size, digest = dict_local.stat().st_size, sha256_file(dict_local)
+    wanted = dict_entry.get("size", dict_entry.get("bytes"))
+    if digest != dict_entry.get("sha256") or (wanted is not None and wanted != size):
+        raise PublishError(f"{name}/dictionary.txt: does not match {manifest_name}")
+    uploads = [
+        Upload(f"{name}/{manifest_name}", path, path.stat().st_size, sha256_file(path)),
+        Upload(f"{name}/dictionary.txt", dict_local, size, digest),
+    ]
+    return RouterDir(name, manifest_name, manifest, tuple(uploads))
+
+
 # ---------------------------------------------------------------------------- card
 
 
@@ -233,6 +277,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Upload the artefacts to a Hugging Face Dataset.")
     parser.add_argument("--store", type=Path, default=Path("artefacts/store"))
     parser.add_argument("--data", help="data root with index/ and concepts/ ($LEGAL_DATA_ROOT)")
+    parser.add_argument(
+        "--symspell",
+        type=Path,
+        default=Path("artefacts/symspell"),
+        help="symspell directory (defaults to artefacts/symspell)",
+    )
     parser.add_argument("--repo", help="dataset repository, OWNER/NAME")
     parser.add_argument("--yes", action="store_true", help="really upload (needs --repo)")
     parser.add_argument(
@@ -250,14 +300,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     data = Path(data_root).expanduser()
     try:
         manifest, uploads = store_uploads(args.store)
+        cid = corpus_id(manifest)
         routers = [router_dir(data, n, m, str(manifest["snapshot"])) for n, m in ROUTER_DIRS]
+        symspell = symspell_dir(args.symspell, str(manifest["snapshot"]), cid)
+        all_dirs = [*routers, symspell]
     except PublishError as exc:
         print(f"check failed: {exc}", file=sys.stderr)
         return 1
-    for router in routers:
-        uploads.extend(router.files)
-    card = dataset_card(manifest, routers)
-    cid = corpus_id(manifest)
+    for d in all_dirs:
+        uploads.extend(d.files)
+    card = dataset_card(manifest, all_dirs)
     message = f"Artefacts for corpus {cid}, snapshot {manifest['snapshot']}"
     plan = {
         "dry_run": not args.yes,
@@ -265,7 +317,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "corpus_id": cid,
         "snapshot": manifest["snapshot"],
         "commit_message": message,
-        "extra_manifests": {f"{r.name}/{r.manifest_name}": r.manifest_sha256 for r in routers},
+        "extra_manifests": {f"{d.name}/{d.manifest_name}": d.manifest_sha256 for d in all_dirs},
         "total_bytes": sum(u.size for u in uploads) + len(card.encode("utf-8")),
         "files": [
             *({"path": u.path_in_repo, "bytes": u.size, "sha256": u.sha256} for u in uploads),

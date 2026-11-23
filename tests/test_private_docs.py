@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from legal_rag_router import Router
+from symspellpy import SymSpell  # type: ignore[import-untyped]
 
 from chapterverse.audit.policy import build_policy
 from chapterverse.contracts import (
@@ -45,7 +46,15 @@ MAYFAIR_QUERY = (
 
 
 def _make_pipeline(router: Router, store: TextStore, rotation: Any, **kwargs: Any) -> Pipeline:
-    return Pipeline(router=router, store=store, rotation=rotation, policy=POLICY, **kwargs)
+    dict_obj = kwargs.pop("dictionary", SymSpell())
+    return Pipeline(
+        router=router,
+        store=store,
+        rotation=rotation,
+        policy=POLICY,
+        dictionary=dict_obj,
+        **kwargs,
+    )
 
 
 def _run(pipeline: Pipeline, query: str, **kwargs: Any) -> tuple[list[Event], Outcome]:
@@ -70,17 +79,18 @@ def test_mayfair_lease_agreement_gives_out_of_scope_refusal_no_provider_call(
     assert not rotation.requests  # no provider call
     assert not store.gets
 
-    types = [e.type for e in events]
+    events_core = [e for e in events if e.type != "notice"]
+    types = [e.type for e in events_core]
     assert types == ["route", "refusal", "receipt", "done"]
 
-    refusal = events[1]
+    refusal = events_core[1]
     assert isinstance(refusal, RefusalEvent)
     assert refusal.kind == "out_of_scope"
     assert refusal.message == PRIVATE_DOCUMENTS_MESSAGE
     assert refusal.suggestions == ()
     assert refusal.link is None
 
-    receipt = events[2]
+    receipt = events_core[2]
     assert isinstance(receipt, ReceiptEvent)
     assert receipt.fact.mode == "refusal"
 
@@ -100,10 +110,11 @@ def test_my_lease_gives_out_of_scope_refusal_no_provider_call(
     assert not rotation.requests
     assert not store.gets
 
-    types = [e.type for e in events]
+    events_core = [e for e in events if e.type != "notice"]
+    types = [e.type for e in events_core]
     assert types == ["route", "refusal", "receipt", "done"]
 
-    refusal = events[1]
+    refusal = events_core[1]
     assert isinstance(refusal, RefusalEvent)
     assert refusal.kind == "out_of_scope"
     assert refusal.message == PRIVATE_DOCUMENTS_MESSAGE
@@ -124,10 +135,11 @@ def test_bare_section_compensatory_award_gives_discovery_candidates(
     assert outcome.mode == "clarify"
     assert not rotation.requests
 
-    types = [e.type for e in events]
+    events_core = [e for e in events if e.type != "notice"]
+    types = [e.type for e in events_core]
     assert types == ["route", "clarify", "done"]
 
-    clarify = events[1]
+    clarify = events_core[1]
     assert isinstance(clarify, ClarifyEvent)
     assert clarify.question == CLARIFY_RELATED_PROVISIONS
     assert len(clarify.candidates) > 0
@@ -155,10 +167,11 @@ def test_bare_section_without_discovery_candidates_asks_which_act(
     assert outcome.mode == "clarify"
     assert not rotation.requests
 
-    types = [e.type for e in events]
+    events_core = [e for e in events if e.type != "notice"]
+    types = [e.type for e in events_core]
     assert types == ["route", "clarify", "done"]
 
-    clarify = events[1]
+    clarify = events_core[1]
     assert isinstance(clarify, ClarifyEvent)
     assert clarify.question == CLARIFY_WHICH_ACT
     assert clarify.candidates == ()
@@ -178,10 +191,11 @@ def test_bare_section_with_only_section_number_asks_which_act(
     assert outcome.mode == "clarify"
     assert not rotation.requests
 
-    types = [e.type for e in events]
+    events_core = [e for e in events if e.type != "notice"]
+    types = [e.type for e in events_core]
     assert types == ["route", "clarify", "done"]
 
-    clarify = events[1]
+    clarify = events_core[1]
     assert isinstance(clarify, ClarifyEvent)
     assert clarify.question == CLARIFY_WHICH_ACT
     assert clarify.candidates == ()
@@ -348,10 +362,11 @@ def test_r5_refused_queries_give_out_of_scope_refusal_no_provider_call(
     assert not rotation.requests  # no provider call
     assert not store.gets
 
-    types = [e.type for e in events]
+    events_core = [e for e in events if e.type != "notice"]
+    types = [e.type for e in events_core]
     assert types == ["route", "refusal", "receipt", "done"]
 
-    refusal = events[1]
+    refusal = events_core[1]
     assert isinstance(refusal, RefusalEvent)
     assert refusal.kind == "out_of_scope"
     assert refusal.message == PRIVATE_DOCUMENTS_MESSAGE
