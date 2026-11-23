@@ -72,3 +72,12 @@ p95 at or below 100 ms: **pass**. Container and image removed afterwards.
 ## Decision
 
 All three gates pass. Dense RRF is adopted for discovery; ColBERT is not. Deploy follows the user's approval (publish the index and model to the dataset, then deploy with dense on).
+
+## Deploy (23 Nov 2026)
+
+- Dataset commit `12e3897873113051f0bfdbfff1b7c0df5a63a7a2` (adds `dense/` and `models/bge-small-en-v1.5/`; store manifest unchanged, `ce702a7d...`). Published hashes checked against the local files.
+- A1 at `bf8d133` (branch `slice-3`); `HF_REVISION` bumped (backup `engine.env.bak-pre-slice3`); host RAM tmpfs 4 GB (2.4 GB used).
+- First boot (downloads 705 MB): healthy 34 s after container start; log "dense retrieval on: 1322050 vectors loaded in 0.741s".
+- Clean restarts (RAM copy reused): 19.8 s and 20.05 s to healthy, at the 20 s line (19.0 to 19.6 s before dense). Follow-up: verify the dense files on a thread while the dictionary loads.
+- rag-security-probes live (pace 7 s): 29/29.
+- Live discovery examples return dense-fused chips in 0.3 to 0.6 s round trip.
