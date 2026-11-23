@@ -255,3 +255,27 @@ def test_cited_questions_behave_as_before(fixture_router: Router, store: Countin
         "receipt",
         "done",
     ]
+
+
+def test_r6_gibberish_negative_evidence_no_corrections(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    """R6: 'zxqv blorptastic wibbleflange' yields NoEvidence refusal and no corrections notice."""
+    rotation = FakeRotation()
+    pipeline = _make_pipeline(fixture_router, store, rotation)
+    events, outcome = _run(pipeline, "zxqv blorptastic wibbleflange")
+
+    assert outcome.mode == "refusal"
+    assert not rotation.requests
+
+    notices = [e for e in events if isinstance(e, NoticeEvent) and e.code == "corrections_applied"]
+    assert len(notices) == 0
+
+    refusals = [e for e in events if isinstance(e, RefusalEvent)]
+    assert len(refusals) == 1
+    assert refusals[0].kind == "ROUTE_UNRESOLVED"
+    assert "No provision matched." in refusals[0].message
+
+    receipts = [e for e in events if isinstance(e, ReceiptEvent)]
+    assert len(receipts) == 1
+    assert receipts[0].fact.mode == "refusal"

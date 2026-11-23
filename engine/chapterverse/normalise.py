@@ -52,6 +52,8 @@ _NEGATING_PREFIXES: Final = ("un", "in", "im", "il", "ir", "non", "dis", "mis")
 _MIN_INFLECTION_PREFIX_LEN: Final = 5
 _MIN_INFLECTION_WORD_LEN: Final = 6
 
+_VOWELS: Final = frozenset("aeiouy")
+
 
 @dataclass(frozen=True, slots=True)
 class Normalised:
@@ -162,6 +164,24 @@ def _has_prefix_added_or_removed(orig: str, sugg: str) -> bool:
     return False
 
 
+_MAX_EDIT_DIST_1_LEN: Final = 7
+
+
+def _is_correction_candidate(
+    word: str,
+    lower_word: str,
+    *,
+    is_middle_of_sentence: bool,
+) -> bool:
+    """Return True if word is eligible for spelling correction under R2 safety rules."""
+    if len(word) <= MIN_CORRECTION_WORD_LEN or any(c.isdigit() for c in word):
+        return False
+    if is_middle_of_sentence and word[0].isupper():
+        return False
+    # A token with no vowel (y counts) is not a word: never correct it.
+    return any(c in _VOWELS for c in lower_word)
+
+
 def _correct_word(  # noqa: PLR0911
     word: str,
     sym: SymSpell,
@@ -173,31 +193,36 @@ def _correct_word(  # noqa: PLR0911
     Returns:
         (replacement_word, correction_pair_or_none, evaluated_bool, miss_bool)
     """
-    if len(word) <= MIN_CORRECTION_WORD_LEN:
-        return word, None, False, False
-
-    # R2 safety rule: never correct capitalised words in the middle of a sentence
-    if is_middle_of_sentence and word[0].isupper():
-        return word, None, False, False
-
     lower_word = word.lower()
+    if not _is_correction_candidate(word, lower_word, is_middle_of_sentence=is_middle_of_sentence):
+        return word, None, False, False
 
     # R2 safety rule: never apply a correction when original word is in the dictionary
     if lower_word in sym.words:
         return word, None, True, False
 
-    suggs = sym.lookup(lower_word, Verbosity.ALL, max_edit_distance=2)
+    # R1: allowed edit distance is 1 for 4 to 7 letters, 2 for 8 letters or more
+    max_dist = 1 if len(word) <= _MAX_EDIT_DIST_1_LEN else 2
+
+    suggs = sym.lookup(lower_word, Verbosity.ALL, max_edit_distance=max_dist)
     if not suggs:
         return word, None, True, True
 
     min_dist = suggs[0].distance
+    if min_dist > max_dist:
+        return word, None, True, False
+
     closest = [s for s in suggs if s.distance == min_dist]
 
     is_unique_best = len(closest) == 1 or (len(closest) > 1 and closest[0].count > closest[1].count)
     if not is_unique_best:
         return word, None, True, False
 
-    best_term = closest[0].term
+    best_sugg = closest[0]
+    if best_sugg.distance > max_dist:
+        return word, None, True, False
+
+    best_term = best_sugg.term
 
     # R2 safety rule: never apply a correction when original word is in the dictionary
     if lower_word in sym.words:

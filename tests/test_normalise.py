@@ -385,3 +385,83 @@ def test_r3_real_typos_fixed(symspell_dict: SymSpell) -> None:
     res3 = normalise("redundnacy pay", dictionary=symspell_dict)
     assert res3.text == "redundancy pay"
     assert res3.corrections == (("redundnacy", "redundancy"),)
+
+
+def test_r1_length_scaled_edit_distance(tmp_path: Path) -> None:
+    """R1: allowed edit distance is 0 for <=3 letters, 1 for 4-7 letters, 2 for 8+ letters."""
+    dict_file = tmp_path / "dict_r1.txt"
+    dict_file.write_text(
+        "cat 1000\nword 1000\nunfair 2000\ntribunal 1000\nemployment 1000\ndismissal 2000\n",
+        encoding="utf-8",
+    )
+    sym = load_dictionary(dict_file)
+
+    # <= 3 letters: 0 edits (never corrected)
+    assert normalise("ca", dictionary=sym).text == "ca"
+    assert normalise("cta", dictionary=sym).text == "cta"
+
+    # 4 to 7 letters: 1 edit allowed
+    # "wrod" -> "word" (len 4, dist 1): allowed
+    assert normalise("wrod", dictionary=sym).text == "word"
+    # "unfiar" -> "unfair" (len 6, dist 1): allowed
+    assert normalise("unfiar", dictionary=sym).text == "unfair"
+
+    # 4 to 7 letters: 2 edits NOT allowed
+    # "woxx" is 2 edits from "word" (len 4): rejected
+    assert normalise("woxx", dictionary=sym).text == "woxx"
+    # "unfxxy" is 2 edits from "unfair" (len 6): rejected
+    assert normalise("unfxxy", dictionary=sym).text == "unfxxy"
+
+    # 8+ letters: 2 edits allowed
+    # "employmnet" -> "employment" (len 10, dist 1): allowed
+    assert normalise("employmnet", dictionary=sym).text == "employment"
+
+
+def test_r2_not_a_word_rejections(symspell_dict: SymSpell) -> None:
+    """R2: never correct tokens with digits or no vowels (a,e,i,o,u,y)."""
+    # Digits
+    assert normalise("plan2", dictionary=symspell_dict).text == "plan2"
+    assert normalise("award2026", dictionary=symspell_dict).text == "award2026"
+
+    # No vowels
+    assert normalise("zxqv", dictionary=symspell_dict).text == "zxqv"
+    assert normalise("bcdfgh", dictionary=symspell_dict).text == "bcdfgh"
+    assert normalise("brrr", dictionary=symspell_dict).text == "brrr"
+
+    # 'y' counts as vowel: words with 'y' are not rejected by the vowel check
+    res_crypt = normalise("crypt", dictionary=symspell_dict)
+    assert "crypt" in res_crypt.text
+
+    # More tokens without vowels: not corrected
+    assert normalise("blrxpt", dictionary=symspell_dict).text == "blrxpt"
+    assert normalise("zzqqvv", dictionary=symspell_dict).text == "zzqqvv"
+    assert (
+        normalise("zxqv blorptastic wibbleflange", dictionary=symspell_dict).text
+        == "zxqv blorptastic wibbleflange"
+    )
+    assert normalise("zxqv blorptastic wibbleflange", dictionary=symspell_dict).corrections == ()
+
+    # A real typo is still corrected
+    assert normalise("landlrod", dictionary=symspell_dict).text == "landlord"
+
+
+def test_r3_mandatory_correction_cases(symspell_dict: SymSpell) -> None:
+    """R3: verify the specified correction cases.
+
+    - 'unfiar dismisal' -> 'unfair dismissal'
+    - 'compensaton' -> not corrected today (it exists in dictionary with count 3; do not force it)
+    - 'tribunel' -> 'tribunal'
+    - 'landlrod' -> 'landlord'
+    - 'employmnet' -> 'employment'
+    - 'discrimnation' -> 'discrimination'
+    """
+    assert normalise("unfiar dismisal", dictionary=symspell_dict).text == "unfair dismissal"
+    assert normalise("tribunel", dictionary=symspell_dict).text == "tribunal"
+    assert normalise("landlrod", dictionary=symspell_dict).text == "landlord"
+    assert normalise("employmnet", dictionary=symspell_dict).text == "employment"
+    assert normalise("discrimnation", dictionary=symspell_dict).text == "discrimination"
+
+    # compensaton is present in dictionary with count 3, so it is untouched today and not forced
+    res_comp = normalise("compensaton", dictionary=symspell_dict)
+    assert res_comp.text == "compensaton"
+    assert res_comp.corrections == ()
