@@ -115,11 +115,16 @@ vm.swappiness = 10"; then
 configure_host_ram() {
   log "host tmpfs /var/lib/chapter-and-verse-ram"
   local mount_point=/var/lib/chapter-and-verse-ram
-  grep -qE '[[:space:]]/var/lib/chapter-and-verse-ram[[:space:]]' /etc/fstab || \
-    printf 'tmpfs /var/lib/chapter-and-verse-ram tmpfs size=3g,mode=0700,uid=1000,gid=1000,nosuid,nodev,noexec 0 0\n' >> /etc/fstab
+  if grep -qE '[[:space:]]/var/lib/chapter-and-verse-ram[[:space:]]' /etc/fstab; then
+    sed -i -E 's|([[:space:]]/var/lib/chapter-and-verse-ram[[:space:]]+tmpfs[[:space:]]+[^[:space:]]*size=)[^,[:space:]]+|\14g|' /etc/fstab
+  else
+    printf 'tmpfs /var/lib/chapter-and-verse-ram tmpfs size=4g,mode=0700,uid=1000,gid=1000,nosuid,nodev,noexec 0 0\n' >> /etc/fstab
+  fi
   install -d -m 0700 "$mount_point"
   chown 1000:1000 "$mount_point"
-  if ! mountpoint -q "$mount_point"; then
+  if mountpoint -q "$mount_point"; then
+    mount -o remount,size=4g "$mount_point"
+  else
     mount "$mount_point"
   fi
 }

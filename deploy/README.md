@@ -149,12 +149,12 @@ sudo REPO_URL=https://github.com/OWNER/chapter-and-verse.git bash /opt/chapter-a
 sudo -iu deploy docker compose -f /opt/chapter-and-verse/deploy/compose.yml logs -f engine
 ```
 
-The first start downloads about 4 GB of artefacts into the `chapter-and-verse-artefacts` volume. Later starts check the source marker and copy to `/ram` with verification in one pass (`--copy-to`), skipping the volume re-hash. The RAM copy is held on host tmpfs (`/var/lib/chapter-and-verse-ram` bind-mounted at `/ram`) and persists across container restarts until host reboot or dataset change; the 3 GB counts against host RAM as before. A checksum mismatch stops the container before uvicorn starts.
+The first start downloads about 4 GB of artefacts into the `chapter-and-verse-artefacts` volume. Later starts check the source marker and copy to `/ram` with verification in one pass (`--copy-to`), skipping the volume re-hash. The RAM copy is held on host tmpfs (`/var/lib/chapter-and-verse-ram` bind-mounted at `/ram`) and persists across container restarts until host reboot or dataset change; the 4 GB counts against host RAM as before. A checksum mismatch stops the container before uvicorn starts.
 
 What `setup.sh` does, in order:
 
 1. Base packages, then unattended-upgrades for security updates, with an automatic reboot at 04:30 UTC when one is needed.
-2. A 4 GB swap file with `vm.swappiness = 10`, host RAM tmpfs at `/var/lib/chapter-and-verse-ram` (3 GB), and journald capped at 500 MB and 1 month.
+2. A 4 GB swap file with `vm.swappiness = 10`, host RAM tmpfs at `/var/lib/chapter-and-verse-ram` (4 GB, `size=4g`), and journald capped at 500 MB and 1 month.
 3. The firewall. Oracle's Ubuntu image ships iptables INPUT and FORWARD REJECT rules that clash with ufw and Docker. The script keeps only Oracle's `InstanceServices` egress chain (metadata and boot-volume services) and keeps the original as `/etc/iptables/rules.v4.oracle-orig`.
 4. Docker Engine and the compose plugin from download.docker.com, with log rotation and `live-restore` in `daemon.json`.
 5. `cloudflared` from pkg.cloudflare.com, run as `cloudflared-cv.service`. The service runs as a dynamic unprivileged user, and the token reaches it through `LoadCredential`, never through the command line.
@@ -165,7 +165,7 @@ Membership of the `docker` group is root-equivalent on the host. The `deploy` us
 
 ### Idle reclamation
 
-Oracle reclaims an Always Free A1 instance as idle when, over 7 days, all three of these hold: 95th percentile CPU under 20%, network under 20%, memory under 20%. The instance stays safe if any one of them is above 20%. Memory is the one this deployment keeps up: the decompressed text store (about 3.97 GB) is held in heap memory, and the router index (0.38 GB) and concepts index (0.57 GB) are held in host tmpfs (/ram, bind-mounted from /var/lib/chapter-and-verse-ram). The copy now persists until host reboot or dataset change; the 3 GB counts against host RAM as before. Expected resident memory is about 5.8 GB (about 24% of 24 GB), which keeps usage above the 20% reclamation threshold. On the VM, read memory with `free -m` (the used column) or check the OCI Monitoring MemoryUtilization metric. Check it after the first week to verify the 7-day 95th percentile stays above 20%.
+Oracle reclaims an Always Free A1 instance as idle when, over 7 days, all three of these hold: 95th percentile CPU under 20%, network under 20%, memory under 20%. The instance stays safe if any one of them is above 20%. Memory is the one this deployment keeps up: the decompressed text store (about 3.97 GB) is held in heap memory, and the router index (0.38 GB), concepts index (0.57 GB), dense index (0.55 GB) and query model (0.13 GB) are held in host tmpfs (/ram, bind-mounted from /var/lib/chapter-and-verse-ram). The copy now persists until host reboot or dataset change; the 4 GB counts against host RAM as before. Expected resident memory is about 5.8 GB (about 24% of 24 GB), which keeps usage above the 20% reclamation threshold. On the VM, read memory with `free -m` (the used column) or check the OCI Monitoring MemoryUtilization metric. Check it after the first week to verify the 7-day 95th percentile stays above 20%.
 
 ## 5. Worker (Command)
 
@@ -262,7 +262,7 @@ Artefact environment variables (`fetch_artefacts.py`):
 | `HF_REVISION` | 40-hex dataset commit. A branch name is refused unless `ARTEFACTS_ALLOW_BRANCH=1` |
 | `MANIFEST_SHA256` | Pin of `corpus-manifest.json` itself. Recommended |
 | `MANIFEST_NAME` | Default `corpus-manifest.json` |
-| `EXTRA_MANIFESTS` | Default `index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json`. Empty for none |
+| `EXTRA_MANIFESTS` | Default `index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json,dense/dense-manifest.json,models/models-files-manifest.json`. Empty for none |
 | `ARTEFACTS_WORKERS` | Parallel downloads, default 4 |
 
 Dataset layout, which is also the layout of `/data`:
@@ -273,6 +273,8 @@ Dataset layout, which is also the layout of `/data`:
 | `index/index-manifest.json` and its files | Router index | `LEGAL_DATA_ROOT=/data` |
 | `concepts/concepts-manifest.json` and its files | Concepts index | `LEGAL_DATA_ROOT=/data` |
 | `symspell/symspell-manifest.json` and its files | SymSpell dictionary | `SYMSPELL_DICT=/data/symspell/dictionary.txt` (via entrypoint.sh) |
+| `dense/dense-manifest.json` and its files | Dense vector index | `DENSE_DIR=/data/dense` (via entrypoint.sh) |
+| `models/models-files-manifest.json` and its files | Query model weights and `models-manifest.json` | `DENSE_MODEL_DIR=/data/models` (via entrypoint.sh) |
 
 `MANIFEST_SHA256` pins the store manifest. The router manifests are fetched at the pinned dataset commit, their hashes are recorded in `/data/.artefacts-source.json`, and every file they list is checked. `build/publish_dataset.py` uploads the store only, so `index/` and `concepts/` must be uploaded to the same dataset commit by another step.
 
@@ -282,7 +284,7 @@ Dataset layout, which is also the layout of `/data`:
 |---|---|
 | Engine | Each build is tagged by commit. On the VM: `sudo REPO_REF=<previous commit or tag> REPO_URL=... bash /opt/chapter-and-verse/deploy/oracle/setup.sh`. That checks out the old commit and rebuilds. The image cache makes this quick when that commit was built before |
 | Engine, without rebuild | `docker tag` each image before replacing it (for example `chapter-and-verse-engine:<sha>`), then `ENGINE_IMAGE=chapter-and-verse-engine:<sha> docker compose -f deploy/compose.yml up -d` as `deploy` |
-| Artefacts | Set `HF_REVISION` (and `MANIFEST_SHA256`) in `engine.env` back to the previous dataset commit and restart the engine. Files are fetched again where they differ. Rolling artefacts back to a dataset revision without `symspell/` needs `EXTRA_MANIFESTS=index/index-manifest.json,concepts/concepts-manifest.json` |
+| Artefacts | Set `HF_REVISION` (and `MANIFEST_SHA256`) in `engine.env` back to the previous dataset commit and restart the engine. Files are fetched again where they differ. Rolling artefacts back to an older dataset revision without `dense/` and `models/` needs `EXTRA_MANIFESTS` set to the older list (`index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json`, or without `symspell/`: `index/index-manifest.json,concepts/concepts-manifest.json`) |
 | Worker | `npx wrangler rollback` (choose the version), or `npx wrangler deployments list` then `npx wrangler rollback <version-id>` |
 | Pages | Dashboard, Workers and Pages, the project, Deployments: "Rollback to this deployment" |
 | Modal | `modal app rollback chapter-and-verse-judge`, or `modal app stop chapter-and-verse-judge` to take Modal out (the engine drops it from the rotation when it fails) |

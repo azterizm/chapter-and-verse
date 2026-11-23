@@ -38,12 +38,18 @@ def fake_artefacts_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     concepts_dir.mkdir()
     symspell_dir = root / "symspell"
     symspell_dir.mkdir()
+    dense_dir = root / "dense"
+    dense_dir.mkdir()
+    models_dir = root / "models"
+    models_dir.mkdir()
 
     main_manifest = root / "corpus-manifest.json"
     main_manifest.write_text('{"files": {}}', encoding="utf-8")
     (index_dir / "index-manifest.json").write_text('{"files": {}}', encoding="utf-8")
     (concepts_dir / "concepts-manifest.json").write_text('{"files": {}}', encoding="utf-8")
     (symspell_dir / "symspell-manifest.json").write_text('{"files": {}}', encoding="utf-8")
+    (dense_dir / "dense-manifest.json").write_text('{"files": {}}', encoding="utf-8")
+    (models_dir / "models-files-manifest.json").write_text('{"files": {}}', encoding="utf-8")
 
     revision = "a" * 40
     endpoint = "https://huggingface.co"
@@ -64,6 +70,12 @@ def fake_artefacts_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
         ).hexdigest(),
         "symspell/symspell-manifest.json": hashlib.sha256(
             (symspell_dir / "symspell-manifest.json").read_bytes()
+        ).hexdigest(),
+        "dense/dense-manifest.json": hashlib.sha256(
+            (dense_dir / "dense-manifest.json").read_bytes()
+        ).hexdigest(),
+        "models/models-files-manifest.json": hashlib.sha256(
+            (models_dir / "models-files-manifest.json").read_bytes()
         ).hexdigest(),
     }
     marker_data = source.marker(main_sha, extras)
@@ -111,6 +123,8 @@ def test_marker_only_ram_copy_passes_and_fails_after_marker_changed(
     (ram_dir / "index").mkdir()
     (ram_dir / "concepts").mkdir()
     (ram_dir / "symspell").mkdir()
+    (ram_dir / "dense").mkdir()
+    (ram_dir / "models").mkdir()
 
     (ram_dir / "corpus-manifest.json").write_bytes(
         (fake_artefacts_root / "corpus-manifest.json").read_bytes()
@@ -123,6 +137,12 @@ def test_marker_only_ram_copy_passes_and_fails_after_marker_changed(
     )
     (ram_dir / "symspell" / "symspell-manifest.json").write_bytes(
         (fake_artefacts_root / "symspell" / "symspell-manifest.json").read_bytes()
+    )
+    (ram_dir / "dense" / "dense-manifest.json").write_bytes(
+        (fake_artefacts_root / "dense" / "dense-manifest.json").read_bytes()
+    )
+    (ram_dir / "models" / "models-files-manifest.json").write_bytes(
+        (fake_artefacts_root / "models" / "models-files-manifest.json").read_bytes()
     )
     (ram_dir / ".artefacts-source.json").write_bytes(
         (fake_artefacts_root / ".artefacts-source.json").read_bytes()

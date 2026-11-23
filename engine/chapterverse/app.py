@@ -104,6 +104,10 @@ from chapterverse.contracts import (
     UnavailableKind,
     encode_sse,
 )
+from chapterverse.dense.colbert import ColbertScorer
+from chapterverse.dense.embed import load_model
+from chapterverse.dense.retriever import DenseRetriever
+from chapterverse.dense.store import BinaryInt8Store
 from chapterverse.nlp import get_nlp
 from chapterverse.normalise import load_dictionary
 from chapterverse.persistence import ReceiptStore, open_persistence
@@ -634,6 +638,46 @@ def _preload_symspell(
     return (th, dict_res, t_preload)
 
 
+def _init_dense_retriever(
+    env: Mapping[str, str],
+    store: TextStore,
+    router: Router,
+) -> DenseRetriever | None:
+    dense_dir_val = _env(env, "DENSE_DIR")
+    dense_model_dir_val = _env(env, "DENSE_MODEL_DIR")
+    if dense_dir_val is not None and dense_model_dir_val is not None:
+        t_dense = time.perf_counter()
+        dense_store = BinaryInt8Store.open(Path(dense_dir_val), corpus_id=store.corpus_id)
+        dense_embedder = load_model("bge-small-en-v1.5", dense_model_dir_val)
+        concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
+        retriever = DenseRetriever(dense_embedder, dense_store, concepts)
+        elapsed_dense = time.perf_counter() - t_dense
+        log.info(
+            "dense retrieval on: %d vectors loaded in %.3fs",
+            dense_store.count,
+            elapsed_dense,
+        )
+        return retriever
+    log.info("dense retrieval off: DENSE_DIR or DENSE_MODEL_DIR unset")
+    return None
+
+
+def _init_colbert_scorer(
+    env: Mapping[str, str],
+) -> ColbertScorer | None:
+    colbert_dir_val = _env(env, "COLBERT_DIR")
+    if colbert_dir_val is not None:
+        t_colbert = time.perf_counter()
+        model_dir = Path(colbert_dir_val)
+        manifest_path = model_dir.parent / "models-manifest.json"
+        scorer = ColbertScorer.load(model_dir, manifest_path)
+        elapsed_colbert = time.perf_counter() - t_colbert
+        log.info("ColBERT reranking on: loaded in %.3fs", elapsed_colbert)
+        return scorer
+    log.info("ColBERT reranking off: COLBERT_DIR unset")
+    return None
+
+
 def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     """Build everything from the environment (module docstring, "Startup").
 
@@ -684,6 +728,9 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     slice2_time_s = time.perf_counter() - t_slice2
     log.info("Slice 2 startup: loaded SymSpell and spaCy in %.3fs", slice2_time_s)
 
+    dense_retriever = _init_dense_retriever(env, store, router)
+    colbert_scorer = _init_colbert_scorer(env)
+
     pipeline = Pipeline(
         router=router,
         store=store,
@@ -696,6 +743,8 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         global_daily_answers=global_daily_answers,
         hosting_share=hosting_share,
         dictionary=sym_dict,
+        dense=dense_retriever,
+        colbert=colbert_scorer,
     )
     limiter = TokenBucket(
         per_minute=_env_number(env, "RATE_LIMIT_PER_MINUTE", 10.0),
