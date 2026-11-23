@@ -265,3 +265,60 @@ def test_startup_dense_off_when_env_unset(
         assert len(off_logs) == 1
     finally:
         runtime.shutdown()
+
+
+def test_startup_dense_error_degrades_to_dense_off(
+    fixture_data_root: Path,
+    built_store: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R2: Dense loading failure degrades to dense=None and logs an ERROR line."""
+    caplog.set_level(logging.INFO)
+    env = {
+        "LEGAL_DATA_ROOT": str(fixture_data_root),
+        "STORE_DIR": str(built_store),
+        "GEN_PROVIDERS": "groq",
+        "JUDGE_PROVIDERS": "groq",
+        "CAP_SALT": "a" * 32,
+        "DENSE_DIR": "/nonexistent/dense/index",
+        "DENSE_MODEL_DIR": "/nonexistent/models",
+    }
+    runtime = build_runtime(env)
+    try:
+        assert runtime.pipeline.dense is None
+        error_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "dense load failed:" in r.getMessage()
+        ]
+        assert len(error_logs) == 1
+    finally:
+        runtime.shutdown()
+
+
+def test_startup_colbert_error_degrades_to_colbert_off(
+    fixture_data_root: Path,
+    built_store: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R2: ColBERT loading failure degrades to colbert=None and logs an ERROR line."""
+    caplog.set_level(logging.INFO)
+    env = {
+        "LEGAL_DATA_ROOT": str(fixture_data_root),
+        "STORE_DIR": str(built_store),
+        "GEN_PROVIDERS": "groq",
+        "JUDGE_PROVIDERS": "groq",
+        "CAP_SALT": "a" * 32,
+        "COLBERT_DIR": "/nonexistent/colbert/model",
+    }
+    runtime = build_runtime(env)
+    try:
+        assert runtime.pipeline.colbert is None
+        error_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "ColBERT load failed:" in r.getMessage()
+        ]
+        assert len(error_logs) == 1
+    finally:
+        runtime.shutdown()

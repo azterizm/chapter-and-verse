@@ -27,6 +27,7 @@ from legal_rag_router.concepts import load_concepts
 from chapterverse.app import build_runtime
 from chapterverse.contracts import canonical_json
 from chapterverse.dense.store import DenseLoadError
+from chapterverse.discovery import discover_step
 from chapterverse.store import open_store
 from chapterverse.symspell_build import build_dictionary
 
@@ -198,6 +199,11 @@ def test_container_start_path_and_dense_verification(
     dense_logs = [r.getMessage() for r in caplog.records if "dense retrieval on:" in r.getMessage()]
     assert len(dense_logs) == 1, [r.getMessage() for r in caplog.records]
     assert f"{doc_count} vectors loaded in" in dense_logs[0]
+    assert "(join wait " in dense_logs[0]
+
+    # Verify discovery call with dense on produces valid result on fixture query
+    discovery_res = discover_step(rt.pipeline.router, "unfair dismissal", dense=rt.pipeline.dense)
+    assert discovery_res is not None
 
     orig_vecs_bytes = vecs_file.read_bytes()
     tampered_vecs = bytearray(orig_vecs_bytes)
@@ -207,5 +213,13 @@ def test_container_start_path_and_dense_verification(
     code_tampered = fetch_artefacts.main(["--data-dir", str(data_dir), "--verify-only"])
     assert code_tampered == 1
 
-    with pytest.raises(DenseLoadError):
-        build_runtime(env)
+    # R2/R3: tampered vectors.i8 degrades to dense off instead of raising
+    rt_tampered = build_runtime(env)
+    assert rt_tampered is not None
+    assert rt_tampered.pipeline.dense is None
+    error_logs = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and DenseLoadError.__name__ in r.getMessage()
+    ]
+    assert len(error_logs) == 1

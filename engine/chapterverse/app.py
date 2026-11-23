@@ -638,28 +638,76 @@ def _preload_symspell(
     return (th, dict_res, t_preload)
 
 
+def _preload_dense(
+    env: Mapping[str, str],
+    corpus_id: str,
+) -> tuple[threading.Thread, list[Any]] | None:
+    dense_dir_val = _env(env, "DENSE_DIR")
+    dense_model_dir_val = _env(env, "DENSE_MODEL_DIR")
+    if dense_dir_val is None or dense_model_dir_val is None:
+        return None
+    res: list[Any] = []
+
+    def _preload() -> None:
+        t_dense = time.perf_counter()
+        try:
+            dense_store = BinaryInt8Store.open(Path(dense_dir_val), corpus_id=corpus_id)
+            dense_embedder = load_model("bge-small-en-v1.5", dense_model_dir_val)
+            elapsed_dense = time.perf_counter() - t_dense
+            res.append((dense_store, dense_embedder, elapsed_dense))
+        except Exception as exc:  # noqa: BLE001
+            res.append(exc)
+
+    th = threading.Thread(target=_preload, name="dense-preload", daemon=True)
+    th.start()
+    return (th, res)
+
+
 def _init_dense_retriever(
     env: Mapping[str, str],
     store: TextStore,
     router: Router,
+    preloaded: tuple[threading.Thread, list[Any]] | None = None,
 ) -> DenseRetriever | None:
     dense_dir_val = _env(env, "DENSE_DIR")
     dense_model_dir_val = _env(env, "DENSE_MODEL_DIR")
-    if dense_dir_val is not None and dense_model_dir_val is not None:
+    if dense_dir_val is None or dense_model_dir_val is None:
+        log.info("dense retrieval off: DENSE_DIR or DENSE_MODEL_DIR unset")
+        return None
+
+    if preloaded is not None:
+        th, res_list = preloaded
+        t_join = time.perf_counter()
+        th.join()
+        join_wait_s = time.perf_counter() - t_join
+        if not res_list:
+            log.error("dense load failed: no result produced")
+            return None
+        res = res_list[0]
+        if isinstance(res, Exception):
+            log.error("dense load failed: %s: %s", type(res).__name__, res)
+            return None
+        dense_store, dense_embedder, elapsed_dense = res
+    else:
         t_dense = time.perf_counter()
-        dense_store = BinaryInt8Store.open(Path(dense_dir_val), corpus_id=store.corpus_id)
-        dense_embedder = load_model("bge-small-en-v1.5", dense_model_dir_val)
-        concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
-        retriever = DenseRetriever(dense_embedder, dense_store, concepts)
+        try:
+            dense_store = BinaryInt8Store.open(Path(dense_dir_val), corpus_id=store.corpus_id)
+            dense_embedder = load_model("bge-small-en-v1.5", dense_model_dir_val)
+        except Exception as exc:  # noqa: BLE001
+            log.error("dense load failed: %s: %s", type(exc).__name__, exc)  # noqa: TRY400
+            return None
         elapsed_dense = time.perf_counter() - t_dense
-        log.info(
-            "dense retrieval on: %d vectors loaded in %.3fs",
-            dense_store.count,
-            elapsed_dense,
-        )
-        return retriever
-    log.info("dense retrieval off: DENSE_DIR or DENSE_MODEL_DIR unset")
-    return None
+        join_wait_s = 0.0
+
+    concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
+    retriever = DenseRetriever(dense_embedder, dense_store, concepts)
+    log.info(
+        "dense retrieval on: %d vectors loaded in %.3fs (join wait %.3fs)",
+        dense_store.count,
+        elapsed_dense,
+        join_wait_s,
+    )
+    return retriever
 
 
 def _init_colbert_scorer(
@@ -670,7 +718,11 @@ def _init_colbert_scorer(
         t_colbert = time.perf_counter()
         model_dir = Path(colbert_dir_val)
         manifest_path = model_dir.parent / "models-manifest.json"
-        scorer = ColbertScorer.load(model_dir, manifest_path)
+        try:
+            scorer = ColbertScorer.load(model_dir, manifest_path)
+        except Exception as exc:  # noqa: BLE001
+            log.error("ColBERT load failed: %s: %s", type(exc).__name__, exc)  # noqa: TRY400
+            return None
         elapsed_colbert = time.perf_counter() - t_colbert
         log.info("ColBERT reranking on: loaded in %.3fs", elapsed_colbert)
         return scorer
@@ -691,6 +743,9 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     dict_preload = _preload_symspell(env)
     t0 = time.perf_counter()
     store = open_store(settings.store_dir)
+    dense_preload = (
+        None if _env_flag(env, "NO_DENSE_OVERLAP") else _preload_dense(env, store.corpus_id)
+    )
     router = Router.from_path(settings.router_index, concepts=settings.concepts_index)
     check_snapshots(store, router)
     log.info(
@@ -728,7 +783,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     slice2_time_s = time.perf_counter() - t_slice2
     log.info("Slice 2 startup: loaded SymSpell and spaCy in %.3fs", slice2_time_s)
 
-    dense_retriever = _init_dense_retriever(env, store, router)
+    dense_retriever = _init_dense_retriever(env, store, router, preloaded=dense_preload)
     colbert_scorer = _init_colbert_scorer(env)
 
     pipeline = Pipeline(
