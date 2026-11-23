@@ -33,4 +33,29 @@ If gate 1 or 2 fails, Slice 3 dense is not deployed. Gate 3 is measured on the A
 
 ## Results
 
-(Filled in after the sealed run.)
+Sealed run: 23 Nov 2026, from a clean git worktree at the pre-registration commit `acee1e9` (no code, parameter or index change), run once. Seal checked: `d34ce21d...` (battery and index v2 seal). 153 test rows.
+
+### Gate 1, accuracy (hand rows, 91)
+
+| Pipeline | hit@1 | hit@5 | hit@10 | MRR |
+|---|---|---|---|---|
+| Slice 2 (BM25F, no dense) | 0.505 | 0.802 | 0.879 | 0.630 |
+| Slice 3 (BM25F + dense, RRF) | 0.593 | 0.813 | 0.912 | 0.695 |
+
+hit@10 above 0.879 and MRR above 0.630: **pass**.
+
+### Gate 2, safety
+
+| Check | Slice 2 | Slice 3 |
+|---|---|---|
+| Phantom candidates | 0 | 0 |
+| Route status mismatches | none | none |
+| User probe rows refused (fictional instruments) | 12 of 12 | 12 of 12 |
+| Appendix B negatives, confident share | 0.28 | 0.28 |
+| rag-security-probes, local, dense on | 29/29 | 29/29 |
+
+**Pass.**
+
+### Gate 3, latency on the A1
+
+Mac figures from the sealed run (dense stage): query embedding p50 2.6 ms, p95 3.5 ms; search p50 20.1 ms, p95 24.5 ms. A1: to be measured before any deploy.
