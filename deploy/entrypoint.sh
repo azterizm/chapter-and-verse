@@ -50,6 +50,14 @@ else
   echo "warning: $STORE_DIR/symspell/dictionary.txt not found; running without prebuilt dictionary" >&2
 fi
 
+if [ -f "$STORE_DIR/dense/dense-manifest.json" ] && [ -f "$STORE_DIR/models/models-manifest.json" ]; then
+  DENSE_DIR="$STORE_DIR/dense"
+  DENSE_MODEL_DIR="$STORE_DIR/models"
+  export DENSE_DIR DENSE_MODEL_DIR
+else
+  echo "warning: dense index or models manifest not found in $STORE_DIR; running with dense retrieval off" >&2
+fi
+
 export STORE_DIR ROUTER_INDEX CONCEPTS_INDEX
 
 exec uvicorn chapterverse.app:app \

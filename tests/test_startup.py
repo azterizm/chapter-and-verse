@@ -237,3 +237,88 @@ def test_startup_logs_when_loading_dictionary_from_file(
     match = re.search(r"dictionary from file: (\d+) terms in ([\d.]+)s", file_logs[0])
     assert match is not None
     assert int(match.group(1)) == 3
+
+
+def test_startup_dense_off_when_env_unset(
+    fixture_data_root: Path,
+    built_store: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R7: app starts with dense off when DENSE_DIR and DENSE_MODEL_DIR are unset."""
+    caplog.set_level(logging.INFO)
+    env = {
+        "LEGAL_DATA_ROOT": str(fixture_data_root),
+        "STORE_DIR": str(built_store),
+        "GEN_PROVIDERS": "groq",
+        "JUDGE_PROVIDERS": "groq",
+        "CAP_SALT": "a" * 32,
+    }
+    assert "DENSE_DIR" not in env
+    assert "DENSE_MODEL_DIR" not in env
+
+    runtime = build_runtime(env)
+    try:
+        assert runtime.pipeline.dense is None
+        messages = [r.getMessage() for r in caplog.records]
+        needle = "dense retrieval off: DENSE_DIR or DENSE_MODEL_DIR unset"
+        off_logs = [m for m in messages if needle in m]
+        assert len(off_logs) == 1
+    finally:
+        runtime.shutdown()
+
+
+def test_startup_dense_error_degrades_to_dense_off(
+    fixture_data_root: Path,
+    built_store: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R2: Dense loading failure degrades to dense=None and logs an ERROR line."""
+    caplog.set_level(logging.INFO)
+    env = {
+        "LEGAL_DATA_ROOT": str(fixture_data_root),
+        "STORE_DIR": str(built_store),
+        "GEN_PROVIDERS": "groq",
+        "JUDGE_PROVIDERS": "groq",
+        "CAP_SALT": "a" * 32,
+        "DENSE_DIR": "/nonexistent/dense/index",
+        "DENSE_MODEL_DIR": "/nonexistent/models",
+    }
+    runtime = build_runtime(env)
+    try:
+        assert runtime.pipeline.dense is None
+        error_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "dense load failed:" in r.getMessage()
+        ]
+        assert len(error_logs) == 1
+    finally:
+        runtime.shutdown()
+
+
+def test_startup_colbert_error_degrades_to_colbert_off(
+    fixture_data_root: Path,
+    built_store: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R2: ColBERT loading failure degrades to colbert=None and logs an ERROR line."""
+    caplog.set_level(logging.INFO)
+    env = {
+        "LEGAL_DATA_ROOT": str(fixture_data_root),
+        "STORE_DIR": str(built_store),
+        "GEN_PROVIDERS": "groq",
+        "JUDGE_PROVIDERS": "groq",
+        "CAP_SALT": "a" * 32,
+        "COLBERT_DIR": "/nonexistent/colbert/model",
+    }
+    runtime = build_runtime(env)
+    try:
+        assert runtime.pipeline.colbert is None
+        error_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "ColBERT load failed:" in r.getMessage()
+        ]
+        assert len(error_logs) == 1
+    finally:
+        runtime.shutdown()

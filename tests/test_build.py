@@ -19,6 +19,7 @@ import pytest
 from chapterverse.contracts import canonical_json
 from chapterverse.store import CompressedTextStore, open_store
 from chapterverse.store.format import MANIFEST_NAME, TEXT_NAME
+from chapterverse.store.manifest import corpus_id, read_manifest
 from chapterverse.symspell_build import build_dictionary
 
 REPO = Path(__file__).resolve().parents[1]
@@ -282,10 +283,118 @@ def test_build_reports_numbers(fixture_data_root: Path, tmp_path: Path) -> None:
 _FORBIDDEN = re.compile(r"[\u2013\u2014\u2190-\u21ff\u2018\u2019\u201c\u201d\u2500-\u257f]")
 
 
+def make_dense_fixture(store_path: Path, out: Path) -> Path:
+    manifest = read_manifest(store_path)
+    cid = corpus_id(manifest)
+    snap = str(manifest["snapshot"])
+    out.mkdir(parents=True, exist_ok=True)
+    dim = 384
+    count = 2
+    vecs = b"\x00" * (count * dim)
+    codes = b"\x00" * (count * (dim // 8))
+    scales = b"\x00\x00\x80?" * dim
+    (out / "vectors.i8").write_bytes(vecs)
+    (out / "codes.bin").write_bytes(codes)
+    (out / "scales.f32").write_bytes(scales)
+    dense_manifest = {
+        "format_version": 1,
+        "kind": "chapterverse-dense-index",
+        "model": "bge-small-en-v1.5",
+        "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        "dim": dim,
+        "count": count,
+        "corpus_id": cid,
+        "snapshot": snap,
+        "first_instrument_doc": count,
+        "quantisation": "int8_scalar_per_dim+binary_sign",
+        "files": {
+            "codes.bin": {
+                "sha256": hashlib.sha256(codes).hexdigest(),
+                "size": len(codes),
+            },
+            "scales.f32": {
+                "sha256": hashlib.sha256(scales).hexdigest(),
+                "size": len(scales),
+            },
+            "vectors.i8": {
+                "sha256": hashlib.sha256(vecs).hexdigest(),
+                "size": len(vecs),
+            },
+        },
+    }
+    (out / "dense-manifest.json").write_bytes(canonical_json(dense_manifest))
+    return out
+
+
 def publish(built: Path, data: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    extra_list = list(extra)
+    if "--dense" not in extra_list:
+        dense_dir = built.parent / "dense"
+        if not (dense_dir / "dense-manifest.json").is_file():
+            make_dense_fixture(built, dense_dir)
+        extra_list.extend(["--dense", str(dense_dir)])
+    if "--models" not in extra_list:
+        extra_list.extend(["--models", str(REPO / "artefacts" / "models")])
+    if "--symspell" not in extra_list:
+        sym_dir = built.parent / "symspell"
+        if not (sym_dir / "symspell-manifest.json").is_file():
+            manifest = read_manifest(built)
+            cid = corpus_id(manifest)
+            snap = str(manifest["snapshot"])
+            sym_dir.mkdir(parents=True, exist_ok=True)
+            dict_bytes = b"the\t100\n"
+            (sym_dir / "dictionary.txt").write_bytes(dict_bytes)
+            sym_manifest = {
+                "format_version": 1,
+                "kind": "chapterverse-symspell",
+                "corpus_id": cid,
+                "snapshot": snap,
+                "files": {
+                    "dictionary.txt": {
+                        "sha256": hashlib.sha256(dict_bytes).hexdigest(),
+                        "size": len(dict_bytes),
+                    }
+                },
+            }
+            (sym_dir / "symspell-manifest.json").write_bytes(canonical_json(sym_manifest))
+        extra_list.extend(["--symspell", str(sym_dir)])
     return run(
-        "publish_dataset.py", "--store", str(built), "--data", str(data), *extra, check=False
+        "publish_dataset.py", "--store", str(built), "--data", str(data), *extra_list, check=False
     )
+
+
+def _verify_dry_run_files(
+    plan: dict[str, Any],
+    *,
+    built: Path,
+    fixture_data_root: Path,
+    built_symspell: Path,
+    dense_dir: Path,
+    models_dir: Path,
+    expected_names: set[str],
+) -> None:
+    names = [f["path"] for f in plan["files"]]
+    assert len(names) == len(set(names))
+    assert set(names) == expected_names
+    for entry in plan["files"][:-1]:
+        p = entry["path"]
+        if p.startswith("models/"):
+            if p not in ("models/models-files-manifest.json", "models/models-manifest.json"):
+                rel_in_model = p.removeprefix("models/bge-small-en-v1.5/")
+                local = models_dir / "bge-small-en-v1.5" / rel_in_model
+                assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
+        elif p.startswith("dense/"):
+            local = dense_dir / Path(p).name
+            assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
+        elif p.startswith("symspell/"):
+            local = built_symspell / Path(p).name
+            assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
+        elif "/" in p:
+            local = fixture_data_root / p
+            assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
+        else:
+            local = built / p
+            assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
 
 
 def test_publish_is_a_dry_run_by_default(
@@ -312,21 +421,47 @@ def test_publish_is_a_dry_run_by_default(
     symspell_digest = hashlib.sha256(symspell_manifest_path.read_bytes()).hexdigest()
     assert plan["extra_manifests"]["symspell/symspell-manifest.json"] == symspell_digest
     symspell_names = {"symspell/symspell-manifest.json", "symspell/dictionary.txt"}
-    names = [f["path"] for f in plan["files"]]
-    assert len(names) == len(set(names))
-    assert set(names) == store_names | router_names | symspell_names | {"README.md"}
-    for entry in plan["files"][:-1]:  # every file but the card carries the hash it will have
-        if entry["path"] in store_names:
-            local = built / entry["path"]
-        elif entry["path"] in symspell_names:
-            local = built_symspell / Path(entry["path"]).name
-        else:
-            local = fixture_data_root / entry["path"]
-        assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
+
+    dense_dir = built.parent / "dense"
+    dense_manifest_path = dense_dir / "dense-manifest.json"
+    dense_digest = hashlib.sha256(dense_manifest_path.read_bytes()).hexdigest()
+    assert plan["extra_manifests"]["dense/dense-manifest.json"] == dense_digest
+    dense_names = {
+        "dense/dense-manifest.json",
+        *(f"dense/{rel}" for rel in json.loads(dense_manifest_path.read_bytes())["files"]),
+    }
+
+    models_dir = REPO / "artefacts" / "models"
+    models_files_manifest = plan["extra_manifests"].get("models/models-files-manifest.json")
+    assert models_files_manifest is not None
+    model_manifest_data = json.loads((models_dir / "models-manifest.json").read_bytes())[
+        "bge-small-en-v1.5"
+    ]
+    model_file_names = {
+        "models/models-files-manifest.json",
+        "models/models-manifest.json",
+        *(f"models/bge-small-en-v1.5/{rel}" for rel in model_manifest_data["files"]),
+    }
+
+    all_names = (
+        store_names | router_names | symspell_names | dense_names | model_file_names | {"README.md"}
+    )
+    _verify_dry_run_files(
+        plan,
+        built=built,
+        fixture_data_root=fixture_data_root,
+        built_symspell=built_symspell,
+        dense_dir=dense_dir,
+        models_dir=models_dir,
+        expected_names=all_names,
+    )
     assert "license_name: ogl-3.0" in card
     assert "Open Government Licence v3.0" in card
     assert plan["corpus_id"] in card
     assert "| `symspell/` |" in card
+    assert "| `dense/` |" in card
+    assert "| `models/` |" in card
+    assert "Model licence: MIT" in card
     assert not _FORBIDDEN.search(card)
     assert "**" not in card
 
@@ -343,6 +478,65 @@ def test_publish_refuses_symspell_of_another_corpus_id(
     result = publish(built, fixture_data_root, "--symspell", str(sym_copy))
     assert result.returncode == 1
     assert "symspell/symspell-manifest.json has corpus_id" in result.stderr
+
+
+def test_publish_refuses_dense_of_another_corpus_id(
+    built: Path, fixture_data_root: Path, tmp_path: Path
+) -> None:
+    dense_copy = tmp_path / "dense"
+    make_dense_fixture(built, dense_copy)
+    mpath = dense_copy / "dense-manifest.json"
+    manifest = json.loads(mpath.read_bytes())
+    manifest["corpus_id"] = "0" * 64
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    result = publish(built, fixture_data_root, "--dense", str(dense_copy))
+    assert result.returncode == 1
+    assert "dense/dense-manifest.json has corpus_id" in result.stderr
+
+
+def test_publish_refuses_dense_of_another_snapshot(
+    built: Path, fixture_data_root: Path, tmp_path: Path
+) -> None:
+    dense_copy = tmp_path / "dense"
+    make_dense_fixture(built, dense_copy)
+    mpath = dense_copy / "dense-manifest.json"
+    manifest = json.loads(mpath.read_bytes())
+    manifest["snapshot"] = "2020-01-01"
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    result = publish(built, fixture_data_root, "--dense", str(dense_copy))
+    assert result.returncode == 1
+    assert "dense/dense-manifest.json has snapshot" in result.stderr
+
+
+def test_publish_refuses_a_damaged_dense_file(
+    built: Path, fixture_data_root: Path, tmp_path: Path
+) -> None:
+    dense_copy = tmp_path / "dense"
+    make_dense_fixture(built, dense_copy)
+    vpath = dense_copy / "vectors.i8"
+    vpath.write_bytes(vpath.read_bytes() + b"extra")
+    result = publish(built, fixture_data_root, "--dense", str(dense_copy))
+    assert result.returncode == 1
+    assert "dense/vectors.i8: does not match dense-manifest.json" in result.stderr
+
+
+def test_publish_refuses_missing_model(built: Path, fixture_data_root: Path) -> None:
+    result = publish(built, fixture_data_root, "--dense-model", "nonexistent-model")
+    assert result.returncode == 1
+    assert "model 'nonexistent-model' not in models/models-manifest.json" in result.stderr
+
+
+def test_publish_refuses_a_damaged_model_file(
+    built: Path, fixture_data_root: Path, tmp_path: Path
+) -> None:
+    models_copy = tmp_path / "models"
+    shutil.copytree(REPO / "artefacts" / "models", models_copy)
+    target = models_copy / "bge-small-en-v1.5" / "config.json"
+    target.write_bytes(target.read_bytes() + b"x")
+    result = publish(built, fixture_data_root, "--models", str(models_copy))
+    assert result.returncode == 1
+    msg = "models/bge-small-en-v1.5/config.json: does not match models-manifest.json"
+    assert msg in result.stderr
 
 
 def test_publish_refuses_a_damaged_symspell_dictionary(
