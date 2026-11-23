@@ -106,6 +106,7 @@ from chapterverse.contracts import (
     Window,
     sha256_hex,
 )
+from chapterverse.dense.retriever import DenseRetriever
 from chapterverse.discovery import (
     NoEvidence,
     Suggest,
@@ -568,6 +569,7 @@ class Pipeline:
         hosting_share: float = DEFAULT_HOSTING_SHARE,
         clock: Callable[[], datetime] | None = None,
         dictionary: SymSpell | None = None,
+        dense: DenseRetriever | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -575,6 +577,7 @@ class Pipeline:
         self.policy = policy
         self.config = config or PipelineConfig()
         self.modal_kv = modal_kv
+        self.dense = dense
         if primary_provider is None and isinstance(rotation, ProviderRotation):
             order = rotation.order("generate")
             primary_provider = order[0] if order else None
@@ -716,7 +719,7 @@ class Pipeline:
             self._receipt(stream, result, mode="refusal")
             return
 
-        outcome = discover_step(self.router, cleaned)
+        outcome = discover_step(self.router, cleaned, dense=self.dense)
         if isinstance(outcome, RefusalEvent):  # out_of_scope
             stream(outcome)
             self._receipt(stream, result, mode="refusal")
@@ -757,7 +760,7 @@ class Pipeline:
             self._receipt(stream, norm_result, mode="refusal")
             return
 
-        outcome = discover_step(self.router, norm_text)
+        outcome = discover_step(self.router, norm_text, dense=self.dense)
         if isinstance(outcome, RefusalEvent):  # out_of_scope
             stream(outcome)
             self._receipt(stream, norm_result, mode="refusal")

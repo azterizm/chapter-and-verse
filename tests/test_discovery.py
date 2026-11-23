@@ -370,3 +370,33 @@ def test_discovery_real_data(real_data_root: Path) -> None:
     for row in test_rows[:10]:
         outcome = discover_step(router, row["query"], limit=10)
         assert isinstance(outcome, (Suggest, NoEvidence, RefusalEvent))
+
+
+def test_dense_off_identical_outputs_fixture_queries(fixture_router: Router) -> None:
+    queries = [
+        "unfair dismissal",
+        "teleportation spacecraft asteroid",
+        "discrimination compensation minimum",
+        "should I sign this settlement agreement?",
+        "Supreme court precedent on unfair dismissal",
+        "California overtime regulations",
+        "tell us about written statement of particulars",
+        "the and for",
+    ]
+    for q in queries:
+        res_default = discover_step(fixture_router, q)
+        res_none = discover_step(fixture_router, q, dense=None)
+        assert res_default == res_none
+        if isinstance(res_default, Suggest):
+            assert isinstance(res_none, Suggest)
+            assert res_default.candidates == res_none.candidates
+            assert res_default.confident == res_none.confident
+            assert res_default.question == res_none.question
+            assert res_default.event == res_none.event
+        elif isinstance(res_default, NoEvidence):
+            assert isinstance(res_none, NoEvidence)
+            assert res_default.receipt == res_none.receipt
+        elif isinstance(res_default, RefusalEvent):
+            assert isinstance(res_none, RefusalEvent)
+            assert res_default.kind == res_none.kind
+            assert res_default.message == res_none.message

@@ -24,6 +24,7 @@ from chapterverse.contracts import (
     LabelledCoordinate,
     RefusalEvent,
 )
+from chapterverse.dense.retriever import DenseRetriever
 from chapterverse.templates import (
     out_of_scope_refusal,
     plain_text,
@@ -458,11 +459,95 @@ def format_candidate_label(
     return head_and_inst
 
 
+def _build_no_evidence(snapshot: str, router: Router, query: object) -> NoEvidence:
+    n = 0
+    concepts = getattr(router, "_concepts", None) or getattr(router, "concepts", None)
+    if concepts is not None:
+        doc_n = getattr(concepts, "first_instrument_doc", None)
+        if isinstance(doc_n, int):
+            n = doc_n
+        else:
+            doc_c = getattr(concepts, "doc_count", None)
+            if isinstance(doc_c, int):
+                n = doc_c
+
+    norm_terms = terms(query) if isinstance(query, str) else []
+    query_terms = " ".join(dict.fromkeys(norm_terms))
+    msg = (
+        f"Searched {n:,} provisions in the statute book as of {snapshot} for: "
+        f"{query_terms}. No provision matched."
+    )
+    receipt = RefusalEvent(
+        kind="ROUTE_UNRESOLVED",
+        message=msg,
+        suggestions=(),
+        snapshot=snapshot,
+        link=None,
+    )
+    return NoEvidence(receipt=receipt)
+
+
+def _rrf_fuse_candidates(
+    discovered_candidates: Sequence[Any],
+    dense_hits: Sequence[Any],
+    *,
+    pool: int,
+    rrf_k: int,
+    limit: int,
+    router: Router,
+) -> tuple[LabelledCoordinate, ...]:
+    bm25_rank: dict[str, int] = {}
+    heading_map: dict[str, str | None] = {}
+    original_coord: dict[str, Any] = {}
+
+    for rank, c in enumerate(discovered_candidates[:pool], start=1):
+        coord_str = str(c.coordinate)
+        bm25_rank[coord_str] = rank
+        heading_map[coord_str] = c.heading
+        original_coord[coord_str] = c.coordinate
+
+    dense_rank: dict[str, int] = {}
+    for h in dense_hits[:pool]:
+        coord_str = str(h.coordinate)
+        dense_rank[coord_str] = h.rank
+        if coord_str not in heading_map:
+            heading_map[coord_str] = h.heading
+            original_coord[coord_str] = h.coordinate
+
+    all_coords = set(bm25_rank.keys()) | set(dense_rank.keys())
+    scored: list[tuple[float, float, str]] = []
+    for coord_str in all_coords:
+        b_rank = bm25_rank.get(coord_str)
+        d_rank = dense_rank.get(coord_str)
+        score = 0.0
+        if b_rank is not None:
+            score += 1.0 / (rrf_k + b_rank)
+        if d_rank is not None:
+            score += 1.0 / (rrf_k + d_rank)
+        b_tie = float(b_rank) if b_rank is not None else float("inf")
+        scored.append((score, b_tie, coord_str))
+
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+    return tuple(
+        LabelledCoordinate(
+            coordinate=coord_str,
+            label=format_candidate_label(
+                original_coord[coord_str], heading_map.get(coord_str), router
+            ),
+        )
+        for _, _, coord_str in scored[:limit]
+    )
+
+
 def discover_step(
     router: Router,
     query: object,
     *,
     limit: int = 10,
+    dense: DenseRetriever | None = None,
+    pool: int = 50,
+    rrf_k: int = 60,
 ) -> DiscoveryOutcome:
     """Discover candidate provisions from the concept index for a citation-less query.
 
@@ -481,40 +566,32 @@ def discover_step(
         if out_of_scope is not None:
             return out_of_scope
 
-    discovered = router.discover(query, limit=limit)
+    bm25_limit = pool if dense is not None else limit
+    discovered = router.discover(query, limit=bm25_limit)
     if discovered.index_snapshot:
         snapshot = discovered.index_snapshot
 
     if not discovered.candidates or discovered.reason in ("no_match", "no_terms"):
-        n = 0
-        concepts = getattr(router, "_concepts", None) or getattr(router, "concepts", None)
-        if concepts is not None and hasattr(concepts, "first_instrument_doc"):
-            n = concepts.first_instrument_doc
-        elif concepts is not None and hasattr(concepts, "doc_count"):
-            n = concepts.doc_count
+        return _build_no_evidence(snapshot, router, query)
 
-        norm_terms = terms(query) if isinstance(query, str) else []
-        query_terms = " ".join(dict.fromkeys(norm_terms))
-        msg = (
-            f"Searched {n:,} provisions in the statute book as of {snapshot} for: "
-            f"{query_terms}. No provision matched."
+    if dense is None:
+        candidates = tuple(
+            LabelledCoordinate(
+                coordinate=str(c.coordinate),
+                label=format_candidate_label(c.coordinate, c.heading, router),
+            )
+            for c in discovered.candidates[:limit]
         )
-        receipt = RefusalEvent(
-            kind="ROUTE_UNRESOLVED",
-            message=msg,
-            suggestions=(),
-            snapshot=snapshot,
-            link=None,
+    else:
+        dense_hits = dense.search(str(query), k=pool) if isinstance(query, str) else []
+        candidates = _rrf_fuse_candidates(
+            discovered.candidates,
+            dense_hits,
+            pool=pool,
+            rrf_k=rrf_k,
+            limit=limit,
+            router=router,
         )
-        return NoEvidence(receipt=receipt)
-
-    candidates = tuple(
-        LabelledCoordinate(
-            coordinate=str(c.coordinate),
-            label=format_candidate_label(c.coordinate, c.heading, router),
-        )
-        for c in discovered.candidates[:limit]
-    )
 
     if discovered.confident:
         question = "Did you mean one of these provisions?"

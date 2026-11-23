@@ -18,6 +18,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import statistics
 import sys
 import time
 from collections.abc import Iterator, Mapping
@@ -35,6 +36,9 @@ from chapterverse.contracts import (
     Event,
     RouteEvent,
 )
+from chapterverse.dense.embed import load_model
+from chapterverse.dense.retriever import DenseRetriever
+from chapterverse.dense.store import BinaryInt8Store
 from chapterverse.nlp import analyse
 from chapterverse.normalise import find_protected_spans, normalise
 from chapterverse.pii import mask_pii
@@ -116,8 +120,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--router-repo", type=Path, default=ROUTER_REPO)
     parser.add_argument("--seal", default=SEAL, help="battery seal, relative to router repo")
     parser.add_argument("--battery", default=BATTERY, help="concept battery file")
-    parser.add_argument("--sealed-test", default=SEALED_TEST, help="sealed test results")
-    parser.add_argument("--split", choices=("dev", "test"), default="test")
+    parser.add_argument(
+        "--sealed-test", default=None, help="sealed test results (required if split is test)"
+    )
+    parser.add_argument("--split", choices=("dev", "test"), default="dev")
+    parser.add_argument(
+        "--dense-dir", type=Path, default=None, help="Path to dense index directory"
+    )
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        default=Path("artefacts/models"),
+        help="Path to models directory (default: artefacts/models)",
+    )
     parser.add_argument("--out", type=Path, default=default_out, help="output directory")
     return parser.parse_args(argv)
 
@@ -350,8 +365,113 @@ def _compute_summary(
     return summary, overall_pass
 
 
+def _compute_dense_latencies(
+    dense_embed_ms_list: list[float],
+    dense_search_ms_list: list[float],
+) -> dict[str, float]:
+    embed_sorted = sorted(dense_embed_ms_list)
+    search_sorted = sorted(dense_search_ms_list)
+    n_times = len(embed_sorted)
+    p50_embed = round(statistics.median(embed_sorted), 2) if n_times else 0.0
+    p95_embed = round(embed_sorted[int(0.95 * n_times)], 2) if n_times else 0.0
+    p50_search = round(statistics.median(search_sorted), 2) if n_times else 0.0
+    p95_search = round(search_sorted[int(0.95 * n_times)], 2) if n_times else 0.0
+    return {
+        "embed_p50": p50_embed,
+        "embed_p95": p95_embed,
+        "search_p50": p50_search,
+        "search_p95": p95_search,
+    }
+
+
+def _run_gate_eval(
+    rows: list[Any],
+    pipeline_nodense: Pipeline,
+    pipeline_dense: Pipeline | None,
+    dense_retriever: DenseRetriever | None,
+    *,
+    router: Router,
+    code: RouterDiscoveryCode,
+) -> tuple[list[Any], list[Any], list[Any], list[dict[str, Any]], list[str], dict[str, float]]:
+    results_p: list[Any] = []
+    results_p_dense: list[Any] = []
+    results_d: list[Any] = []
+    dense_embed_ms_list: list[float] = []
+    dense_search_ms_list: list[float] = []
+    norm_changed_ids: list[str] = []
+    per_row: list[dict[str, Any]] = []
+    dict_obj = pipeline_nodense._get_dictionary()
+
+    for row in rows:
+        changed = _check_normalise_changed(row.query, router.index, dict_obj)
+        if changed:
+            norm_changed_ids.append(row.id)
+
+        res_p, res_d, per_row_item = _evaluate_row(
+            row, pipeline_nodense, router, code, changed=changed
+        )
+        results_p.append(res_p)
+        results_d.append(res_d)
+
+        if pipeline_dense is not None and dense_retriever is not None:
+            res_pd, _, per_row_dense = _evaluate_row(
+                row, pipeline_dense, router, code, changed=changed
+            )
+            results_p_dense.append(res_pd)
+            dense_embed_ms_list.append(dense_retriever.last_embed_ms)
+            dense_search_ms_list.append(dense_retriever.last_search_ms)
+            per_row_item["pipeline_dense"] = per_row_dense["pipeline"]
+
+        per_row.append(per_row_item)
+
+    latencies = (
+        _compute_dense_latencies(dense_embed_ms_list, dense_search_ms_list)
+        if pipeline_dense is not None
+        else {}
+    )
+    return results_p, results_p_dense, results_d, per_row, norm_changed_ids, latencies
+
+
+def _build_pipelines(
+    router: Router,
+    store: Any,
+    dense_dir: Path | None,
+    models_dir: Path,
+) -> tuple[DenseRetriever | None, Pipeline, Pipeline | None]:
+    dense_retriever: DenseRetriever | None = None
+    if dense_dir is not None:
+        dense_store = BinaryInt8Store.open(dense_dir, corpus_id=store.corpus_id)
+        dense_embedder = load_model("bge-small-en-v1.5", models_dir)
+        concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
+        dense_retriever = DenseRetriever(dense_embedder, dense_store, concepts)
+
+    pipeline_nodense = Pipeline(
+        router=router,
+        store=store,
+        rotation=EmptyRotation(),
+        policy=build_policy(JUDGE_PRESET_NAME),
+        dense=None,
+    )
+    pipeline_dense = (
+        Pipeline(
+            router=router,
+            store=store,
+            rotation=EmptyRotation(),
+            policy=build_policy(JUDGE_PRESET_NAME),
+            dense=dense_retriever,
+        )
+        if dense_retriever is not None
+        else None
+    )
+    return dense_retriever, pipeline_nodense, pipeline_dense
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.split == "test" and not args.sealed_test:
+        print("REFUSED: --split test requires --sealed-test")
+        return 1
+
     repo: Path = args.router_repo.expanduser().resolve()
     out: Path = args.out.resolve()
     if out == repo or repo in out.parents:
@@ -359,7 +479,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     code = load_router_discovery_code(repo)
-    settings = Settings.from_env()
+    env_dict = dict(os.environ)
+    if "LEGAL_DATA_ROOT" not in env_dict and (repo / "data").is_dir():
+        env_dict["LEGAL_DATA_ROOT"] = str(repo / "data")
+    settings = Settings.from_env(env_dict)
     index_dir = Path(settings.router_index)
 
     seal_result = _verify_seal(code, repo, args.seal, index_dir)
@@ -368,10 +491,12 @@ def main(argv: list[str] | None = None) -> int:
     seal_info, note = seal_result
     print(f"concept seal OK: {seal_info['seal_sha256']}" + (f"; {note}" if note else ""))
 
-    sealed_path = repo / args.sealed_test
-    sealed_ref = (
-        json.loads(sealed_path.read_text(encoding="utf-8")) if sealed_path.is_file() else None
-    )
+    sealed_ref = None
+    if args.sealed_test:
+        sealed_path = repo / args.sealed_test
+        sealed_ref = (
+            json.loads(sealed_path.read_text(encoding="utf-8")) if sealed_path.is_file() else None
+        )
 
     store = open_store(settings.store_dir)
     router = Router.from_path(settings.router_index, concepts=settings.concepts_index)
@@ -379,46 +504,62 @@ def main(argv: list[str] | None = None) -> int:
         print(f"REFUSED: store {store.snapshot} and router {router.index.snapshot} differ")
         return 1
 
-    pipeline = Pipeline(
-        router=router,
-        store=store,
-        rotation=EmptyRotation(),
-        policy=build_policy(JUDGE_PRESET_NAME),
+    dense_retriever, pipeline_nodense, pipeline_dense = _build_pipelines(
+        router, store, args.dense_dir, args.models_dir
     )
 
     rows = [r for r in code.schema.read_concepts(repo / args.battery) if r.split == args.split]
     print(f"Loaded {len(rows)} rows for split={args.split}")
 
-    results_p: list[Any] = []
-    results_d: list[Any] = []
-    norm_changed_ids: list[str] = []
-    per_row: list[dict[str, Any]] = []
-    dict_obj = pipeline._get_dictionary()
+    (
+        results_p,
+        results_p_dense,
+        results_d,
+        per_row,
+        norm_changed_ids,
+        latencies,
+    ) = _run_gate_eval(
+        rows,
+        pipeline_nodense,
+        pipeline_dense,
+        dense_retriever,
+        router=router,
+        code=code,
+    )
 
-    for row in rows:
-        changed = _check_normalise_changed(row.query, router.index, dict_obj)
-        if changed:
-            norm_changed_ids.append(row.id)
-
-        res_p, res_d, per_row_item = _evaluate_row(row, pipeline, router, code, changed=changed)
-        results_p.append(res_p)
-        results_d.append(res_d)
-        per_row.append(per_row_item)
-
-    report_p = code.discovery.report(results_p)
+    report_nodense = code.discovery.report(results_p)
     report_d = code.discovery.report(results_d)
+
+    active_report_p = report_nodense
+    active_results_p = results_p
+    if pipeline_dense is not None:
+        report_dense = code.discovery.report(results_p_dense)
+        active_report_p = report_dense
+        active_results_p = results_p_dense
 
     summary, overall_pass = _compute_summary(
         args.split,
         rows,
         norm_changed_ids=norm_changed_ids,
         seal_info=seal_info,
-        report_p=report_p,
+        report_p=active_report_p,
         report_d=report_d,
         sealed_ref=sealed_ref,
-        results_p=results_p,
+        results_p=active_results_p,
         results_d=results_d,
     )
+
+    summary["without_dense"] = {
+        "all": report_nodense["all"],
+        "by_source": report_nodense["by_source"],
+    }
+
+    if pipeline_dense is not None:
+        summary["dense"] = {
+            "all": report_dense["all"],
+            "by_source": report_dense["by_source"],
+            "latency_ms": latencies,
+        }
 
     out.mkdir(parents=True, exist_ok=True)
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
