@@ -58,4 +58,17 @@ hit@10 above 0.879 and MRR above 0.630: **pass**.
 
 ### Gate 3, latency on the A1
 
-Mac figures from the sealed run (dense stage): query embedding p50 2.6 ms, p95 3.5 ms; search p50 20.1 ms, p95 24.5 ms. A1: to be measured before any deploy.
+Mac figures from the sealed run (dense stage): query embedding p50 2.6 ms, p95 3.5 ms; search p50 20.1 ms, p95 24.5 ms.
+
+A1 (23 Nov 2026, 06:54 UTC, live host with the engine running): a throwaway container on the engine's base image (`python:3.12-slim-bookworm`, onnxruntime 1.32.0), bge-small-en-v1.5 at the pinned revision, exact search over arrays of the full index shape (1,322,050 x 384 int8 plus 48-byte codes; search cost depends on shape only), the 112 dev questions:
+
+| Threads | Embed p50 / p95 | Search p50 / p95 | Dense stage p50 / p95 |
+|---|---|---|---|
+| 4 | 10.4 / 11.9 ms | 55.3 / 59.6 ms | 65.7 / 70.4 ms |
+| 2 | 16.0 / 18.7 ms | 54.8 / 59.2 ms | 71.0 / 76.7 ms |
+
+p95 at or below 100 ms: **pass**. Container and image removed afterwards.
+
+## Decision
+
+All three gates pass. Dense RRF is adopted for discovery; ColBERT is not. Deploy follows the user's approval (publish the index and model to the dataset, then deploy with dense on).
