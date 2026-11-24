@@ -9,3 +9,5 @@ Allowed shell commands, exactly: `uv run ruff check`, `uv run ruff format <your 
 - [ ] 3. R2.
 - [ ] 4. R3 measurement (scratch script, no provider calls).
 - [ ] 5. R4 tests, probes gate, all steering checks. Print a short summary with the R3 numbers.
+
+Note: another worker edits the ranked window selection in `pipeline.py` at the same time. Make small targeted edits to `_answer` only, never rewrite the file. If a test fails in code you do not own, report it and do not edit it.
