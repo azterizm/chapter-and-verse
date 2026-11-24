@@ -1,3 +1,4 @@
+import { useId } from "react";
 import type { SentenceEvent } from "../api/events";
 import { cn } from "../lib/utils";
 import type { Turn as TurnData } from "../state/reducer";
@@ -11,6 +12,7 @@ import {
   ERROR_SERVER_TITLE,
   EXTRACTIVE_ARIA_LABEL,
   EXTRACTIVE_REASON,
+  groupQuoteLabels,
   NOTICES_ARIA_LABEL,
   QUESTION_LABEL,
   STOPPED_TEXT,
@@ -65,8 +67,16 @@ function Sentence({
   );
 }
 
+/** Whether a turn is a direct quote answer (`extractive` with reason `quote_requested`). */
+export function isQuoteAnswer(turn: TurnData): boolean {
+  return turn.extractive?.reason === "quote_requested";
+}
+
 export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) {
+  const quoteGroupHeadingId = useId();
   const answered = turn.sentences.length > 0;
+  const quoteAnswer = isQuoteAnswer(turn);
+  const quoteLabels = quoteAnswer && turn.extractive ? groupQuoteLabels(turn.extractive.windows) : null;
   const emptyAnswer =
     turn.phase === "done" &&
     turn.windows.length > 0 &&
@@ -127,8 +137,12 @@ export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) 
       {turn.refusal && <RefusalCard refusal={turn.refusal} onAsk={onAsk} disabled={busy} />}
 
       {turn.extractive && (
-        <section className="mb-4 space-y-3" aria-label={EXTRACTIVE_ARIA_LABEL}>
-          {turn.extractive.reason !== "quote_requested" && (
+        <section
+          className="mb-4 space-y-3"
+          aria-labelledby={quoteLabels?.groupHeading ? quoteGroupHeadingId : undefined}
+          aria-label={quoteLabels?.groupHeading ? undefined : EXTRACTIVE_ARIA_LABEL}
+        >
+          {!quoteAnswer && (
             <Notice
               notice={{
                 type: "notice",
@@ -137,13 +151,19 @@ export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) 
               }}
             />
           )}
-          {turn.extractive.windows.map((w) => (
+          {quoteLabels?.groupHeading && (
+            <h3 id={quoteGroupHeadingId} className="text-ui font-bold text-foreground tabular-nums">
+              {quoteLabels.groupHeading}
+            </h3>
+          )}
+          {turn.extractive.windows.map((w, i) => (
             <QuoteBlock
               key={w.passage_id}
               window={w}
               turnId={turn.id}
-              allowCopy={turn.extractive?.reason === "quote_requested"}
-              onShowSource={onShowSource}
+              label={quoteLabels?.blockLabels[i]}
+              allowCopy={quoteAnswer}
+              onShowSource={quoteAnswer ? undefined : onShowSource}
             />
           ))}
         </section>

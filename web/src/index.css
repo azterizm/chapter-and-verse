@@ -202,6 +202,15 @@
   }
 }
 
+@keyframes cv-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
 @keyframes cv-status-shimmer {
   0% {
     background-position: 100% 0;
@@ -246,6 +255,14 @@
 
 @utility masthead-motion {
   transition: transform var(--dur-slow) var(--ease-spring);
+}
+
+@utility composer-motion {
+  transition: transform var(--dur-slow) var(--ease-spring);
+}
+
+@utility hero-fade-out {
+  animation: cv-fade-out var(--dur-base) var(--ease-out) both;
 }
 
 @utility toast-in {
@@ -314,6 +331,8 @@
   .collapsible-content,
   .chip-press,
   .masthead-motion,
+  .composer-motion,
+  .hero-fade-out,
   .jump-to-source,
   .copy-morph,
   .toast-in {

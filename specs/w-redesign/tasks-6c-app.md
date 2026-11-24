@@ -1,0 +1,3 @@
+# W6c: tasks
+Files you own: `web/src/App.tsx`, `web/test/dom/shell.test.tsx`. Allowed shell commands: exactly as in tasks-1-foundation.md.
+- [x] 1. Import `isQuoteAnswer` from `./components/Turn` and do not render the sources for a quote answer in either place App renders `SourcePanel` (inline under a turn, and the sticky desktop column for the active turn). When the active answer is a quote, the conversation column stays centred at its normal width (no empty sources column). Add one test in shell.test.tsx for a quote answer rendering no sources. Run the four npm scripts and print a short summary.

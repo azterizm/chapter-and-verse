@@ -32,15 +32,19 @@ export function Footer({ snapshot, wide = false }: { snapshot: string | null; wi
     <footer className="border-t border-border bg-background text-caption text-muted-foreground">
       <div
         className={cn(
-          "mx-auto flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-4 sm:px-6",
+          "mx-auto flex w-full flex-col items-start gap-3 px-4 py-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-x-4 sm:gap-y-2 sm:px-6",
           wide ? "max-w-[728px] lg:max-w-[1120px]" : "max-w-[728px]",
         )}
       >
-        <p className="min-w-[200px] flex-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <p className="flex flex-col items-start gap-y-1 sm:min-w-[200px] sm:flex-1 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-2">
           <span>{FOOTER_NOT_ADVICE}</span>
-          <span aria-hidden="true">·</span>
+          <span aria-hidden="true" className="hidden sm:inline">
+            ·
+          </span>
           <span>{FOOTER_NO_PERSONAL_DATA}</span>
-          <span aria-hidden="true">·</span>
+          <span aria-hidden="true" className="hidden sm:inline">
+            ·
+          </span>
           <a
             href={OGL_URL}
             rel="noopener noreferrer"
@@ -49,7 +53,9 @@ export function Footer({ snapshot, wide = false }: { snapshot: string | null; wi
           >
             {FOOTER_OGL}
           </a>
-          <span aria-hidden="true">·</span>
+          <span aria-hidden="true" className="hidden sm:inline">
+            ·
+          </span>
           <span>{snapshotText}</span>
         </p>
 

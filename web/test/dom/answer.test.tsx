@@ -4,7 +4,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatAnswerCopyText } from "@/components/ActionRow";
-import { Turn } from "@/components/Turn";
+import { isQuoteAnswer, Turn } from "@/components/Turn";
 import { ToastProvider } from "@/components/ui/toast";
 import type { AnswerFactObject, Window } from "@/api/events";
 import type { Turn as TurnData } from "@/state/reducer";
@@ -17,6 +17,7 @@ import {
   COPIED_TOAST,
   COPY_FAILED_TOAST,
   EXTRACTIVE_REASON,
+  quoteLinkLabel,
   RECEIPT_MISMATCH,
   RECEIPT_VERIFIED,
   SOURCE_LINK_LABEL,
@@ -357,7 +358,7 @@ describe("Turn answer rendering", () => {
 });
 
 describe("QuoteBlock and extractive answers", () => {
-  it("renders full text, link, and per-block copy buttons for quote_requested", async () => {
+  it("renders full text, icon link, and per-block copy button for a single quote_requested window", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -367,6 +368,7 @@ describe("QuoteBlock and extractive answers", () => {
 
     const w1 = makeWindow({
       passage_id: "P1",
+      coordinate: "uk/ukpga/2006/46/s172/1",
       heading: "Companies Act 2006, section 172(1)",
       text: "A director of a company must act in the way he considers, in good faith, would be most likely to promote the success of the company.",
       source_url: "https://www.legislation.gov.uk/ukpga/2006/46/section/172/1",
@@ -384,10 +386,16 @@ describe("QuoteBlock and extractive answers", () => {
 
     renderTurn(turn);
 
+    expect(isQuoteAnswer(turn)).toBe(true);
     expect(screen.getByText(w1.heading)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 3 })).not.toBeInTheDocument();
     expect(screen.getByText(w1.text)).toBeInTheDocument();
-    const extLink = screen.getByRole("link", { name: new RegExp(SOURCE_LINK_LABEL) });
+
+    const extLink = screen.getByRole("link", { name: quoteLinkLabel(w1.heading) });
     expect(extLink).toHaveAttribute("href", w1.source_url);
+    expect(extLink.textContent).toBe("");
+    expect(screen.queryByText(SOURCE_LINK_LABEL)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: w1.heading })).not.toBeInTheDocument();
 
     const copyBtn = screen.getByRole("button", { name: `Copy ${w1.heading}` });
     await user.click(copyBtn);
@@ -396,7 +404,95 @@ describe("QuoteBlock and extractive answers", () => {
     expect(screen.getByRole("status")).toHaveTextContent(COPIED_TOAST);
   });
 
-  it("renders notice and QuoteBlock without per-block copy for other extractive reasons", () => {
+  it("groups sibling quote windows under one common heading with short block labels and icon links", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    const w1 = makeWindow({
+      passage_id: "P1",
+      coordinate: "uk/ukpga/2006/46/s172/1/a",
+      heading: "Companies Act 2006, section 172(1)(a) (Duty to promote the success of the company)",
+      text: "(a) the likely consequences of any decision in the long term,",
+      source_url: "https://www.legislation.gov.uk/ukpga/2006/46/section/172/1/a",
+    });
+    const w2 = makeWindow({
+      passage_id: "P2",
+      coordinate: "uk/ukpga/2006/46/s172/1/b",
+      heading: "Companies Act 2006, section 172(1)(b) (Duty to promote the success of the company)",
+      text: "(b) the interests of the company’s employees,",
+      source_url: "https://www.legislation.gov.uk/ukpga/2006/46/section/172/1/b",
+    });
+
+    const turn = makeTurn({
+      query: "Quote section 172(1) of the Companies Act 2006",
+      sentences: [],
+      windows: [w1, w2],
+      extractive: {
+        type: "extractive",
+        reason: "quote_requested",
+        windows: [w1, w2],
+      },
+    });
+
+    renderTurn(turn);
+
+    expect(screen.getByRole("heading", { level: 3, name: "Companies Act 2006, section 172(1)" })).toBeInTheDocument();
+    expect(screen.getByText("(a)")).toBeInTheDocument();
+    expect(screen.getByText("(b)")).toBeInTheDocument();
+    expect(screen.queryByText(w1.heading)).not.toBeInTheDocument();
+    expect(screen.queryByText(w2.heading)).not.toBeInTheDocument();
+    expect(screen.queryByText(SOURCE_LINK_LABEL)).not.toBeInTheDocument();
+
+    const linkA = screen.getByRole("link", { name: quoteLinkLabel("(a)") });
+    const linkB = screen.getByRole("link", { name: quoteLinkLabel("(b)") });
+    expect(linkA).toHaveAttribute("href", w1.source_url);
+    expect(linkA.textContent).toBe("");
+    expect(linkB).toHaveAttribute("href", w2.source_url);
+    expect(linkB.textContent).toBe("");
+
+    await user.click(screen.getByRole("button", { name: "Copy (a)" }));
+    expect(writeText).toHaveBeenCalledWith(`${w1.heading}\n${w1.text}\n${w1.source_url}`);
+  });
+
+  it("omits group heading and uses short coordinate labels when quote windows do not share a parent", () => {
+    const w1 = makeWindow({
+      passage_id: "P1",
+      coordinate: "uk/ukpga/2006/46/s172/1/a",
+      heading: "Companies Act 2006, section 172(1)(a) (Duty to promote the success of the company)",
+      text: "(a) the likely consequences of any decision in the long term,",
+      source_url: "https://www.legislation.gov.uk/ukpga/2006/46/section/172/1/a",
+    });
+    const w2 = makeWindow({
+      passage_id: "P2",
+      coordinate: "uk/ukpga/2006/46/s174/1",
+      heading: "Companies Act 2006, section 174(1) (Duty to exercise reasonable care, skill and diligence)",
+      text: "(1) A director of a company must exercise reasonable care, skill and diligence.",
+      source_url: "https://www.legislation.gov.uk/ukpga/2006/46/section/174/1",
+    });
+
+    const turn = makeTurn({
+      sentences: [],
+      windows: [w1, w2],
+      extractive: {
+        type: "extractive",
+        reason: "quote_requested",
+        windows: [w1, w2],
+      },
+    });
+
+    renderTurn(turn);
+
+    expect(screen.queryByRole("heading", { level: 3 })).not.toBeInTheDocument();
+    expect(screen.getByText("s.172(1)(a)")).toBeInTheDocument();
+    expect(screen.getByText("s.174(1)")).toBeInTheDocument();
+  });
+
+  it("renders notice, jump link, and QuoteBlock without per-block copy for other extractive reasons", async () => {
+    const user = userEvent.setup();
     const w1 = makeWindow();
     const turn = makeTurn({
       sentences: [],
@@ -408,11 +504,17 @@ describe("QuoteBlock and extractive answers", () => {
       },
     });
 
-    renderTurn(turn);
+    const { onShowSource } = renderTurn(turn);
 
+    expect(isQuoteAnswer(turn)).toBe(false);
+    expect(isQuoteAnswer(makeTurn())).toBe(false);
     expect(screen.getByText(EXTRACTIVE_REASON.providers_unavailable)).toBeInTheDocument();
     expect(screen.getByText(w1.text)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: `Copy ${w1.heading}` })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: quoteLinkLabel(w1.heading) })).toHaveAttribute("href", w1.source_url);
+
+    await user.click(screen.getByRole("link", { name: w1.heading }));
+    expect(onShowSource).toHaveBeenCalledWith(1, "P1");
   });
 });
 
