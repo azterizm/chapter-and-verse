@@ -22,6 +22,7 @@ from chapterverse.audit.policy import build_policy  # noqa: E402
 from chapterverse.contracts import (  # noqa: E402
     AnswerFactObject,
     DoneEvent,
+    ExtractiveEvent,
     ProviderCall,
     ReceiptEvent,
     RenderedCitation,
@@ -33,6 +34,7 @@ from chapterverse.contracts import (  # noqa: E402
     Timings,
     Window,
     sha256_hex,
+    to_jsonable,
 )
 from chapterverse.pipeline import Pipeline  # noqa: E402
 from chapterverse.providers.presets import JUDGE_PRESET_NAME  # noqa: E402
@@ -383,6 +385,114 @@ def test_rubric_synthetic_events_pass_and_fail() -> None:
     assert rubric_report["total_evaluated"] == 1
     assert rubric_report["passed"] == 1
     assert rubric_report["failed"] == 0
+
+
+def test_rubric_extractive_quote_requested_satisfies_citations() -> None:
+    policy = build_policy(JUDGE_PRESET_NAME)
+    refusal_text = policy.refusal_text
+    l07_coords = [
+        "uk/ukpga/2006/46/s172/1/a",
+        "uk/ukpga/2006/46/s172/1/b",
+        "uk/ukpga/2006/46/s172/1/c",
+        "uk/ukpga/2006/46/s172/1/d",
+    ]
+    l07_row = {
+        "id": "L07",
+        "split": "dev",
+        "question": (
+            "Quote the exact statutory wording of section 172(1)(a) to (d) "
+            "of the Companies Act 2006."
+        ),
+        "instrument": "uk/ukpga/2006/46",
+        "must_reach": l07_coords,
+        "should_reach": [],
+        "answer_checks": {
+            "required_citations": l07_coords,
+            "credit_citations": ["uk/ukpga/2006/46/s172/1/e"],
+            "forbidden_phrases": ["provided passages", "the passages"],
+            "max_abstentions": 1,
+            "no_citations_on_abstention": True,
+            "no_duplicate_sentences": True,
+        },
+    }
+    windows = tuple(
+        Window(
+            passage_id=f"P{i}",
+            coordinate=coord,
+            heading=f"s.172(1)({coord.rsplit('/', 1)[-1]})",
+            text=f"Paragraph ({coord.rsplit('/', 1)[-1]}) text.",
+            status=TemporalStatus.IN_FORCE,
+            version_date=None,
+            source_url=(
+                "https://www.legislation.gov.uk/ukpga/2006/46/section/172#"
+                f"{coord.rsplit('/', 1)[-1]}"
+            ),
+        )
+        for i, coord in enumerate(l07_coords, start=1)
+    )
+    credit_window = Window(
+        passage_id="P5",
+        coordinate="uk/ukpga/2006/46/s172/1/e",
+        heading="s.172(1)(e)",
+        text="Paragraph (e) text.",
+        status=TemporalStatus.IN_FORCE,
+        version_date=None,
+        source_url="https://www.legislation.gov.uk/ukpga/2006/46/section/172#e",
+    )
+
+    events: list[Any] = [
+        RouteEvent(
+            status="ROUTE_BOUNDED",
+            next_action="answer",
+            coordinates=tuple(l07_coords),
+            corrections=(),
+            messages=(),
+            index_snapshot="2026-09-28",
+        ),
+        SourcesEvent(windows=(*windows, credit_window)),
+        ExtractiveEvent(reason="quote_requested", windows=(*windows, credit_window)),
+        DoneEvent(timings=Timings(first_source_ms=1.0, first_sentence_ms=None, total_ms=2.0)),
+    ]
+
+    # Dataclass events
+    res_dc = evaluate_answer(l07_row, events, refusal_text)
+    assert res_dc["passed"] is True
+    assert res_dc["missing_required"] == []
+    assert res_dc["credit_hits"] == ["uk/ukpga/2006/46/s172/1/e"]
+
+    # JSON dict events (as recorded in answers.jsonl)
+    json_events = [to_jsonable(ev) for ev in events]
+    res_json = evaluate_answer(l07_row, json_events, refusal_text)
+    assert res_json["passed"] is True
+    assert res_json["missing_required"] == []
+    assert res_json["credit_hits"] == ["uk/ukpga/2006/46/s172/1/e"]
+
+    # Missing one required window still fails required_citations
+    partial_events = [
+        ExtractiveEvent(reason="quote_requested", windows=windows[:-1]),
+    ]
+    res_partial = evaluate_answer(l07_row, partial_events, refusal_text)
+    assert res_partial["passed"] is False
+    assert res_partial["missing_required"] == ["uk/ukpga/2006/46/s172/1/d"]
+
+    # Abstention without citations plus an extractive event keeps no_citations_on_abstention intact
+    abstention_plus_extractive = [
+        SentenceEvent(
+            sentence=SentenceOut(
+                index=0,
+                text=refusal_text,
+                verdict="refused",
+                passage_ids=(),
+                reasons=(),
+                rollbacks=0,
+            ),
+            citations=(),
+        ),
+        ExtractiveEvent(reason="quote_requested", windows=windows),
+    ]
+    res_absten_ok = evaluate_answer(l07_row, abstention_plus_extractive, refusal_text)
+    assert res_absten_ok["passed"] is True
+    assert res_absten_ok["abstention_count"] == 1
 
 
 # ============================================================================ 5. Recorder fake

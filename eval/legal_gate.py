@@ -35,6 +35,7 @@ from chapterverse.config import Settings
 from chapterverse.contracts import (
     ErrorEvent,
     Event,
+    ExtractiveEvent,
     ReceiptEvent,
     RouteEvent,
     SentenceEvent,
@@ -264,7 +265,7 @@ def run_retrieval_gate(
 def _extract_sentences_and_citations(
     events: Sequence[Any],
 ) -> tuple[list[tuple[str, list[str]]], list[str]]:
-    """Extract (sentence_text, citation_coords) pairs and all unique citation coords."""
+    """Extract (sentence_text, citation_coords) pairs and all citation coords."""
     sentences_out: list[tuple[str, list[str]]] = []
     all_citations: list[str] = []
 
@@ -274,15 +275,26 @@ def _extract_sentences_and_citations(
             coords = [c.coordinate for c in ev.citations]
             sentences_out.append((s_text, coords))
             all_citations.extend(coords)
-        elif isinstance(ev, dict) and ev.get("type") == "sentence":
-            s_obj = ev.get("sentence", {})
-            s_text = str(s_obj.get("text", ""))
-            cits = ev.get("citations", [])
-            coords = [
-                str(c["coordinate"]) for c in cits if isinstance(c, dict) and "coordinate" in c
-            ]
-            sentences_out.append((s_text, coords))
-            all_citations.extend(coords)
+        elif isinstance(ev, ExtractiveEvent):
+            all_citations.extend(w.coordinate for w in ev.windows)
+        elif isinstance(ev, dict):
+            ev_type = ev.get("type")
+            if ev_type == "sentence":
+                s_obj = ev.get("sentence", {})
+                s_text = str(s_obj.get("text", ""))
+                cits = ev.get("citations", [])
+                coords = [
+                    str(c["coordinate"]) for c in cits if isinstance(c, dict) and "coordinate" in c
+                ]
+                sentences_out.append((s_text, coords))
+                all_citations.extend(coords)
+            elif ev_type == "extractive":
+                windows = ev.get("windows") or []
+                all_citations.extend(
+                    str(w["coordinate"])
+                    for w in windows
+                    if isinstance(w, dict) and "coordinate" in w
+                )
 
     return sentences_out, all_citations
 
