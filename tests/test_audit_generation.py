@@ -756,3 +756,91 @@ def test_ban_needs_a_mask_processor_on_sglang() -> None:
     mask_deps = all(importlib.util.find_spec(m) is not None for m in ("torch", "sglang"))
     assert _can_ban(backend(None)) is mask_deps  # False here: neither is a dependency
     assert _can_ban(FakeBackend({})) is True
+
+
+def test_chat_continuation_time_budget_before_first_call(
+    premise: Premise, windows: tuple[Window, ...], policy: Policy
+) -> None:
+    rotation = FakeRotation([(GOOD1, "stop")])
+    judge = FakeJudgeChat()
+    gen = ChatContinuationGenerator(
+        rotation,
+        judge,
+        policy,
+        query=QUERY,
+        premise=premise,
+        windows=windows,
+        started=0.0,
+        answer_budget_s=25.0,
+        clock=lambda: 30.0,
+    )
+    sentences = list(gen)
+    assert sentences == []
+    assert gen.stop_reason == "time_budget"
+    assert len(rotation.requests) == 0
+
+
+def test_chat_continuation_time_budget_between_sentences(
+    premise: Premise, windows: tuple[Window, ...], policy: Policy
+) -> None:
+    # First sentence is verified, then clock jumps past deadline before second sentence
+    times = [0.0, 0.0, 30.0]  # call 1 (block), check 1 (sentence 1), check 2 (sentence 2)
+
+    def clock() -> float:
+        return times.pop(0) if times else 30.0
+
+    rotation = FakeRotation([(f"{GOOD1} {GOOD2}", "stop")])
+    judge = FakeJudgeChat()
+    gen = ChatContinuationGenerator(
+        rotation,
+        judge,
+        policy,
+        query=QUERY,
+        premise=premise,
+        windows=windows,
+        started=0.0,
+        answer_budget_s=25.0,
+        clock=clock,
+    )
+    sentences = list(gen)
+    assert len(sentences) == 1
+    assert sentences[0].text == TEXT1
+    assert gen.stop_reason == "time_budget"
+
+
+def test_chat_continuation_length_limit_stops_after_first_sentence(
+    run_chat: Callable[..., Run],
+) -> None:
+    out, _, judge, gen = run_chat(
+        [(f"{GOOD1} {GOOD2} {GOOD1}", "stop")],
+        settings=GenerationSettings(max_answer_tokens=10),
+    )
+    assert out == [supported(0, TEXT1, ("P2",))]
+    assert judge.sentences == [TEXT1]
+    assert gen.stop_reason == "length"
+
+
+def test_chat_continuation_abstention_at_deadline_keeps_abstained(
+    premise: Premise, windows: tuple[Window, ...], policy: Policy
+) -> None:
+    times = [0.0, 0.0, 25.0]
+
+    def clock() -> float:
+        return times.pop(0) if times else 25.0
+
+    rotation = FakeRotation([(ABSTAIN_TEXT, "stop")])
+    judge = FakeJudgeChat()
+    gen = ChatContinuationGenerator(
+        rotation,
+        judge,
+        policy,
+        query=QUERY,
+        premise=premise,
+        windows=windows,
+        started=0.0,
+        answer_budget_s=25.0,
+        clock=clock,
+    )
+    out = list(gen)
+    assert out == [SentenceOut(0, ABSTAIN_TEXT, "refused", (), ("ABSTAINED",), 0)]
+    assert gen.stop_reason == "abstained"

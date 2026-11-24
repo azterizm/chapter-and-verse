@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import time
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,8 @@ from legal_rag_router.result import Candidate, NextAction, ParsedCitation, Route
 from chapterverse.audit.policy import build_policy
 from chapterverse.contracts import (
     AllProvidersUnavailable,
+    ChatRequest,
+    ChatResult,
     ClarifyEvent,
     Event,
     ExtractiveEvent,
@@ -447,6 +450,58 @@ def test_outage_after_a_sentence_closes_the_answer(
         "there may have been more to say."
     )
     assert receipt(events).fact.mode == "generated"
+
+
+def test_budget_expiry_before_first_sentence_gives_extractive(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    rotation = FakeRotation([(GOOD1, "stop")])
+    pipeline = make(fixture_router, store, rotation)
+    events, outcome = run(pipeline, S124_QUERY, started=time.perf_counter() - 30.0)
+    assert [e.type for e in events] == ["route", "sources", "extractive", "receipt", "done"]
+    (extractive,) = of(events, ExtractiveEvent)
+    assert extractive.reason == "providers_unavailable"
+    assert outcome.mode == "extractive"
+    assert outcome.stop_reason == "time_budget"
+
+
+def test_budget_expiry_after_one_sentence_gives_incomplete_notice(
+    fixture_router: Router, store: CountingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rotation = FakeRotation([(GOOD1 + " The", "length"), (GOOD2, "stop")])
+    t = [100.0]
+
+    def fake_perf_counter() -> float:
+        return t[0]
+
+    monkeypatch.setattr(time, "perf_counter", fake_perf_counter)
+
+    orig_complete = rotation.complete
+
+    def tracking_complete(req: ChatRequest) -> ChatResult:
+        res = orig_complete(req)
+        # Advance clock past budget (100.0 + 25.0 = 125.0) after sentence 1 is checked
+        if req.purpose == "judge":
+            t[0] = 130.0
+        return res
+
+    rotation.complete = tracking_complete  # type: ignore[method-assign]
+
+    pipeline = make(fixture_router, store, rotation)
+    events, outcome = run(pipeline, S124_QUERY, started=100.0)
+    assert [e.type for e in events] == [
+        "route",
+        "sources",
+        "sentence",
+        "notice",
+        "receipt",
+        "done",
+    ]
+    (notice,) = of(events, NoticeEvent)
+    assert notice.code == "providers_unavailable"
+    assert outcome.mode == "generated"
+    assert outcome.stop_reason == "time_budget"
+    assert len(outcome.sentences) == 1
 
 
 def test_written_citation_is_rolled_back_and_retried(

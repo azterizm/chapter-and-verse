@@ -55,7 +55,8 @@ sentences were yielded; the pipeline then closes the answer (docs/ARCHITECTURE.m
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
@@ -78,7 +79,7 @@ from chapterverse.audit.prompt import (
     window_positions,
 )
 from chapterverse.audit.refs import REF_CODES, REF_GROUPS, split_refs
-from chapterverse.audit.verify import make_verifier, reason_codes
+from chapterverse.audit.verify import AuditVerifier, make_verifier, reason_codes
 from chapterverse.contracts import (
     ChatMode,
     ChatRequest,
@@ -92,6 +93,7 @@ from chapterverse.contracts import (
 )
 
 __all__ = [
+    "DEFAULT_ANSWER_BUDGET_S",
     "EMPTY_BLOCK",
     "SAMPLING",
     "SENTENCE_TOO_LONG",
@@ -100,6 +102,8 @@ __all__ = [
     "StopReason",
     "split_block",
 ]
+
+DEFAULT_ANSWER_BUDGET_S: Final = 25.0
 
 SAMPLING: Final[Mapping[ChatMode, tuple[float, float]]] = {
     "short": (0.7, 0.8),
@@ -118,6 +122,7 @@ StopReason = Literal[
     "content_filter",
     "other",
     "abstained",
+    "time_budget",
 ]
 
 _PARTIAL_REF = re.compile(r"\s*\[[^\]\n]*\Z")
@@ -135,6 +140,7 @@ class GenerationSettings:
     thinking_tokens: int = 2048
     inject_windows: int = 2
     inject_max_chars: int = 3200
+    answer_budget_s: float = DEFAULT_ANSWER_BUDGET_S
 
     def answer_limit(self, mode: ChatMode) -> int:
         if self.max_answer_tokens is not None:
@@ -194,6 +200,7 @@ class _State:
     injected: set[int] = field(default_factory=set)
     last_reasons: tuple[str, ...] = ()
     refused: bool = False
+    last_rejected: SentenceVerdict | None = None
 
     def commit(self, text: str) -> None:
         sep = " " if self.context and not self.context[-1].isspace() else ""
@@ -220,6 +227,9 @@ class ChatContinuationGenerator:
         session: SessionState | None = None,
         history: Sequence[PriorTurn] = (),
         settings: GenerationSettings | None = None,
+        started: float | None = None,
+        answer_budget_s: float | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.rotation = rotation
         self.judge_chat = judge_chat
@@ -235,6 +245,13 @@ class ChatContinuationGenerator:
         self.calls: list[ProviderCall] = []
         self.stop_reason: StopReason | None = None
         self._started = False
+        self._clock = clock if clock is not None else time.perf_counter
+        budget = answer_budget_s if answer_budget_s is not None else self.settings.answer_budget_s
+        start = started if started is not None else self._clock()
+        self._deadline = start + budget
+
+    def _timed_out(self) -> bool:
+        return self._clock() >= self._deadline
 
     def __iter__(self) -> Iterator[SentenceOut]:
         if self._started:
@@ -247,43 +264,59 @@ class ChatContinuationGenerator:
         verifier = make_verifier(self.judge_chat, self.policy, self.prompt.passage_ids, self.calls)
         state = _State()
         limit = self.settings.answer_limit(self.prompt.mode)
-        while True:
+        while self.stop_reason is None:
+            if self._timed_out():
+                self.stop_reason = "time_budget"
+                break
             if state.blocks >= self.settings.max_blocks:
                 self.stop_reason = "block_limit"
-                return
+                break
             result = self._request(state)
             sentences, _ = split_block(result.text, final=result.finish_reason == "stop")
-            rejected: SentenceVerdict | None = None
-            for raw in sentences:
-                if is_abstention(raw):
-                    self.stop_reason = "abstained"
-                    if not state.refused:
-                        state.refused = True
-                        yield self._refuse_abstention(state)
-                    return
-                text, pids = split_refs(raw)
-                cited = tuple(self.by_id[p].text for p in pids if p in self.by_id)
-                if is_narration(text, cited):
-                    self.stop_reason = "abstained"
-                    if not state.refused:
-                        state.refused = True
-                        yield self._refuse_narration(state)
-                    return
-                verdict = verifier.check_sentence(self.premise, raw, query=self.query)
-                if not verdict.emitted:
-                    rejected = verdict
-                    break
-                state.commit(raw)
-                state.answer_chars += len(verdict.text) + 1
-                yield self._emitted(state, raw, verdict)
-                if state.answer_chars / CHARS_PER_TOKEN >= limit:
-                    self.stop_reason = "length"
-                    return
-            refusal = self._after_block(state, result, sentences, rejected)
-            if refusal is not None:
-                yield refusal
-            if self.stop_reason is not None:
+            yield from self._audit_sentences(verifier, state, sentences, limit)
+            if self.stop_reason is None:
+                refusal = self._after_block(state, result, sentences, state.last_rejected)
+                if refusal is not None:
+                    yield refusal
+
+    def _audit_sentences(
+        self,
+        verifier: AuditVerifier,
+        state: _State,
+        sentences: Sequence[str],
+        limit: int,
+    ) -> Iterator[SentenceOut]:
+        state.last_rejected = None
+        for raw in sentences:
+            if self._timed_out():
+                self.stop_reason = "time_budget"
                 return
+            if is_abstention(raw):
+                self.stop_reason = "abstained"
+                if not state.refused:
+                    state.refused = True
+                    yield self._refuse_abstention(state)
+                return
+            text, pids = split_refs(raw)
+            cited = tuple(self.by_id[p].text for p in pids if p in self.by_id)
+            if is_narration(text, cited):
+                self.stop_reason = "abstained"
+                if not state.refused:
+                    state.refused = True
+                    yield self._refuse_narration(state)
+                return
+            verdict = verifier.check_sentence(self.premise, raw, query=self.query)
+            if not verdict.emitted:
+                state.last_rejected = verdict
+                break
+            state.commit(raw)
+            state.answer_chars += len(verdict.text) + 1
+            yield self._emitted(state, raw, verdict)
+            if state.answer_chars / CHARS_PER_TOKEN >= limit:
+                self.stop_reason = "length"
+                return
+        if self.stop_reason is None and self._timed_out():
+            self.stop_reason = "time_budget"
 
     def _after_block(
         self,

@@ -86,11 +86,14 @@ from chapterverse.contracts import (
 )
 
 __all__ = [
+    "DEFAULT_ANSWER_BUDGET_S",
     "MODAL_QUANTISATION",
     "BearerPost",
     "ModalPathGenerator",
     "ModalSGLangBackend",
 ]
+
+DEFAULT_ANSWER_BUDGET_S: Final = 25.0
 
 MODAL_QUANTISATION: Final = PRESETS["qwen27-ar4"].quantisation
 """The quantisation of the measured preset the Modal server runs (decision 4)."""
@@ -310,6 +313,9 @@ class _Engine(InFlightGenerator):
         positions: Mapping[int, Window],
         can_ban: bool,
         on_close: Callable[[dict[str, Any]], None],
+        started: float | None = None,
+        answer_budget_s: float = DEFAULT_ANSWER_BUDGET_S,
+        clock: Callable[[], float] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(backend, verifier, **kwargs)
@@ -318,6 +324,12 @@ class _Engine(InFlightGenerator):
         self.can_ban = can_ban
         self.on_close = on_close
         self.noted = False
+        self._clock = clock if clock is not None else time.perf_counter
+        start = started if started is not None else self._clock()
+        self._deadline = start + answer_budget_s
+
+    def _timed_out(self) -> bool:
+        return self._clock() >= self._deadline
 
     def messages(self, query: str, premise: Premise) -> list[dict[str, str]]:
         del query, premise
@@ -378,11 +390,17 @@ class _Engine(InFlightGenerator):
         by_id = {w.passage_id: w for w in self.positions.values()}
 
         while stop_reason is None:
+            if self._timed_out():
+                stop_reason = "time_budget"
+                break
             point = _Point(len(stream.answer))
             retry = _Retry(carry.lookahead if carry else [], None, None)
             end = carry.end if carry else None
             carry = None
             while True:
+                if self._timed_out():
+                    stop_reason = "time_budget"
+                    break
                 draft = self._draft(prompt, stream, retry.seed, end, retry.constraint)
                 sentence = self.backend.decode(draft.tokens).strip()
                 if not sentence and point.rollbacks:
@@ -469,6 +487,9 @@ class _Engine(InFlightGenerator):
                     points.append(self._close(point, "refused", self.refusal))
                     stop_reason = "abstained"
                     break
+                if self._timed_out():
+                    stop_reason = "time_budget"
+                    break
                 verdict = self.verifier.check_sentence(premise, sentence, query=query)
                 attempt = self._attempt(draft, verdict, retry)
                 point.attempts.append(attempt)
@@ -530,6 +551,9 @@ class ModalPathGenerator:
         quantisation: str | None = MODAL_QUANTISATION,
         max_new_tokens: int | None = None,
         on_sentence: Callable[[SentenceOut], None] | None = None,
+        started: float | None = None,
+        answer_budget_s: float = DEFAULT_ANSWER_BUDGET_S,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.backend = backend
         self.judge_chat = judge_chat
@@ -542,6 +566,9 @@ class ModalPathGenerator:
         self.quantisation = quantisation
         self.max_new_tokens = max_new_tokens or (512 if mode == "short" else 1536)
         self.on_sentence = on_sentence
+        self.started = started
+        self.answer_budget_s = answer_budget_s
+        self.clock = clock if clock is not None else time.perf_counter
         self.calls: list[ProviderCall] = []
         self.sentences: list[SentenceOut] = []
         self.trace: dict[str, Any] | None = None
@@ -566,6 +593,9 @@ class ModalPathGenerator:
             positions=self.positions,
             can_ban=_can_ban(self.backend),
             on_close=self._closed,
+            started=self.started,
+            answer_budget_s=self.answer_budget_s,
+            clock=self.clock,
             max_rollbacks=self.policy.max_rollbacks_per_sentence,
             max_total_rollbacks=self.policy.max_total_rollbacks,
             steering=self.policy.steering,

@@ -18,7 +18,7 @@ from bisect import bisect_left
 from collections.abc import Mapping
 from typing import Final
 
-from legal_rag_router.concepts import ConceptIndex, terms, unpack_tf
+from legal_rag_router.concepts import PRIOR_FLAGS, ConceptIndex, terms, unpack_tf
 from legal_rag_router.discovery import DEFAULT_DISCOVERY, DiscoveryPolicy
 from legal_rag_verifier.corpus import instrument_coordinate
 
@@ -269,6 +269,37 @@ def _rrf_fuse(
     return fused
 
 
+# Regional lift and prior penalties mirror legal_rag_router.discovery._candidates and _prior.
+def _effective_prior_penalties(query: str, policy: DiscoveryPolicy) -> list[float]:
+    penalties = list(policy.prior_penalties)
+    query_terms = set(terms(query))
+    if {"northern", "ireland"} <= query_terms and "northern_ireland" in PRIOR_FLAGS:
+        penalties[PRIOR_FLAGS.index("northern_ireland")] = 1.0
+    if {"scotland", "scottish"} & query_terms and "scotland" in PRIOR_FLAGS:
+        penalties[PRIOR_FLAGS.index("scotland")] = 1.0
+    return penalties
+
+
+def _prior_factor(
+    concepts: ConceptIndex,
+    doc_id: int,
+    penalties: list[float],
+    policy: DiscoveryPolicy,
+) -> float:
+    """Mirrors legal_rag_router.discovery._prior."""
+    if not hasattr(concepts, "prior"):
+        return 1.0
+    try:
+        flags, degree = concepts.prior(doc_id)
+    except Exception:  # noqa: BLE001
+        return 1.0
+    factor = 1.0 + policy.in_degree_weight * degree / 255
+    for i, penalty in enumerate(penalties):
+        if flags >> i & 1:
+            factor *= penalty
+    return factor
+
+
 def rank_sections(
     query: str,
     instrument: str,
@@ -279,11 +310,13 @@ def rank_sections(
     policy: DiscoveryPolicy = DEFAULT_DISCOVERY,
     rrf_k: int = DEFAULT_RRF_K,
 ) -> list[tuple[Coordinate, float]]:
-    """Restricted ranking of provisions inside a named instrument (requirement R2).
+    """Restricted ranking of provisions inside a named instrument (requirements R2, R7).
 
     Computes BM25F using parameters from ``DEFAULT_DISCOVERY`` over the instrument's
     contiguous provision document range. When ``dense`` is available, computes exact
-    float32 dequantised dot products over those rows and fuses with RRF (ties broken by doc id).
+    float32 dequantised dot products over those rows and fuses with RRF. Applies the same
+    prior factor discovery applies (with regional lifts) before final ranking.
+    Deterministic ties broken by doc id.
     """
     doc_range: tuple[int, int] | None = None
     if isinstance(ranges, (InstrumentRanges, Mapping)):
@@ -293,6 +326,7 @@ def rank_sections(
 
     bm25_scores = _score_bm25f(query, doc_range, concepts, policy)
     dense_ranked = _score_dense(query, doc_range, dense)
+    penalties = _effective_prior_penalties(query, policy)
 
     if dense_ranked:
         sorted_bm25 = sorted(
@@ -301,13 +335,20 @@ def rank_sections(
         )
         bm25_ranked = {doc_id: rank for rank, doc_id in enumerate(sorted_bm25, start=1)}
         fused = _rrf_fuse(bm25_ranked, dense_ranked, rrf_k)
-        return [(concepts.doc(doc_id).coordinate, score) for score, doc_id in fused]
+        adjusted = [
+            (score * _prior_factor(concepts, doc_id, penalties, policy), doc_id)
+            for score, doc_id in fused
+        ]
+        adjusted.sort(key=lambda item: (-item[0], item[1]))
+        return [(concepts.doc(doc_id).coordinate, score) for score, doc_id in adjusted]
 
-    sorted_bm25_alone = sorted(
-        ((d, bm25_scores[d]) for d in bm25_scores if bm25_scores[d] > 0),
-        key=lambda item: (-item[1], item[0]),
-    )
-    return [(concepts.doc(doc_id).coordinate, score) for doc_id, score in sorted_bm25_alone]
+    adjusted_bm25 = [
+        (bm25_scores[d] * _prior_factor(concepts, d, penalties, policy), d)
+        for d in bm25_scores
+        if bm25_scores[d] > 0
+    ]
+    adjusted_bm25.sort(key=lambda item: (-item[0], item[1]))
+    return [(concepts.doc(doc_id).coordinate, score) for score, doc_id in adjusted_bm25]
 
 
 def parse_sibling_range(query: str, start_label: str) -> list[str] | None:

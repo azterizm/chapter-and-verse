@@ -154,6 +154,7 @@ __all__ = [
     "MAX_CONTEXT_COORDINATES",
     "MAX_PROMPT_WINDOWS",
     "PREMISE_BUDGET_TOKENS",
+    "TOP_SECTION_WINDOWS",
     "AskRequest",
     "ModalKV",
     "Outcome",
@@ -172,6 +173,8 @@ PREMISE_BUDGET_TOKENS: Final = 1500
 """Estimated tokens of rendered passages sent to the model (module docstring)."""
 MAX_PROMPT_WINDOWS: Final = 8
 """At most this many windows go to the model (the extractive cap too)."""
+TOP_SECTION_WINDOWS: Final = 3
+"""Maximum windows allocated to the top-ranked section in round 1 (requirement R8)."""
 MAX_CONTEXT_COORDINATES: Final = 10
 """Previous-turn coordinates accepted as routing context."""
 
@@ -258,6 +261,7 @@ class Outcome:
     selection: str = ""
     failures: list[str] = field(default_factory=list)
     error: str | None = None
+    stop_reason: str | None = None
 
     @property
     def sentences(self) -> tuple[SentenceOut, ...]:
@@ -285,6 +289,7 @@ class Outcome:
             "first_supported_ms": _round(self.first_supported_ms),
             "total_ms": _round(self.total_ms),
             "error": self.error,
+            "stop_reason": self.stop_reason,
         }
 
 
@@ -335,6 +340,75 @@ def _order_section_windows(
     return scored
 
 
+def _group_section_windows(
+    windows: Sequence[Window],
+    ranked_sections: Sequence[tuple[Coordinate, float]],
+    terms: frozenset[str],
+) -> list[list[tuple[int, Window, tuple[int, int] | None]]]:
+    window_index_map = {id(w): i for i, w in enumerate(windows)}
+    section_lists: list[list[tuple[int, Window, tuple[int, int] | None]]] = []
+    seen_sections: set[Coordinate] = set()
+    for sec_coord, _ in ranked_sections:
+        if sec_coord in seen_sections:
+            continue
+        seen_sections.add(sec_coord)
+        sec_windows = [
+            (window_index_map[id(w)], w)
+            for w in windows
+            if w.coordinate == sec_coord or w.coordinate.startswith(f"{sec_coord}/")
+        ]
+        if sec_windows:
+            section_lists.append(_order_section_windows(sec_windows, terms))
+    return section_lists
+
+
+def _allocate_ranked_windows(
+    section_lists: list[list[tuple[int, Window, tuple[int, int] | None]]],
+    max_windows: int,
+    budget_tokens: int,
+) -> tuple[dict[int, Window], int]:
+    chosen: dict[int, Window] = {}
+    used = 0
+
+    def try_add(idx: int, w: Window, span: tuple[int, int] | None) -> bool:
+        nonlocal used
+        if idx in chosen or len(chosen) >= max_windows:
+            return False
+        trimmed = dataclasses.replace(w, highlight=span) if span is not None else w
+        cost = _cost(trimmed)
+        if used + cost > budget_tokens:
+            if chosen:
+                return False
+            frame = len(render_passage(dataclasses.replace(w, text="", highlight=None)))
+            room = int(budget_tokens * CHARS_PER_TOKEN) - frame - CONTEXT_MARGIN_CHARS - 8
+            trimmed = dataclasses.replace(w, highlight=(0, max(1, min(len(w.text), room))))
+            cost = _cost(trimmed)
+        chosen[idx] = trimmed
+        used += cost
+        return True
+
+    # Round 1: top section gets up to TOP_SECTION_WINDOWS windows
+    for item in section_lists[0][:TOP_SECTION_WINDOWS]:
+        if not try_add(*item) and len(chosen) >= max_windows:
+            break
+
+    # Round 2: every next section gets its single best window
+    for next_section in section_lists[1:]:
+        if len(chosen) >= max_windows:
+            break
+        try_add(*next_section[0])
+
+    # Round 3: any slots left go to further windows of the ranked sections in rank order
+    for sec in section_lists:
+        if len(chosen) >= max_windows:
+            break
+        for item in sec:
+            if not try_add(*item) and len(chosen) >= max_windows:
+                break
+
+    return chosen, used
+
+
 def select_ranked_windows(
     windows: Sequence[Window],
     ranked_sections: Sequence[tuple[Coordinate, float]],
@@ -343,11 +417,15 @@ def select_ranked_windows(
     budget_tokens: int = PREMISE_BUDGET_TOKENS,
     max_windows: int = MAX_PROMPT_WINDOWS,
 ) -> Selection:
-    """Cap ``windows`` using section rank order (requirements R3).
+    """Cap ``windows`` using section rank order spread across rounds (requirements R3, R8).
 
-    Walks sections best first and adds that section's windows (the window with the best
-    lexical highlight first, then the rest of the section in order) while they fit the
-    budget and the window cap, keeping highlight trimming as ``select_windows`` does.
+    Allocation over ranked sections runs in three rounds, each round in section rank order
+    and respecting the token budget and window cap:
+    (1) the top section gets up to ``TOP_SECTION_WINDOWS`` = 3 windows (its best-highlight
+        window first, then its others in store order);
+    (2) every next section gets its single best window (best highlight, else its first window);
+    (3) any slots left go to further windows of the ranked sections in rank order.
+    Final windows are returned in store order.
     """
     if budget_tokens < 1 or max_windows < 1:
         raise ValueError("budget_tokens and max_windows must be positive")
@@ -358,38 +436,11 @@ def select_ranked_windows(
         return Selection(_renumber(windows), "all", len(windows), full)
 
     terms = query_terms(query)
-    chosen: dict[int, Window] = {}
-    used = 0
-    window_index_map = {id(w): i for i, w in enumerate(windows)}
+    section_lists = _group_section_windows(windows, ranked_sections, terms)
+    if not section_lists:
+        return select_windows(windows, query, budget_tokens=budget_tokens, max_windows=max_windows)
 
-    for sec_coord, _ in ranked_sections:
-        if len(chosen) >= max_windows:
-            break
-        sec_windows = [
-            (window_index_map[id(w)], w)
-            for w in windows
-            if w.coordinate == sec_coord or w.coordinate.startswith(f"{sec_coord}/")
-        ]
-        if not sec_windows:
-            continue
-
-        for idx, w, span in _order_section_windows(sec_windows, terms):
-            if len(chosen) >= max_windows:
-                break
-            if idx in chosen:
-                continue
-            trimmed = dataclasses.replace(w, highlight=span) if span is not None else w
-            cost = _cost(trimmed)
-            if used + cost > budget_tokens:
-                if chosen:
-                    continue
-                frame = len(render_passage(dataclasses.replace(w, text="", highlight=None)))
-                room = int(budget_tokens * CHARS_PER_TOKEN) - frame - CONTEXT_MARGIN_CHARS - 8
-                trimmed = dataclasses.replace(w, highlight=(0, max(1, min(len(w.text), room))))
-                cost = _cost(trimmed)
-            chosen[idx] = trimmed
-            used += cost
-
+    chosen, used = _allocate_ranked_windows(section_lists, max_windows, budget_tokens)
     if not chosen:
         return select_windows(windows, query, budget_tokens=budget_tokens, max_windows=max_windows)
 
@@ -1275,9 +1326,9 @@ class Pipeline:
         """Generate and audit; returns the mode, sentences, calls and extractive spans."""
         masked_query = _mask_query(norm_text, masked)
 
-        gen_ready = _available(self.rotation, "generate")
-        judge_ready = _available(self.rotation, "judge")
-        if not gen_ready or not judge_ready:
+        if not (gen_ready := _available(self.rotation, "generate")) or not _available(
+            self.rotation, "judge"
+        ):
             reason: ExtractiveReason = (
                 "provider_warming" if _warming(self.rotation) else "providers_unavailable"
             )
@@ -1309,12 +1360,8 @@ class Pipeline:
                 ):
                     stream(provider_fallback_notice())
             sentences.append(sentence)
-            unmasked_text = masked.unmask(sentence.text)
-            user_sentence = dataclasses.replace(sentence, text=unmasked_text)
-            stream(
-                SentenceEvent(
-                    sentence=user_sentence, citations=self._cite(sentence, by_id, read, provisions)
-                )
+            self._deliver_sentence(
+                stream, sentence, by_id=by_id, read=read, provisions=provisions, masked=masked
             )
 
         use_modal = self.modal_kv is not None and gen_ready[0] == self.modal_kv.provider
@@ -1339,6 +1386,8 @@ class Pipeline:
                     windows=windows,
                     mode=self.config.mode,
                     on_sentence=lambda s: deliver(s, modal_gen.calls),
+                    started=request.started,
+                    answer_budget_s=self.config.generation.answer_budget_s,
                 )
                 generator = modal_gen
                 for _ in modal_gen:  # sentences were delivered by on_sentence as decided
@@ -1353,28 +1402,90 @@ class Pipeline:
                     windows=windows,
                     mode=self.config.mode,
                     settings=self.config.generation,
+                    started=request.started,
+                    answer_budget_s=self.config.generation.answer_budget_s,
                 )
                 generator = chat_gen
                 for sentence in chat_gen:
                     deliver(sentence, chat_gen.calls)
         except AllProvidersUnavailable as exc:
             stream.outcome.failures.extend(f"{f.provider}:{f.kind}" for f in exc.failures)
-            done_calls = merge_calls(
-                generator.calls if generator is not None else (), judge_chat.calls
+            if generator is not None and generator.stop_reason is not None:
+                stream.outcome.stop_reason = generator.stop_reason
+            warming = any(isinstance(f, ProviderWarming) for f in exc.failures)
+            reason = "provider_warming" if warming else "providers_unavailable"
+            return self._incomplete_answer(
+                stream,
+                request,
+                windows=windows,
+                norm_text=norm_text,
+                sentences=sentences,
+                generator=generator,
+                judge_chat=judge_chat,
+                reason=reason,
             )
-            if not sentences:
-                warming = any(isinstance(f, ProviderWarming) for f in exc.failures)
-                reason = "provider_warming" if warming else "providers_unavailable"
-                return (
-                    "extractive",
-                    (),
-                    done_calls,
-                    self._extractive(stream, request, windows, reason, query=norm_text),
-                )
-            stream(INCOMPLETE_NOTICE)
-            return "generated", tuple(sentences), done_calls, {}
         assert generator is not None  # noqa: S101 - set before iterating
+        stream.outcome.stop_reason = generator.stop_reason
+        if generator.stop_reason == "time_budget":
+            if not sentences:
+                stream.outcome.failures.append("time_budget")
+            return self._incomplete_answer(
+                stream,
+                request,
+                windows=windows,
+                norm_text=norm_text,
+                sentences=sentences,
+                generator=generator,
+                judge_chat=judge_chat,
+                reason="providers_unavailable",
+            )
         return "generated", tuple(sentences), merge_calls(generator.calls, judge_chat.calls), {}
+
+    def _deliver_sentence(
+        self,
+        stream: _Stream,
+        sentence: SentenceOut,
+        *,
+        by_id: Mapping[str, Window],
+        read: _Read,
+        provisions: Mapping[Coordinate, Mapping[str, Any]],
+        masked: Masked,
+    ) -> None:
+        unmasked_text = masked.unmask(sentence.text)
+        user_sentence = dataclasses.replace(sentence, text=unmasked_text)
+        stream(
+            SentenceEvent(
+                sentence=user_sentence, citations=self._cite(sentence, by_id, read, provisions)
+            )
+        )
+
+    def _incomplete_answer(
+        self,
+        stream: _Stream,
+        request: AskRequest,
+        *,
+        windows: Sequence[Window],
+        norm_text: str,
+        sentences: Sequence[SentenceOut],
+        generator: ChatContinuationGenerator | ModalPathGenerator | None,
+        judge_chat: RotationJudgeChat,
+        reason: ExtractiveReason,
+    ) -> tuple[
+        AnswerMode,
+        tuple[SentenceOut, ...],
+        tuple[ProviderCall, ...],
+        dict[Coordinate, tuple[int, int]],
+    ]:
+        done_calls = merge_calls(generator.calls if generator is not None else (), judge_chat.calls)
+        if not sentences:
+            return (
+                "extractive",
+                (),
+                done_calls,
+                self._extractive(stream, request, windows, reason, query=norm_text),
+            )
+        stream(INCOMPLETE_NOTICE)
+        return "generated", tuple(sentences), done_calls, {}
 
     def _extractive(
         self,

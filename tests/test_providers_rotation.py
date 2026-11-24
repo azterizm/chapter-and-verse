@@ -859,3 +859,21 @@ def test_r2_4_budget_stops_at_cap() -> None:
         assert res3.provider == "cloudflare"
         # Total slept remains 16s, exactly capped
         assert slept == [pytest.approx(8.0), pytest.approx(8.0)]
+
+
+def test_slow_provider_times_out_and_moves_on_without_opening_breaker() -> None:
+    slow_groq = Fake("groq", ProviderUnavailable("groq", "timeout", detail="ReadTimeout"))
+    fast_cf = Fake("cloudflare", "ok")
+    rot = ProviderRotation([slow_groq, fast_cf], generate=["groq", "cloudflare"])
+
+    # Breaker initially closed
+    assert rot.breaker("groq").state == "closed"
+    assert rot.breaker("groq")._failures == 0
+
+    # Call times out on Groq and moves on to Cloudflare within rotation
+    result = rot.complete(req("generate"))
+    assert result.provider == "cloudflare"
+
+    # Circuit breaker on Groq recorded 1 failure, but does NOT open on ONE timeout (threshold is 3)
+    assert rot.breaker("groq").state == "closed"
+    assert rot.breaker("groq")._failures == 1

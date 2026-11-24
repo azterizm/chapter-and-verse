@@ -10,8 +10,11 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from legal_rag_router import Router
+from legal_rag_router.concepts import PRIOR_FLAGS
 from legal_rag_router.coordinate import Coordinate as RouterCoordinate
+from legal_rag_router.discovery import DEFAULT_DISCOVERY
 from legal_rag_router.result import Candidate, NextAction, RouteResult, RouteStatus
+from legal_rag_verifier.premise import Premise
 
 if TYPE_CHECKING:
     from tests.test_pipeline import POLICY, CountingStore, of, receipt, run
@@ -36,10 +39,12 @@ from chapterverse.contracts import (
 )
 from chapterverse.dense.store import BinaryInt8Store
 from chapterverse.pipeline import (
+    TOP_SECTION_WINDOWS,
     Pipeline,
     select_ranked_windows,
 )
 from chapterverse.store.manifest import sha256_file
+from chapterverse.windows import build_windows
 
 
 def _get_concepts(router: Router) -> Any:
@@ -285,6 +290,125 @@ def test_select_ranked_windows_highlight_first_within_section() -> None:
     # Highlighted window w2 was picked first
     assert selection.windows[0].coordinate == "uk/ukpga/1980/58/s2/1"
     assert selection.windows[0].highlight is not None
+
+
+def test_rank_sections_scotland_prior_demotion(fixture_router: Router) -> None:
+    """R7: a Scotland-flagged section is demoted, and not demoted when query names Scotland."""
+    raw_concepts = _get_concepts(fixture_router)
+    ranges = build_instrument_ranges(raw_concepts)
+    start_doc, _end_doc = ranges["uk/ukpga/1996/18"]
+
+    # Let doc 1 (s98) have the scotland flag set
+    scotland_bit = 1 << PRIOR_FLAGS.index("scotland")
+
+    class ScotlandConceptProxy:
+        def __init__(self, target: Any) -> None:
+            self._target = target
+
+        def prior(self, doc_id: int) -> tuple[int, int]:
+            flags, deg = self._target.prior(doc_id)
+            if doc_id == start_doc + 1:  # s98
+                flags |= scotland_bit
+            return flags, deg
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._target, name)
+
+    concepts: Any = ScotlandConceptProxy(raw_concepts)
+
+    # Without Scotland in query: s98 is demoted by Scotland penalty
+    results_no_scotland = rank_sections(
+        "dismissal capability conduct redundancy",
+        "uk/ukpga/1996/18",
+        concepts=concepts,
+        ranges=ranges,
+        dense=None,
+    )
+    s98_score_demoted = next(score for coord, score in results_no_scotland if "s98" in coord)
+
+    # With Scotland in query: Scotland penalty is lifted
+    results_with_scotland = rank_sections(
+        "dismissal capability conduct redundancy in Scotland",
+        "uk/ukpga/1996/18",
+        concepts=concepts,
+        ranges=ranges,
+        dense=None,
+    )
+    s98_score_lifted = next(score for coord, score in results_with_scotland if "s98" in coord)
+
+    # Score is higher when lifted than when demoted
+    assert s98_score_lifted > s98_score_demoted
+    penalty = DEFAULT_DISCOVERY.prior_penalties[PRIOR_FLAGS.index("scotland")]
+    assert abs(s98_score_demoted - s98_score_lifted * penalty) < 1e-4
+
+    # Also test with 'scottish'
+    results_scottish = rank_sections(
+        "scottish dismissal capability conduct redundancy",
+        "uk/ukpga/1996/18",
+        concepts=concepts,
+        ranges=ranges,
+        dense=None,
+    )
+    s98_score_scottish = next(score for coord, score in results_scottish if "s98" in coord)
+    assert abs(s98_score_scottish - s98_score_lifted) < 1e-4
+
+
+def test_select_ranked_windows_rounds_on_fixture(fixture_text_store: TextStore) -> None:
+    """R8: window allocation over ranked sections runs in three rounds on fixture."""
+    rows = fixture_text_store.get("uk/ukpga/1996/18")
+    premise = Premise.from_records(rows)
+    all_windows = build_windows(premise, rows)
+    assert len(all_windows) > 20
+
+    # s123 has 9 windows, s122 has 6 windows, s98 has 5 windows
+    ranked = [
+        ("uk/ukpga/1996/18/s123", 1.0),
+        ("uk/ukpga/1996/18/s122", 0.8),
+        ("uk/ukpga/1996/18/s98", 0.6),
+    ]
+
+    # Test with max_windows = 5:
+    # Round 1: s123 gets up to TOP_SECTION_WINDOWS (3) windows
+    # Round 2: s122 gets 1 window, s98 gets 1 window (total 5 -> cap reached)
+    sel5 = select_ranked_windows(
+        all_windows,
+        ranked,
+        "compensatory award calculation",
+        budget_tokens=5000,
+        max_windows=5,
+    )
+    assert sel5.strategy == "ranked"
+    assert len(sel5.windows) == 5
+
+    s123_windows = [w for w in sel5.windows if "s123" in w.coordinate]
+    s122_windows = [w for w in sel5.windows if "s122" in w.coordinate]
+    s98_windows = [w for w in sel5.windows if "s98" in w.coordinate]
+
+    assert len(s123_windows) == TOP_SECTION_WINDOWS  # 3
+    assert len(s122_windows) == 1
+    assert len(s98_windows) == 1
+
+    # Store order preserved: s98 comes before s122, which comes before s123
+    all_coords = [w.coordinate for w in all_windows]
+    coords = [w.coordinate for w in sel5.windows]
+    assert coords == sorted(coords, key=all_coords.index)
+
+    # Test with max_windows = 8:
+    # Round 1: s123 gets 3 windows
+    # Round 2: s122 gets 1 window, s98 gets 1 window (total 5)
+    # Round 3: remaining 3 slots go to further windows in rank order:
+    #   s123 gets 3 more windows (total 6) -> cap 8 reached
+    sel8 = select_ranked_windows(
+        all_windows,
+        ranked,
+        "compensatory award calculation",
+        budget_tokens=8000,
+        max_windows=8,
+    )
+    assert len(sel8.windows) == 8
+    assert len([w for w in sel8.windows if "s123" in w.coordinate]) == 6
+    assert len([w for w in sel8.windows if "s122" in w.coordinate]) == 1
+    assert len([w for w in sel8.windows if "s98" in w.coordinate]) == 1
 
 
 # ------------------------------------------------ 6. Fallback when Ranges not Ready
