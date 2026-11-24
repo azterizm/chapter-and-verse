@@ -13,11 +13,10 @@ from typing import Final
 from legal_rag_verifier.judge import STRICT_FIGURES
 from legal_rag_verifier.verifier import VerifierConfig
 
+from chapterverse.audit.prompt import ABSTAIN_TEXT, PROMPT_SHA256
 from chapterverse.contracts import Policy
 
 __all__ = ["ABSTAIN_TEXT", "VERIFIER_CONFIGS", "build_policy", "verifier_config"]
-
-ABSTAIN_TEXT: Final = "I can't confirm this from the law I found, so I won't guess."
 
 VERIFIER_CONFIGS: Final[dict[str, VerifierConfig]] = {"STRICT_FIGURES": STRICT_FIGURES}
 """Verifier configs a policy may name. Only the measured one."""
@@ -31,9 +30,6 @@ def build_policy(judge_preset: str) -> Policy:
     """
     if not judge_preset.strip():
         raise ValueError("judge_preset must name a judge preset")
-    from chapterverse.audit.prompt import (  # noqa: PLC0415 - circular import: prompt needs ABSTAIN_TEXT
-        PROMPT_SHA256,
-    )
 
     return Policy(
         judge_preset=judge_preset,

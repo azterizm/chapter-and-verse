@@ -73,6 +73,7 @@ from chapterverse.audit.prompt import (
     Prompt,
     SessionState,
     build_prompt,
+    is_abstention,
     render_source,
     window_positions,
 )
@@ -254,19 +255,24 @@ class ChatContinuationGenerator:
             sentences, _ = split_block(result.text, final=result.finish_reason == "stop")
             rejected: SentenceVerdict | None = None
             for raw in sentences:
-                verdict = verifier.check_sentence(self.premise, raw, query=self.query)
-                if not verdict.emitted:
-                    rejected = verdict
-                    break
+                if is_abstention(raw):
+                    self.stop_reason = "abstained"
+                    if not state.refused:
+                        state.refused = True
+                        yield self._refuse_abstention(state)
+                    return
                 text, pids = split_refs(raw)
                 cited = tuple(self.by_id[p].text for p in pids if p in self.by_id)
                 if is_narration(text, cited):
                     self.stop_reason = "abstained"
                     if not state.refused:
                         state.refused = True
-                        narration_refusal = self._refuse_narration(state, verdict)
-                        yield narration_refusal
+                        yield self._refuse_narration(state)
                     return
+                verdict = verifier.check_sentence(self.premise, raw, query=self.query)
+                if not verdict.emitted:
+                    rejected = verdict
+                    break
                 state.commit(raw)
                 state.answer_chars += len(verdict.text) + 1
                 yield self._emitted(state, raw, verdict)
@@ -359,19 +365,32 @@ class ChatContinuationGenerator:
         state.point = 0
         return out
 
-    def _refuse_narration(self, state: _State, verdict: SentenceVerdict) -> SentenceOut:
+    def _refuse_abstention(self, state: _State) -> SentenceOut:
         refusal = self.policy.refusal_text
         state.commit(refusal)
         state.answer_chars += len(refusal) + 1
-        reasons = tuple(
-            dict.fromkeys((*reason_codes(verdict.reasons, verdict.details), "NARRATION"))
-        )
         out = SentenceOut(
             index=state.index,
             text=refusal,
             verdict="refused",
             passage_ids=(),
-            reasons=reasons,
+            reasons=("ABSTAINED",),
+            rollbacks=state.point,
+        )
+        state.index += 1
+        state.point = 0
+        return out
+
+    def _refuse_narration(self, state: _State) -> SentenceOut:
+        refusal = self.policy.refusal_text
+        state.commit(refusal)
+        state.answer_chars += len(refusal) + 1
+        out = SentenceOut(
+            index=state.index,
+            text=refusal,
+            verdict="refused",
+            passage_ids=(),
+            reasons=("NARRATION",),
             rollbacks=state.point,
         )
         state.index += 1

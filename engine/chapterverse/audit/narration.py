@@ -9,7 +9,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Final
 
-__all__ = ["ABSENCE_PHRASES", "INPUT_PHRASES", "is_narration"]
+from chapterverse.audit.prompt import is_abstention
+
+__all__ = ["ABSENCE_PHRASES", "INPUT_PHRASES", "is_abstention", "is_narration"]
 
 # Phrases referring to the provided inputs or text excerpts.
 INPUT_PHRASES: Final[tuple[str, ...]] = (

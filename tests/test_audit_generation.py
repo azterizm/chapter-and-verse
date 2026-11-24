@@ -306,16 +306,39 @@ def test_narration_sentence_that_passed_judge_becomes_abstain_text(
     run_chat: Callable[..., Run],
 ) -> None:
     narration_sentence = "The provided passages do not state the general limitation period [P1]."
-    out, _rotation, _judge, gen = run_chat([(narration_sentence, "stop")])
+    out, _rotation, judge, gen = run_chat([(narration_sentence, "stop")])
     assert len(out) == 1
     assert out[0] == SentenceOut(
         0,
         ABSTAIN_TEXT,
         "refused",
         (),
-        ("GROUNDED", "NARRATION"),
+        ("NARRATION",),
         0,
     )
+    assert judge.sentences == []
+    assert [c for c in gen.calls if c.purpose == "judge"] == []
+    assert gen.stop_reason == "abstained"
+
+
+@pytest.mark.parametrize(
+    "drafted",
+    [
+        ABSTAIN_TEXT,
+        f"{ABSTAIN_TEXT} [P1]",
+        f"{ABSTAIN_TEXT[:-1]} [P1].",
+        ABSTAIN_TEXT.upper(),
+        ABSTAIN_TEXT.lower(),
+        ABSTAIN_TEXT[:-1],
+    ],
+)
+def test_chat_drafted_abstention_gives_one_refusal_and_zero_judge_calls(
+    run_chat: Callable[..., Run], drafted: str
+) -> None:
+    out, _rotation, judge, gen = run_chat([(drafted, "stop")])
+    assert out == [SentenceOut(0, ABSTAIN_TEXT, "refused", (), ("ABSTAINED",), 0)]
+    assert judge.sentences == []
+    assert [c for c in gen.calls if c.purpose == "judge"] == []
     assert gen.stop_reason == "abstained"
 
 
@@ -552,7 +575,7 @@ def test_modal_narration_sentence_becomes_abstain_text(
     premise: Premise, windows: tuple[Window, ...], policy: Policy
 ) -> None:
     narration_sentence = "The provided passages do not state the general limitation period [P1]."
-    gen, _, _judge, streamed = modal({"": narration_sentence}, premise, windows, policy)
+    gen, _, judge, streamed = modal({"": narration_sentence}, premise, windows, policy)
     out = list(gen)
     assert out == [
         SentenceOut(
@@ -560,11 +583,36 @@ def test_modal_narration_sentence_becomes_abstain_text(
             ABSTAIN_TEXT,
             "refused",
             (),
-            ("GROUNDED", "NARRATION"),
+            ("NARRATION",),
             0,
         )
     ]
     assert streamed == out
+    assert judge.sentences == []
+    assert [c for c in gen.calls if c.purpose == "judge"] == []
+    assert gen.stop_reason == "abstained"
+
+
+@pytest.mark.parametrize(
+    "drafted",
+    [
+        ABSTAIN_TEXT,
+        f"{ABSTAIN_TEXT} [P1]",
+        f"{ABSTAIN_TEXT[:-1]} [P1].",
+        ABSTAIN_TEXT.upper(),
+        ABSTAIN_TEXT.lower(),
+        ABSTAIN_TEXT[:-1],
+    ],
+)
+def test_modal_drafted_abstention_gives_one_refusal_and_zero_judge_calls(
+    premise: Premise, windows: tuple[Window, ...], policy: Policy, drafted: str
+) -> None:
+    gen, _, judge, streamed = modal({"": drafted}, premise, windows, policy)
+    out = list(gen)
+    assert out == [SentenceOut(0, ABSTAIN_TEXT, "refused", (), ("ABSTAINED",), 0)]
+    assert streamed == out
+    assert judge.sentences == []
+    assert [c for c in gen.calls if c.purpose == "judge"] == []
     assert gen.stop_reason == "abstained"
 
 

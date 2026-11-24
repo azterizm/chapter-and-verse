@@ -19,6 +19,7 @@ from chapterverse.audit.prompt import (
     SessionState,
     build_prompt,
     estimate_tokens,
+    is_abstention,
     render_source,
     trim_window_text,
     window_positions,
@@ -196,3 +197,39 @@ def test_policy_rejects_bad_names() -> None:
     policy = Policy(judge_preset="x", prompt_sha256=PROMPT_SHA256, verifier_config_name="LOOSE")
     with pytest.raises(ValueError, match="unknown verifier config"):
         verifier_config(policy)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        ABSTAIN_TEXT,
+        ABSTAIN_TEXT[:-1],  # no final period
+        f"  {ABSTAIN_TEXT}  ",
+        "i can't confirm this from the law i found, so i won't guess.",
+        "I CAN'T CONFIRM THIS FROM THE LAW I FOUND, SO I WON'T GUESS.",
+        "I CAN'T CONFIRM THIS FROM THE LAW I FOUND, SO I WON'T GUESS",
+        f"{ABSTAIN_TEXT} [P1]",
+        f"{ABSTAIN_TEXT[:-1]} [P1].",
+        f"{ABSTAIN_TEXT} [P1, P2]",
+        f'"{ABSTAIN_TEXT}"',
+        # curly apostrophes
+        "I can\u2019t confirm this from the law I found, so I won\u2019t guess.",
+        "I   can't   confirm this from the law I found,   so I won't guess [p1].",
+    ],
+)
+def test_is_abstention_positive(text: str) -> None:
+    assert is_abstention(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "I can't confirm this.",
+        "The provided passages do not state the answer.",
+        "The compensatory award cannot exceed £123,543 [P1].",
+        "Section 2 sets six years.",
+    ],
+)
+def test_is_abstention_negative(text: str) -> None:
+    assert is_abstention(text) is False

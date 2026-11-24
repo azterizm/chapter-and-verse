@@ -35,7 +35,7 @@ from typing import Final
 from legal_rag_verifier.engine import INJECT_TEMPLATE
 from legal_rag_verifier.premise import Premise
 
-from chapterverse.audit.policy import ABSTAIN_TEXT
+from chapterverse.audit.refs import split_refs
 from chapterverse.contracts import (
     ChatMessage,
     ChatMode,
@@ -46,6 +46,7 @@ from chapterverse.contracts import (
 )
 
 __all__ = [
+    "ABSTAIN_TEXT",
     "CHARS_PER_TOKEN",
     "CONTEXT_MARGIN_CHARS",
     "ELLIPSIS",
@@ -61,11 +62,14 @@ __all__ = [
     "SessionState",
     "build_prompt",
     "estimate_tokens",
+    "is_abstention",
     "render_passage",
     "render_source",
     "trim_window_text",
     "window_positions",
 ]
+
+ABSTAIN_TEXT: Final = "I can't confirm this from the law I found, so I won't guess."
 
 CONTEXT_MARGIN_CHARS: Final = 300
 """Characters kept on each side of a window's highlight span."""
@@ -140,6 +144,21 @@ PROMPT_SHA256: Final = sha256_hex(canonical_json(_TEMPLATE_PARTS))
 """sha256 hex of the canonical JSON of every fixed prompt string. Goes in ``Policy``."""
 
 _PASSAGE_ID = re.compile(r"P[1-9]\d*")
+
+
+def _fold_abstention(s: str) -> str:
+    cleaned, _ = split_refs(s)
+    cleaned = re.sub(r"\[\s*[Pp]\d+\s*\]", "", cleaned).strip()
+    if cleaned.startswith(('"', "“")) and cleaned.endswith(('"', "”")):
+        cleaned = cleaned[1:-1].strip()
+    if cleaned.endswith("."):
+        cleaned = cleaned[:-1].strip()
+    return " ".join(cleaned.replace("\u2019", "'").casefold().split())
+
+
+def is_abstention(text: str, abstain_text: str = ABSTAIN_TEXT) -> bool:
+    """True when text folded equals abstain_text folded (ignoring [P#] and final full stop)."""
+    return _fold_abstention(text) == _fold_abstention(abstain_text)
 
 
 @dataclass(frozen=True, slots=True)
