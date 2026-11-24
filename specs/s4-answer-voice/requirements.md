@@ -22,3 +22,10 @@ Wanted voice: a careful lawyer or librarian answering the person directly. Lead 
 - R10 Narration check before the judge: in both generators, run `is_narration` on the drafted sentence (with the cited windows' texts) BEFORE `check_sentence`, so a narration draft costs no judge call. Behaviour otherwise as R3 (commit the abstention, reason "NARRATION", stop).
 - R11 Circular import: move `ABSTAIN_TEXT` into `audit/prompt.py` (beside the template that uses it); `audit/policy.py` imports it from there at module level and re-exports it; remove the function-level import in `build_policy`. `PROMPT_SHA256` must stay `7264c2bee465b48512cec143f4dec31f59ac88fc8551c84cb80c67d53f625219` (the text does not change).
 - R12 Tests for R9 and R10 in both generators: a drafted abstention (with and without a stray [P1], different case) gives one refusal and zero judge calls; a narration draft gives zero judge calls; counts of judge calls asserted through the fake judge.
+
+## Follow-up 2 (local answer run, 24 Nov, L09)
+
+"How long is the short-term right to reject under the Consumer Rights Act 2015?": s.22(3) reached the model. Draft 1 stated 30 days but dropped "unless subsection (4) applies"; the judge rejected it (QUALIFIER_DROPPED, correct). On the retry the model drafted `ABSTAIN_TEXT`, which R9 commits at once, so the answer ended after 1 of 3 retries.
+
+- R13 A drafted abstention is committed at once only on the first attempt at a point (`state.point == 0`). During a retry (`state.point > 0`) it counts as a rollback with reason code "ABSTAIN_ON_RETRY" and no judge call, through the normal `_rollback` path (steering, budgets, and the final refusal when the budget is spent, which is the same text). Same in both generators.
+- R14 Tests in both generators: draft 1 rejected by the fake judge, draft 2 the abstention, draft 3 a supported sentence: the answer is draft 3 and the judge saw drafts 1 and 3 only; abstention on the first attempt still commits at once with zero judge calls.
