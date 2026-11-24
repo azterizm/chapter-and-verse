@@ -99,11 +99,11 @@ describe("StatusBadge", () => {
     expect(screen.getByText("Text not held")).toBeInTheDocument();
   });
 
-  it("strikes through the heading when a source is repealed", () => {
+  it("strikes through the provision label when a source is repealed", () => {
     const win = makeWindow({ status: "REPEALED" });
     render(<SourceCard window={win} turnId={1} />);
-    const heading = screen.getByRole("heading", { level: 3, name: win.heading });
-    expect(heading).toHaveClass("line-through");
+    const label = screen.getByText("s.124(1)");
+    expect(label).toHaveClass("line-through", "text-muted-foreground");
     expect(screen.getByText("Repealed")).toBeInTheDocument();
   });
 });
@@ -115,7 +115,7 @@ describe("WindowText", () => {
     );
     const mark = screen.getByText("beta");
     expect(mark.tagName).toBe("MARK");
-    expect(mark).toHaveClass("bg-primary-soft", "decoration-primary");
+    expect(mark).toHaveClass("bg-primary-soft", "text-foreground", "underline", "decoration-primary", "decoration-2");
     expect(mark).not.toHaveClass("jump-to-source");
 
     rerender(<WindowText text="Alpha beta gamma" highlight={[6, 10]} pulsing={true} />);
@@ -124,6 +124,32 @@ describe("WindowText", () => {
 });
 
 describe("SourcePanel and SourceCard", () => {
+  it("shows provision label untruncated, truncated heading if present, and instrument name on line 2", () => {
+    const withHeading = makeWindow({
+      heading: "Employment Rights Act 1996, section 124(1) (Limit of compensatory award etc)",
+      coordinate: "uk/ukpga/1996/18/s124/1",
+    });
+    const { rerender } = render(<SourceCard window={withHeading} turnId={1} />);
+
+    const prov = screen.getByText("s.124(1)");
+    expect(prov).toHaveClass("shrink-0", "text-ui", "font-bold");
+    expect(prov).not.toHaveClass("truncate");
+
+    const subheading = screen.getByText("Limit of compensatory award etc");
+    expect(subheading).toHaveClass("truncate", "text-ui", "text-muted-foreground");
+
+    const instrument = screen.getByText("Employment Rights Act 1996");
+    expect(instrument).toHaveClass("text-caption", "text-muted-foreground");
+
+    const withoutHeading = makeWindow({
+      heading: "Limitation Act 1980, section 2",
+      coordinate: "uk/ukpga/1980/58/s2",
+    });
+    rerender(<SourceCard window={withoutHeading} turnId={1} />);
+    expect(screen.getByText("s.2")).toHaveClass("shrink-0", "font-bold");
+    expect(screen.getByText("Limitation Act 1980")).toHaveClass("text-caption", "text-muted-foreground");
+  });
+
   it("keeps collapsed cards mounted in the DOM with aria-expanded and aria-controls", () => {
     const turn = makeTurn();
     render(<SourcePanel turn={turn} />);
@@ -158,7 +184,7 @@ describe("SourcePanel and SourceCard", () => {
     render(<SourcePanel turn={turn} />);
 
     const p1Card = document.getElementById(windowAnchor(1, "P1")) as HTMLElement;
-    const trigger = within(p1Card).getByRole("button", { name: /section 124\(1\)/i });
+    const trigger = within(p1Card).getByRole("button", { name: /s\.124\(1\)/i });
     const controlsId = trigger.getAttribute("aria-controls") ?? "";
     const content = document.getElementById(controlsId);
 

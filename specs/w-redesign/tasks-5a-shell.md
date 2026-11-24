@@ -4,6 +4,6 @@ Fix review-1.md items 1, 2, 3, 4, 8. Files you own: `web/src/styles.css` (delete
 
 Allowed shell commands: exactly as in tasks-1-foundation.md.
 
-- [ ] 1. Read `specs/w-redesign/review-1.md`, `design.md`, the files you own.
-- [ ] 2. Items 1 to 4 and 8; update tests you own.
-- [ ] 3. Run the four npm scripts. Print a short summary.
+- [x] 1. Read `specs/w-redesign/review-1.md`, `design.md`, the files you own.
+- [x] 2. Items 1 to 4 and 8; update tests you own.
+- [x] 3. Run the four npm scripts. Print a short summary.

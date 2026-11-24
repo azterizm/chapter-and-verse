@@ -385,4 +385,15 @@ describe("design token contrast (WCAG AA)", () => {
     expect(contrastRatio(primary, surface)).toBeGreaterThanOrEqual(3.0);
     expect(contrastRatio(ring, bg)).toBeGreaterThanOrEqual(3.0);
   });
+
+  it("removes styles.css from main.tsx and uses Satoshi and print rules in index.css", () => {
+    const localMain = resolve(process.cwd(), "src/main.tsx");
+    const mainPath = existsSync(localMain) ? localMain : resolve(process.cwd(), "web/src/main.tsx");
+    const mainSource = readFileSync(mainPath, "utf8");
+
+    expect(mainSource).not.toContain("styles.css");
+    expect(css).toContain('"Satoshi"');
+    expect(css).toContain("font-family: var(--font-sans)");
+    expect(css).toContain("@media print");
+  });
 });

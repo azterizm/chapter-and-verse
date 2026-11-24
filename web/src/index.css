@@ -104,10 +104,17 @@
   }
 
   body {
+    margin: 0;
     background-color: var(--background);
     color: var(--foreground);
     font-family: var(--font-sans);
+    overflow-wrap: break-word;
     -webkit-font-smoothing: antialiased;
+  }
+
+  mark {
+    background-color: var(--primary-soft);
+    color: inherit;
   }
 
   :focus-visible {
@@ -312,5 +319,18 @@
   .toast-in {
     animation-duration: 0.01ms;
     transition-duration: 0.01ms;
+  }
+}
+
+@media print {
+  [data-skip-link],
+  [data-composer-dock] {
+    display: none;
+  }
+
+  [data-sources-column] {
+    position: static;
+    max-height: none;
+    overflow: visible;
   }
 }

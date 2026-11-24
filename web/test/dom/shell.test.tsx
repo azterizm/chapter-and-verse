@@ -101,6 +101,17 @@ describe("App empty state and shell", () => {
     const buttons = within(list).getAllByRole("button");
     expect(buttons).toHaveLength(3);
     expect(buttons.map((b) => b.textContent)).toEqual([...EXAMPLE_QUESTIONS]);
+
+    // Flex column shell: min-h-dvh, main grows, composer docked at bottom inside main, footer after.
+    const mainEl = screen.getByRole("main");
+    const shell = mainEl.closest(".min-h-dvh");
+    expect(shell).toHaveClass("flex", "flex-col");
+    expect(mainEl).toHaveClass("flex", "w-full", "flex-1", "flex-col");
+
+    const dock = mainEl.querySelector("[data-composer-dock]");
+    expect(dock).not.toBeNull();
+    expect(dock).toHaveClass("sticky", "bottom-0", "mt-auto");
+    expect(mainEl.closest(".max-w-\\[728px\\]")).not.toBeNull();
   });
 
   it("fills and focuses the composer when an example is clicked without sending", async () => {
@@ -250,10 +261,29 @@ describe("App empty state and shell", () => {
     // Earlier answer's sources move inline inside <main>; active answer stays in sticky column.
     expect(mainEl.contains(earlierWindow)).toBe(true);
     expect(mainEl.contains(activeWindow)).toBe(false);
+
+    // Desktop layout keeps 680px conversation + 32px gap + 360px sticky sources, with growing main.
+    const gridEl = mainEl.parentElement;
+    expect(gridEl).toHaveClass("lg:grid-cols-[minmax(0,680px)_360px]", "lg:gap-8");
+    expect(gridEl).not.toHaveClass("lg:items-start");
+    expect(mainEl.closest(".lg\\:max-w-\\[1120px\\]")).not.toBeNull();
+
+    const sourcesCol = activeWindow?.closest("[data-sources-column]");
+    expect(sourcesCol).toHaveClass("lg:sticky", "lg:self-start");
   });
 });
 
 describe("QueryBox", () => {
+  it("puts the focus ring only on the composer pill and not on the inner textarea", () => {
+    const inputRef = createRef<HTMLTextAreaElement>();
+    render(<QueryBox busy={false} blocked={null} onAsk={vi.fn()} inputRef={inputRef} />);
+
+    const textarea = screen.getByPlaceholderText(COMPOSER_PLACEHOLDER);
+    const pill = textarea.parentElement;
+    expect(pill).toHaveClass("focus-within:outline-2", "focus-within:outline-ring");
+    expect(textarea).toHaveClass("outline-none", "focus:outline-none", "focus-visible:outline-none");
+  });
+
   it("disables send when empty or busy, sends on Enter, and inserts newline on Shift+Enter", async () => {
     const user = userEvent.setup();
     const onAsk = vi.fn();
@@ -307,9 +337,15 @@ describe("Footer and theme control", () => {
     render(<Footer snapshot="2026-09-28" />);
 
     const group = screen.getByRole("group", { name: THEME_LABEL });
+    expect(group).toHaveClass("h-8");
     const systemBtn = within(group).getByRole("button", { name: THEME_SYSTEM });
     const lightBtn = within(group).getByRole("button", { name: THEME_LIGHT });
     const darkBtn = within(group).getByRole("button", { name: THEME_DARK });
+
+    for (const btn of [systemBtn, lightBtn, darkBtn]) {
+      expect(btn.textContent).toBe("");
+      expect(btn.querySelector("svg")).not.toBeNull();
+    }
 
     expect(systemBtn).toHaveAttribute("aria-pressed", "true");
     expect(document.documentElement.classList.contains("dark")).toBe(false);

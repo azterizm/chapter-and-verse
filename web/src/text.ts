@@ -157,6 +157,7 @@ export const STOPPED_TEXT = "Stopped.";
 export const ERROR_SERVER_TITLE = "The server stopped this answer";
 export const ERROR_CLIENT_TITLE = "This answer failed";
 export const ACTION_RETRY = "Retry";
+export const ACTION_DETAILS = "Details";
 export const SUGGESTIONS_LABEL = "Did you mean";
 export const REFUSAL_LINK_LABEL = "Read on legislation.gov.uk";
 export const OPENS_NEW_TAB = " (opens in a new tab)";
@@ -166,6 +167,75 @@ export const citationShowTitle = (passageId: string): string => `Show ${passageI
 export const copyQuoteLabel = (heading: string): string => `Copy ${heading}`;
 export const refusalSnapshotText = (snapshot: string): string => `Corpus snapshot ${formatDate(snapshot)}.`;
 export const answerIdCopyLine = (answerId: string): string => `Answer id: ${answerId}`;
+
+export function formatDetailsTimings(firstSentenceMs: number | null, totalMs: number): string {
+  if (firstSentenceMs !== null) {
+    return `First sentence ${formatMs(firstSentenceMs)}, total ${formatMs(totalMs)}`;
+  }
+  return `Total ${formatMs(totalMs)}`;
+}
+
+const UNIT_PATTERNS: readonly { prefix: string; render: (rest: string) => string }[] = [
+  { prefix: "sch", render: (r) => (r ? `Sch. ${r}` : "Sch.") },
+  { prefix: "rule", render: (r) => (r ? `r. ${r}` : "r.") },
+  { prefix: "para", render: (r) => (r ? `para. ${r}` : "para.") },
+  { prefix: "group", render: (r) => (r ? `Group ${r}` : "Group") },
+  { prefix: "art", render: (r) => (r ? `art. ${r}` : "art.") },
+  { prefix: "reg", render: (r) => (r ? `reg. ${r}` : "reg.") },
+  { prefix: "app", render: (r) => (r ? `App. ${r}` : "App.") },
+  { prefix: "pt", render: (r) => (r ? `Pt. ${r}` : "Pt.") },
+  { prefix: "ch", render: (r) => (r ? `Ch. ${r}` : "Ch.") },
+  { prefix: "s", render: (r) => `s.${r}` },
+];
+
+export interface ParsedCoordinate {
+  instrument: string;
+  year: string | null;
+  provision: string;
+}
+
+/** Parse a UK coordinate into its instrument key, numeric year (if present), and short provision label. */
+export function parseUkCoordinate(coordinate: string): ParsedCoordinate | null {
+  const parts = coordinate.split("/");
+  if (parts[0] !== "uk" || parts.length < 4) return null;
+  const hasNumericYear = /^\d{4}$/.test(parts[2] ?? "");
+  const instLen = hasNumericYear ? 4 : 5;
+  if (parts.length < instLen) return null;
+  const instrument = parts.slice(0, instLen).join("/");
+  const year = hasNumericYear ? (parts[2] ?? null) : null;
+  const groups: string[] = [];
+  for (const seg of parts.slice(instLen)) {
+    const unit = UNIT_PATTERNS.find(
+      (u) =>
+        seg.startsWith(u.prefix) &&
+        (seg.length > u.prefix.length
+          ? /^[0-9A-Z.]/.test(seg.slice(u.prefix.length))
+          : groups.length === 0 && seg !== "s"),
+    );
+    if (unit) {
+      groups.push(unit.render(seg.slice(unit.prefix.length)));
+    } else if (groups.length > 0) {
+      groups[groups.length - 1] += `(${seg})`;
+    } else {
+      groups.push(`(${seg})`);
+    }
+  }
+  return { instrument, year, provision: groups.join(" ") };
+}
+
+export function citationInstrumentKey(coordinate: string, label: string): string {
+  return parseUkCoordinate(coordinate)?.instrument ?? label;
+}
+
+/** Short label for citation chips: provision only for one instrument, or provision plus year when multiple. */
+export function citationChipLabel(coordinate: string, label: string, showYear: boolean): string {
+  const parsed = parseUkCoordinate(coordinate);
+  const provision = parsed?.provision ?? "";
+  if (!provision) return label;
+  if (!showYear) return provision;
+  const year = parsed?.year ?? /\b(1[2-9]\d\d|20\d\d)\b/.exec(label)?.[1] ?? null;
+  return year ? `${provision} (${year})` : provision;
+}
 
 // W3 source strings
 export const SOURCE_STATUS_BADGE: Partial<Record<TemporalStatus, string>> = {
@@ -185,6 +255,56 @@ export function sourceVersionDate(formattedDate: string): string {
 
 export function formatSourceCopy(text: string, label: string, url: string): string {
   return `${text}\n\n${label}\n${url}`;
+}
+
+export interface SourceTitleParts {
+  provision: string;
+  provisionHeading: string | null;
+  instrument: string | null;
+}
+
+const HEADING_SPLIT_RE =
+  /^(.+?),\s+((?:section|article|regulation|rule|paragraph|schedule|part|chapter|group|appendix)\b.*)$/i;
+const TRAILING_PAREN_RE = /\s+\(([^()]*(?:\([^()]*\)[^()]*)*)\)$/;
+
+/** Split a source window heading and coordinate into provision label, optional heading, and instrument name. */
+export function parseSourceTitle(
+  heading: string,
+  coordinate: string,
+  citationLabel?: string,
+): SourceTitleParts {
+  const shortProv = parseUkCoordinate(coordinate)?.provision ?? "";
+  const trimmed = heading.trim();
+  const split = HEADING_SPLIT_RE.exec(trimmed);
+  if (split) {
+    const instrument = split[1]?.trim() || null;
+    const rest = split[2]?.trim() || "";
+    const paren = TRAILING_PAREN_RE.exec(rest);
+    const provisionHeading = paren?.[1]?.trim() || null;
+    const provFallback = paren ? rest.slice(0, paren.index).trim() : rest;
+    return {
+      provision: shortProv || provFallback,
+      provisionHeading,
+      instrument,
+    };
+  }
+  if (shortProv) {
+    const labelInst =
+      citationLabel && citationLabel.startsWith(`${shortProv} `)
+        ? citationLabel.slice(shortProv.length + 1).trim() || null
+        : null;
+    const fallbackInst = labelInst ?? (trimmed && trimmed !== shortProv ? trimmed : null);
+    return {
+      provision: shortProv,
+      provisionHeading: null,
+      instrument: fallbackInst,
+    };
+  }
+  return {
+    provision: trimmed || citationLabel || coordinate,
+    provisionHeading: null,
+    instrument: null,
+  };
 }
 
 // W4 shell strings

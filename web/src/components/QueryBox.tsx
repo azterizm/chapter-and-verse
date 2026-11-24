@@ -110,7 +110,7 @@ export function QueryBox({ busy, blocked, onAsk, inputRef, prefill }: Props) {
           aria-invalid={over}
           spellCheck
           autoComplete="off"
-          className="min-h-11 max-h-[178px] w-full flex-1 resize-none bg-transparent py-2 text-body text-foreground placeholder:text-muted-foreground focus:outline-none focus-visible:outline-none"
+          className="min-h-11 max-h-[178px] w-full flex-1 resize-none bg-transparent py-2 text-body text-foreground placeholder:text-muted-foreground outline-none focus:outline-none focus-visible:outline-none focus-visible:outline-0"
         />
         <Button type="submit" variant="primary" size="icon" disabled={!canSend} aria-label={SEND_LABEL}>
           <ArrowUp className="h-5 w-5" aria-hidden="true" />

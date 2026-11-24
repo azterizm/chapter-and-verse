@@ -25,10 +25,10 @@ export function StatusBadge({ status, id, className }: StatusBadgeProps) {
   return (
     <span
       id={id}
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1 rounded-full border border-muted-foreground px-2 py-0.5 text-caption text-muted-foreground whitespace-nowrap",
+      className={`text-caption ${cn(
+        "inline-flex shrink-0 items-center gap-1 rounded-full border border-muted-foreground px-2 py-0.5 text-muted-foreground whitespace-nowrap",
         className,
-      )}
+      )}`}
     >
       {Icon && <Icon className="size-3 shrink-0" aria-hidden="true" />}
       <span className="sr-only">{SOURCE_STATUS_PREFIX}</span>

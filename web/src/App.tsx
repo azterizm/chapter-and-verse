@@ -180,7 +180,7 @@ export function App() {
   const active = state.turns.find((t) => t.id === state.activeTurnId) ?? null;
 
   const composerDock = (
-    <div className="sticky bottom-0 z-20 mt-auto">
+    <div data-composer-dock="" className="sticky bottom-0 z-20 mt-auto print:hidden">
       <div className="pointer-events-none h-6 bg-gradient-to-b from-transparent to-background" aria-hidden="true" />
       <div className="bg-background pb-[max(1rem,env(safe-area-inset-bottom))]">
         {TURNSTILE_SITE_KEY && (
@@ -209,7 +209,8 @@ export function App() {
         <div className="flex min-h-dvh flex-col bg-background text-foreground">
           <a
             href="#q"
-            className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-2 focus:z-50 focus:rounded-lg focus:border focus:border-border focus:bg-surface focus:px-3 focus:py-2 focus:text-ui focus:text-foreground"
+            data-skip-link=""
+            className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-2 focus:z-50 focus:rounded-lg focus:border focus:border-border focus:bg-surface focus:px-3 focus:py-2 focus:text-ui focus:text-foreground print:hidden"
           >
             {SKIP_TO_COMPOSER}
           </a>
@@ -237,7 +238,7 @@ export function App() {
           <div
             className={cn(
               "mx-auto flex w-full flex-1 flex-col px-4 sm:px-6",
-              hasTurns ? "max-w-[728px] py-6 lg:max-w-[1120px]" : "max-w-[728px] pt-[12vh]",
+              hasTurns ? "max-w-[728px] pt-6 lg:max-w-[1120px]" : "max-w-[728px] pt-[12vh]",
             )}
           >
             {!hasTurns && (
@@ -250,10 +251,10 @@ export function App() {
             <div
               className={cn(
                 "flex flex-1 flex-col",
-                hasTurns && "lg:grid lg:grid-cols-[minmax(0,680px)_360px] lg:items-start lg:gap-8",
+                hasTurns && "lg:grid lg:grid-cols-[minmax(0,680px)_360px] lg:grid-rows-[minmax(0,1fr)] lg:gap-8",
               )}
             >
-              <main id="main" className="flex min-w-0 flex-1 flex-col">
+              <main id="main" className="flex w-full min-w-0 flex-1 flex-col">
                 <h1 className="sr-only">{MAIN_HEADING}</h1>
                 {!hasTurns ? (
                   <ul className="mb-8 flex flex-wrap gap-2" aria-label={EXAMPLES_LABEL}>
@@ -280,7 +281,13 @@ export function App() {
                           key={t.id}
                           className="space-y-6 border-b border-border pb-8 last:border-b-0 last:pb-0"
                         >
-                          <Turn turn={t} busy={isBlocked} onAsk={askQuery} onShowSource={showSource} />
+                          <Turn
+                            turn={t}
+                            busy={isBlocked}
+                            onAsk={askQuery}
+                            onShowSource={showSource}
+                            onNewQuestion={() => input.current?.focus()}
+                          />
                           {showInlineSources && (
                             <div>
                               <SourcePanel turn={t} />
@@ -295,7 +302,10 @@ export function App() {
               </main>
 
               {hasTurns && isDesktop && active !== null && (
-                <div className="lg:sticky lg:top-16 lg:max-h-[calc(100dvh-5rem)] lg:overflow-y-auto">
+                <div
+                  data-sources-column=""
+                  className="print:static print:max-h-none print:overflow-visible lg:sticky lg:top-16 lg:max-h-[calc(100dvh-5rem)] lg:self-start lg:overflow-y-auto"
+                >
                   <SourcePanel turn={active} />
                 </div>
               )}

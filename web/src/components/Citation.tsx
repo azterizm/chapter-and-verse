@@ -1,5 +1,5 @@
 import type { RenderedCitation } from "../api/events";
-import { citationShowTitle } from "../text";
+import { citationChipLabel } from "../text";
 import { Chip } from "./ui/chip";
 
 interface Props {
@@ -7,19 +7,22 @@ interface Props {
   turnId: number;
   onShow(turnId: number, passageId: string): void;
   selected?: boolean | undefined;
+  showYear?: boolean | undefined;
 }
 
 /** A system-rendered citation chip that jumps to its window in the sources. */
-export function Citation({ citation, turnId, onShow, selected }: Props) {
+export function Citation({ citation, turnId, onShow, selected, showYear = false }: Props) {
+  const shortLabel = citationChipLabel(citation.coordinate, citation.label, showYear);
   return (
     <Chip
       variant="citation"
       selected={selected}
       className="mx-1 align-baseline"
       onClick={() => onShow(turnId, citation.passage_id)}
-      title={citationShowTitle(citation.passage_id)}
+      aria-label={citation.label}
+      title={citation.label}
     >
-      {citation.label}
+      {shortLabel}
     </Chip>
   );
 }

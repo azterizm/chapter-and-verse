@@ -13,7 +13,7 @@ export interface WindowTextProps {
 export function WindowText({ text, highlight, pulsing = false, onPulseEnd, className }: WindowTextProps) {
   const [before, marked, after] = splitHighlight(text, highlight);
   return (
-    <p className={cn("text-body text-foreground whitespace-pre-wrap break-words", className)}>
+    <p className={`text-body ${cn("text-foreground whitespace-pre-wrap break-words", className)}`}>
       {before}
       {marked && (
         <mark

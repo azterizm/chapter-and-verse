@@ -4,7 +4,7 @@ Fix review-1.md items 5, 6, 7, 9, 10. Files you own: `web/src/components/Turn.ts
 
 Allowed shell commands: exactly as in tasks-1-foundation.md.
 
-- [ ] 1. Read `specs/w-redesign/review-1.md`, `design.md`, the files you own, `web/src/api/events.ts` (shapes, read only).
-- [ ] 2. Items 5, 6, 7, 9; update tests you own.
-- [ ] 3. Item 10 (mock quote stream and routing).
-- [ ] 4. Run the four npm scripts. Print a short summary.
+- [x] 1. Read `specs/w-redesign/review-1.md`, `design.md`, the files you own, `web/src/api/events.ts` (shapes, read only).
+- [x] 2. Items 5, 6, 7, 9; update tests you own.
+- [x] 3. Item 10 (mock quote stream and routing).
+- [x] 4. Run the four npm scripts. Print a short summary.

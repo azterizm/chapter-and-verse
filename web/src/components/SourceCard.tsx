@@ -13,6 +13,7 @@ import {
   COPY_FAILED_TOAST,
   formatDate,
   formatSourceCopy,
+  parseSourceTitle,
   SOURCE_LINK_LABEL,
   SOURCE_LINK_NEW_TAB,
   sourceVersionDate,
@@ -60,6 +61,7 @@ export function SourceCard({
   const contentId = `${anchor}-content`;
   const hasStatusBadge = w.status !== "IN_FORCE";
   const isRepealed = w.status === "REPEALED";
+  const title = parseSourceTitle(w.heading, w.coordinate, citationLabel);
 
   const setOpen = React.useCallback(
     (next: boolean) => {
@@ -158,19 +160,27 @@ export function SourceCard({
             aria-labelledby={hasStatusBadge ? `${headingId} ${statusId}` : headingId}
             className="w-full min-h-11 cursor-pointer rounded-card px-4 py-3 text-left transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)] hover:bg-primary-soft/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           >
-            <span className="flex items-center justify-between gap-2">
-              <span
-                id={headingId}
-                role="heading"
-                aria-level={3}
-                className={cn(
-                  "min-w-0 truncate text-ui font-bold",
-                  isRepealed ? "text-muted-foreground line-through" : "text-foreground",
+            <span className="flex items-start justify-between gap-2">
+              <span id={headingId} role="heading" aria-level={3} className="min-w-0 flex-1">
+                <span className="flex min-w-0 items-baseline gap-1.5">
+                  <span
+                    className={`shrink-0 text-ui font-bold ${isRepealed ? "text-muted-foreground line-through" : "text-foreground"}`}
+                  >
+                    {title.provision}
+                  </span>
+                  {title.provisionHeading && (
+                    <span className="min-w-0 truncate text-ui text-muted-foreground">
+                      {title.provisionHeading}
+                    </span>
+                  )}
+                </span>
+                {title.instrument && (
+                  <span className="mt-0.5 block text-caption text-muted-foreground">
+                    {title.instrument}
+                  </span>
                 )}
-              >
-                {w.heading}
               </span>
-              <span className="flex shrink-0 items-center gap-2">
+              <span className="flex shrink-0 items-center gap-2 pt-0.5">
                 <StatusBadge id={statusId} status={w.status} />
                 <ChevronDown
                   className={cn(
@@ -182,7 +192,7 @@ export function SourceCard({
               </span>
             </span>
             {!isOpen && (
-              <span className="mt-1 line-clamp-2 block text-caption text-muted-foreground">{w.text}</span>
+              <span className="mt-1.5 line-clamp-2 block text-caption text-muted-foreground">{w.text}</span>
             )}
           </button>
         </CollapsibleTrigger>

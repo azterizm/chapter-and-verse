@@ -10,6 +10,7 @@ import type { AnswerFactObject, Window } from "@/api/events";
 import type { Turn as TurnData } from "@/state/reducer";
 import {
   ACTION_COPY,
+  ACTION_DETAILS,
   ACTION_NEW_QUESTION,
   ACTION_RETRY,
   ACTION_VERIFY,
@@ -141,7 +142,7 @@ afterEach(() => {
 });
 
 describe("Turn answer rendering", () => {
-  it("renders sentence chips with exact engine labels and triggers onShowSource", async () => {
+  it("renders short provision chip labels for one instrument, keeps full label in aria-label/title, and triggers onShowSource", async () => {
     const user = userEvent.setup();
     const turn = makeTurn({
       sentences: [
@@ -177,11 +178,54 @@ describe("Turn answer rendering", () => {
 
     const chip1 = screen.getByRole("button", { name: "s.2 Limitation Act 1980" });
     const chip2 = screen.getByRole("button", { name: "s.11 Limitation Act 1980" });
-    expect(chip1).toBeInTheDocument();
-    expect(chip2).toBeInTheDocument();
+    expect(chip1).toHaveTextContent("s.2");
+    expect(chip1).toHaveAttribute("title", "s.2 Limitation Act 1980");
+    expect(chip2).toHaveTextContent("s.11");
+    expect(chip2).toHaveAttribute("title", "s.11 Limitation Act 1980");
 
     await user.click(chip1);
     expect(onShowSource).toHaveBeenCalledWith(1, "P1");
+  });
+
+  it("adds the year to citation chips when two or more instruments appear in the same answer", () => {
+    const turn = makeTurn({
+      sentences: [
+        {
+          type: "sentence",
+          sentence: {
+            index: 0,
+            text: "Claims differ between limitation and employment statutes.",
+            verdict: "supported",
+            passage_ids: ["P1", "P2"],
+            reasons: ["GROUNDED"],
+            rollbacks: 0,
+          },
+          citations: [
+            {
+              passage_id: "P1",
+              coordinate: "uk/ukpga/1980/58/s2",
+              label: "s.2 Limitation Act 1980",
+              url: "https://www.legislation.gov.uk/ukpga/1980/58/section/2",
+            },
+            {
+              passage_id: "P2",
+              coordinate: "uk/ukpga/1996/18/s124/1",
+              label: "s.124(1) Employment Rights Act 1996",
+              url: "https://www.legislation.gov.uk/ukpga/1996/18/section/124/1",
+            },
+          ],
+        },
+      ],
+    });
+
+    renderTurn(turn);
+
+    const chip1 = screen.getByRole("button", { name: "s.2 Limitation Act 1980" });
+    const chip2 = screen.getByRole("button", { name: "s.124(1) Employment Rights Act 1996" });
+    expect(chip1).toHaveTextContent("s.2 (1980)");
+    expect(chip1).toHaveAttribute("title", "s.2 Limitation Act 1980");
+    expect(chip2).toHaveTextContent("s.124(1) (1996)");
+    expect(chip2).toHaveAttribute("title", "s.124(1) Employment Rights Act 1996");
   });
 
   it("renders abstention sentences in muted style with no chips", () => {
@@ -268,7 +312,8 @@ describe("Turn answer rendering", () => {
     expect(screen.queryByText(STATUS_STEPS[2])).not.toBeInTheDocument();
   });
 
-  it("renders notices as quiet caption lines", () => {
+  it("keeps non-fallback notices inline and hides provider_fallback and meta lines behind Details", async () => {
+    const user = userEvent.setup();
     const turn = makeTurn({
       notices: [
         {
@@ -276,12 +321,38 @@ describe("Turn answer rendering", () => {
           code: "provider_fallback",
           message: "Groq was at its limit. Cloudflare Workers AI answered instead.",
         },
+        {
+          type: "notice",
+          code: "corrections_applied",
+          message: "Limtation -> Limitation",
+        },
       ],
+      timings: {
+        first_source_ms: 212.4,
+        first_sentence_ms: 1693.0,
+        total_ms: 3920.7,
+      },
     });
     renderTurn(turn);
 
     const list = screen.getByRole("list", { name: "Notices" });
-    expect(list).toHaveTextContent("Backup model used. Groq was at its limit. Cloudflare Workers AI answered instead.");
+    expect(list).toHaveTextContent("Spelling corrected. Limtation -> Limitation");
+    expect(list).not.toHaveTextContent("Backup model used");
+    expect(screen.queryByText(/Answer id/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/First sentence/i)).not.toBeInTheDocument();
+
+    const detailsBtn = screen.getByRole("button", { name: ACTION_DETAILS });
+    expect(detailsBtn).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(detailsBtn);
+    expect(detailsBtn).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/Answer id/i)).toBeInTheDocument();
+    expect(screen.getByText("First sentence 1.69 s, total 3.92 s")).toBeInTheDocument();
+    expect(screen.getByText("Backup model used")).toBeInTheDocument();
+
+    await user.click(detailsBtn);
+    expect(detailsBtn).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Backup model used")).not.toBeInTheDocument();
   });
 });
 

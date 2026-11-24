@@ -1,21 +1,25 @@
-import { Check, Copy, Plus, ShieldCheck, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Check, Copy, Info, Plus, ShieldCheck, X } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
 import { copyText } from "../lib/clipboard";
+import { cn } from "../lib/utils";
 import { panelWindows, type Turn as TurnData } from "../state/reducer";
 import {
   ACTION_COPY,
+  ACTION_DETAILS,
   ACTION_NEW_QUESTION,
   ACTION_VERIFY,
   answerIdCopyLine,
   COPIED_TOAST,
   COPY_FAILED_TOAST,
+  formatDetailsTimings,
+  noticeTitle,
   RECEIPT_MISMATCH,
   RECEIPT_UNAVAILABLE,
   RECEIPT_VERIFIED,
   refusalTitle,
   SOURCES_HEADING,
 } from "../text";
-import { downloadReceipt, type ReceiptCheck, verifyReceiptHash } from "./Receipt";
+import { downloadReceipt, type ReceiptCheck, ReceiptLine, verifyReceiptHash } from "./Receipt";
 import { Button } from "./ui/button";
 import { useToast } from "./ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -87,11 +91,13 @@ function hasCopyableContent(turn: TurnData): boolean {
   );
 }
 
-/** Post-answer action row: Copy, Verify (receipt), and New question. */
+/** Post-answer action row: Copy, Verify (receipt), New question, and Details toggle. */
 export function ActionRow({ turn, onNewQuestion }: Props) {
   const [copied, setCopied] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [verifyState, setVerifyState] = useState<{ answerId: string; result: ReceiptCheck } | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const detailsId = useId();
   const { showToast } = useToast();
 
   useEffect(() => {
@@ -136,6 +142,9 @@ export function ActionRow({ turn, onNewQuestion }: Props) {
 
   const verified =
     turn.receipt !== null && verifyState?.answerId === turn.receipt.answer_id ? verifyState.result : null;
+  const hasFallbackNotice = turn.notices.some((n) => n.code === "provider_fallback");
+  const fallbackTitle = noticeTitle("provider_fallback") ?? "Backup model used";
+  const hasDetails = turn.receipt !== null || turn.timings !== null || hasFallbackNotice;
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -196,6 +205,28 @@ export function ActionRow({ turn, onNewQuestion }: Props) {
           <TooltipContent>{ACTION_NEW_QUESTION}</TooltipContent>
         </Tooltip>
 
+        {hasDetails && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  "text-muted-foreground hover:text-primary",
+                  detailsOpen && "bg-primary-soft text-primary",
+                )}
+                aria-label={ACTION_DETAILS}
+                aria-expanded={detailsOpen}
+                aria-controls={detailsId}
+                onClick={() => setDetailsOpen((open) => !open)}
+              >
+                <Info className="h-4 w-4" aria-hidden="true" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{ACTION_DETAILS}</TooltipContent>
+          </Tooltip>
+        )}
+
         {verified !== null && (
           <span
             role="status"
@@ -216,6 +247,18 @@ export function ActionRow({ turn, onNewQuestion }: Props) {
           </span>
         )}
       </div>
+
+      {hasDetails && detailsOpen && (
+        <div id={detailsId} className="mt-2 space-y-0.5 text-caption text-muted-foreground">
+          {turn.receipt && <ReceiptLine receipt={turn.receipt} />}
+          {turn.timings && (
+            <p className="tabular-nums">
+              {formatDetailsTimings(turn.timings.first_sentence_ms, turn.timings.total_ms)}
+            </p>
+          )}
+          {hasFallbackNotice && <p>{fallbackTitle}</p>}
+        </div>
+      )}
     </TooltipProvider>
   );
 }

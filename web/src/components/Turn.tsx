@@ -3,6 +3,7 @@ import { cn } from "../lib/utils";
 import type { Turn as TurnData } from "../state/reducer";
 import {
   ACTION_RETRY,
+  citationInstrumentKey,
   CLARIFY_ARIA_LABEL,
   CLARIFY_TITLE,
   EMPTY_ANSWER_TEXT,
@@ -18,7 +19,6 @@ import { ActionRow } from "./ActionRow";
 import { Citation } from "./Citation";
 import { Notice } from "./Notice";
 import { QuoteBlock } from "./QuoteBlock";
-import { ReceiptLine, TimingsLine } from "./Receipt";
 import { RefusalCard } from "./RefusalCard";
 import { StatusLine } from "./StatusLine";
 import { Button } from "./ui/button";
@@ -45,10 +45,12 @@ function StreamingDots() {
 function Sentence({
   ev,
   turnId,
+  showYear,
   onShowSource,
 }: {
   ev: SentenceEvent;
   turnId: number;
+  showYear: boolean;
   onShowSource: Props["onShowSource"];
 }) {
   const refused = ev.sentence.verdict === "refused";
@@ -57,7 +59,7 @@ function Sentence({
       {ev.sentence.text}
       {!refused &&
         ev.citations.map((c) => (
-          <Citation key={c.passage_id} citation={c} turnId={turnId} onShow={onShowSource} />
+          <Citation key={c.passage_id} citation={c} turnId={turnId} showYear={showYear} onShow={onShowSource} />
         ))}{" "}
     </span>
   );
@@ -72,6 +74,16 @@ export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) 
     turn.extractive === null &&
     turn.error === null;
 
+  const inlineNotices = turn.notices.filter((n) => n.code !== "provider_fallback");
+  const instruments = new Set<string>();
+  for (const ev of turn.sentences) {
+    if (ev.sentence.verdict === "refused") continue;
+    for (const c of ev.citations) {
+      instruments.add(citationInstrumentKey(c.coordinate, c.label));
+    }
+  }
+  const showCitationYear = instruments.size >= 2;
+
   return (
     <article
       className="mb-7 scroll-mt-4 border-b border-border pb-7"
@@ -83,9 +95,9 @@ export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) 
         {turn.query}
       </h2>
 
-      {turn.notices.length > 0 && (
+      {inlineNotices.length > 0 && (
         <ul className="mb-3 space-y-1.5" aria-label={NOTICES_ARIA_LABEL}>
-          {turn.notices.map((n, i) => (
+          {inlineNotices.map((n, i) => (
             <li key={i}>
               <Notice notice={n} />
             </li>
@@ -150,6 +162,7 @@ export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) 
                 key={ev.sentence.index}
                 ev={ev}
                 turnId={turn.id}
+                showYear={showCitationYear}
                 onShowSource={onShowSource}
               />
             ))}
@@ -186,13 +199,6 @@ export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) 
       )}
 
       {turn.phase === "done" && <ActionRow turn={turn} onNewQuestion={onNewQuestion} />}
-
-      {(turn.receipt || turn.timings) && (
-        <footer className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-caption text-muted-foreground">
-          {turn.receipt && <ReceiptLine receipt={turn.receipt} />}
-          {turn.timings && <TimingsLine timings={turn.timings} />}
-        </footer>
-      )}
     </article>
   );
 }
