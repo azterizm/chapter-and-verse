@@ -11,7 +11,7 @@ export function downloadReceipt(receipt: ReceiptData): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${receipt.answer_id}.json`;
+  a.download = `chapter-and-verse-evidence-${shortId(receipt.answer_id)}.json`;
   a.rel = "noopener";
   document.body.appendChild(a);
   a.click();

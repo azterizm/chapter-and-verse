@@ -1,4 +1,4 @@
-import { Check, Copy, Info, Plus, ShieldCheck, X } from "lucide-react";
+import { Check, CircleAlert, Copy, Download, Info } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { copyText } from "../lib/clipboard";
 import { cn } from "../lib/utils";
@@ -6,27 +6,24 @@ import { panelWindows, type Turn as TurnData } from "../state/reducer";
 import {
   ACTION_COPY,
   ACTION_DETAILS,
-  ACTION_NEW_QUESTION,
-  ACTION_VERIFY,
+  ACTION_DOWNLOAD_EVIDENCE,
   answerIdCopyLine,
   COPIED_TOAST,
   COPY_FAILED_TOAST,
+  EVIDENCE_DOWNLOADED_TOAST,
+  EVIDENCE_MISMATCH,
   formatDetailsTimings,
   noticeTitle,
-  RECEIPT_MISMATCH,
-  RECEIPT_UNAVAILABLE,
-  RECEIPT_VERIFIED,
   refusalTitle,
   SOURCES_HEADING,
 } from "../text";
-import { downloadReceipt, type ReceiptCheck, ReceiptLine, verifyReceiptHash } from "./Receipt";
+import { downloadReceipt, ReceiptLine, verifyReceiptHash } from "./Receipt";
 import { Button } from "./ui/button";
 import { useToast } from "./ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 
 interface Props {
   turn: TurnData;
-  onNewQuestion?: (() => void) | undefined;
 }
 
 const COPIED_RESET_MS = 1500;
@@ -91,11 +88,11 @@ function hasCopyableContent(turn: TurnData): boolean {
   );
 }
 
-/** Post-answer action row: Copy, Verify (receipt), New question, and Details toggle. */
-export function ActionRow({ turn, onNewQuestion }: Props) {
+/** Post-answer action row: Copy, Download evidence, and Details toggle. */
+export function ActionRow({ turn }: Props) {
   const [copied, setCopied] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [verifyState, setVerifyState] = useState<{ answerId: string; result: ReceiptCheck } | null>(null);
+  const [mismatchAnswerId, setMismatchAnswerId] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const detailsId = useId();
   const { showToast } = useToast();
@@ -121,27 +118,20 @@ export function ActionRow({ turn, onNewQuestion }: Props) {
     }
   }
 
-  async function handleVerify() {
+  async function handleDownloadEvidence() {
     if (!turn.receipt) return;
     const targetReceipt = turn.receipt;
     downloadReceipt(targetReceipt);
     const result = await verifyReceiptHash(targetReceipt);
-    setVerifyState({ answerId: targetReceipt.answer_id, result });
-  }
-
-  function handleNewQuestion() {
-    if (onNewQuestion) {
-      onNewQuestion();
-      return;
-    }
-    const composer = document.getElementById("q");
-    if (composer instanceof HTMLElement) {
-      composer.focus();
+    if (result === "mismatch") {
+      setMismatchAnswerId(targetReceipt.answer_id);
+    } else {
+      setMismatchAnswerId(null);
+      showToast(EVIDENCE_DOWNLOADED_TOAST);
     }
   }
 
-  const verified =
-    turn.receipt !== null && verifyState?.answerId === turn.receipt.answer_id ? verifyState.result : null;
+  const hasEvidenceMismatch = turn.receipt !== null && mismatchAnswerId === turn.receipt.answer_id;
   const hasFallbackNotice = turn.notices.some((n) => n.code === "provider_fallback");
   const fallbackTitle = noticeTitle("provider_fallback") ?? "Backup model used";
   const hasDetails = turn.receipt !== null || turn.timings !== null || hasFallbackNotice;
@@ -178,32 +168,16 @@ export function ActionRow({ turn, onNewQuestion }: Props) {
                 variant="ghost"
                 size="md"
                 className="h-11 w-11 px-0 text-muted-foreground hover:text-primary min-[400px]:w-auto min-[400px]:px-3"
-                aria-label={ACTION_VERIFY}
-                onClick={() => void handleVerify()}
+                aria-label={ACTION_DOWNLOAD_EVIDENCE}
+                onClick={() => void handleDownloadEvidence()}
               >
-                <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-                <span className="hidden min-[400px]:inline">{ACTION_VERIFY}</span>
+                <Download className="h-4 w-4" aria-hidden="true" />
+                <span className="hidden min-[400px]:inline">{ACTION_DOWNLOAD_EVIDENCE}</span>
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{ACTION_VERIFY}</TooltipContent>
+            <TooltipContent>{ACTION_DOWNLOAD_EVIDENCE}</TooltipContent>
           </Tooltip>
         )}
-
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="md"
-              className="h-11 w-11 px-0 text-muted-foreground hover:text-primary min-[400px]:w-auto min-[400px]:px-3"
-              aria-label={ACTION_NEW_QUESTION}
-              onClick={handleNewQuestion}
-            >
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              <span className="hidden min-[400px]:inline">{ACTION_NEW_QUESTION}</span>
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{ACTION_NEW_QUESTION}</TooltipContent>
-        </Tooltip>
 
         {hasDetails && (
           <Tooltip>
@@ -227,23 +201,13 @@ export function ActionRow({ turn, onNewQuestion }: Props) {
           </Tooltip>
         )}
 
-        {verified !== null && (
+        {hasEvidenceMismatch && (
           <span
-            role="status"
             aria-live="polite"
-            className="ml-1 inline-flex items-center gap-1 text-caption text-muted-foreground"
+            className="ml-1 inline-flex items-center gap-1.5 text-caption text-muted-foreground"
           >
-            {verified === "match" ? (
-              <>
-                <Check className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
-                <span>{RECEIPT_VERIFIED}</span>
-              </>
-            ) : (
-              <>
-                <X className="h-3.5 w-3.5 text-foreground" aria-hidden="true" />
-                <span>{verified === "mismatch" ? RECEIPT_MISMATCH : RECEIPT_UNAVAILABLE}</span>
-              </>
-            )}
+            <CircleAlert className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{EVIDENCE_MISMATCH}</span>
           </span>
         )}
       </div>

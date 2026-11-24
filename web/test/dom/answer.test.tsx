@@ -11,15 +11,15 @@ import type { Turn as TurnData } from "@/state/reducer";
 import {
   ACTION_COPY,
   ACTION_DETAILS,
-  ACTION_NEW_QUESTION,
+  ACTION_DOWNLOAD_EVIDENCE,
   ACTION_RETRY,
-  ACTION_VERIFY,
   COPIED_TOAST,
   COPY_FAILED_TOAST,
+  EVIDENCE_DOWNLOADED_TOAST,
+  EVIDENCE_MISMATCH,
   EXTRACTIVE_REASON,
   quoteLinkLabel,
-  RECEIPT_MISMATCH,
-  RECEIPT_VERIFIED,
+  shortId,
   SOURCE_LINK_LABEL,
   STATUS_STEPS,
 } from "@/text";
@@ -118,7 +118,6 @@ function renderTurn(
     busy?: boolean;
     onAsk?: (q: string) => void;
     onShowSource?: (turnId: number, passageId: string) => void;
-    onNewQuestion?: () => void;
   } = {},
 ) {
   const onAsk = handlers.onAsk ?? vi.fn();
@@ -130,7 +129,6 @@ function renderTurn(
         busy={handlers.busy ?? false}
         onAsk={onAsk}
         onShowSource={onShowSource}
-        onNewQuestion={handlers.onNewQuestion}
       />
     </ToastProvider>,
   );
@@ -570,8 +568,7 @@ describe("ActionRow", () => {
     const { rerender } = renderTurn(streaming);
 
     expect(screen.queryByRole("button", { name: ACTION_COPY })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: ACTION_VERIFY })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: ACTION_NEW_QUESTION })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: ACTION_DOWNLOAD_EVIDENCE })).not.toBeInTheDocument();
 
     const failed = makeTurn({
       phase: "failed",
@@ -593,8 +590,9 @@ describe("ActionRow", () => {
       </ToastProvider>,
     );
     expect(screen.getByRole("button", { name: ACTION_COPY })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: ACTION_VERIFY })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: ACTION_NEW_QUESTION })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: ACTION_DOWNLOAD_EVIDENCE })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /new question/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /verify/i })).not.toBeInTheDocument();
   });
 
   it("copies exact R4 text format for a fixture turn and handles failure", async () => {
@@ -694,48 +692,71 @@ describe("ActionRow", () => {
     expect(screen.getByRole("status")).toHaveTextContent(COPY_FAILED_TOAST);
   });
 
-  it("verifies receipt SHA-256 inline and invokes New question handler", async () => {
+  it("downloads evidence JSON with short id filename, toasts on match, and keeps mismatch caption visible", async () => {
     const user = userEvent.setup();
     const json = '{"schema":1}';
     const digestBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));
     const answerId = Array.from(new Uint8Array(digestBuf), (b) => b.toString(16).padStart(2, "0")).join("");
 
-    const matchTurn = makeTurn({
-      receipt: {
-        answer_id: answerId,
-        fact: makeFact(),
-        json,
-        exact: true,
-      },
+    const downloadedFiles: string[] = [];
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:evidence-test"),
+      revokeObjectURL: vi.fn(),
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloadedFiles.push(this.download);
     });
 
-    const onNewQuestion = vi.fn();
-    renderTurn(matchTurn, { onNewQuestion });
+    try {
+      const matchTurn = makeTurn({
+        receipt: {
+          answer_id: answerId,
+          fact: makeFact(),
+          json,
+          exact: true,
+        },
+      });
 
-    await user.click(screen.getByRole("button", { name: ACTION_VERIFY }));
-    await waitFor(() => {
-      expect(screen.getByText(RECEIPT_VERIFIED)).toBeInTheDocument();
-    });
+      renderTurn(matchTurn);
 
-    await user.click(screen.getByRole("button", { name: ACTION_NEW_QUESTION }));
-    expect(onNewQuestion).toHaveBeenCalledTimes(1);
+      await user.click(screen.getByRole("button", { name: ACTION_DOWNLOAD_EVIDENCE }));
+      expect(downloadedFiles).toEqual([`chapter-and-verse-evidence-${shortId(answerId)}.json`]);
+      await waitFor(() => {
+        expect(screen.getByRole("status")).toHaveTextContent(EVIDENCE_DOWNLOADED_TOAST);
+      });
+      expect(screen.queryByText(EVIDENCE_MISMATCH)).not.toBeInTheDocument();
+      expect(screen.queryByText(/verif/i)).not.toBeInTheDocument();
 
-    cleanup();
+      cleanup();
 
-    const mismatchTurn = makeTurn({
-      receipt: {
-        answer_id: "f".repeat(64),
-        fact: makeFact(),
-        json,
-        exact: true,
-      },
-    });
-    renderTurn(mismatchTurn);
+      const mismatchId = "f".repeat(64);
+      const mismatchTurn = makeTurn({
+        receipt: {
+          answer_id: mismatchId,
+          fact: makeFact(),
+          json,
+          exact: true,
+        },
+      });
+      renderTurn(mismatchTurn);
 
-    await user.click(screen.getByRole("button", { name: ACTION_VERIFY }));
-    await waitFor(() => {
-      expect(screen.getByText(RECEIPT_MISMATCH)).toBeInTheDocument();
-    });
+      await user.click(screen.getByRole("button", { name: ACTION_DOWNLOAD_EVIDENCE }));
+      expect(downloadedFiles).toEqual([
+        `chapter-and-verse-evidence-${shortId(answerId)}.json`,
+        `chapter-and-verse-evidence-${shortId(mismatchId)}.json`,
+      ]);
+      await waitFor(() => {
+        expect(screen.getByText(EVIDENCE_MISMATCH)).toBeInTheDocument();
+      });
+      const mismatchCaption = screen.getByText(EVIDENCE_MISMATCH).closest("span[aria-live]");
+      expect(mismatchCaption).toHaveClass("text-muted-foreground");
+      expect(mismatchCaption?.querySelector("svg")).toBeInTheDocument();
+      expect(screen.getByRole("status")).not.toHaveTextContent(EVIDENCE_DOWNLOADED_TOAST);
+      expect(screen.queryByText(/verif/i)).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

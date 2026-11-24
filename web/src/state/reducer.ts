@@ -58,7 +58,8 @@ export type Action =
   | { type: "event"; turnId: number; event: CvEvent; raw: string }
   | { type: "failure"; turnId: number; failure: AskFailure }
   | { type: "health"; snapshot: string }
-  | { type: "focus"; turnId: number };
+  | { type: "focus"; turnId: number }
+  | { type: "reset" };
 
 export const initialState: AppState = { turns: [], activeTurnId: null, snapshot: null };
 
@@ -161,6 +162,8 @@ export function reducer(state: AppState, action: Action): AppState {
       return state.snapshot === null ? { ...state, snapshot: action.snapshot } : state;
     case "focus":
       return { ...state, activeTurnId: action.turnId };
+    case "reset":
+      return { ...initialState, snapshot: state.snapshot };
   }
 }
 

@@ -118,6 +118,18 @@ describe("reducer, failures and focus", () => {
     state = reducer(state, { type: "focus", turnId: 1 });
     expect(state.activeTurnId).toBe(1);
   });
+
+  it("reset clears turns and activeTurnId while keeping snapshot", () => {
+    let state = run("answer").state;
+    state = reducer(state, { type: "start", turnId: 2, query: "again" });
+    expect(state.turns).toHaveLength(2);
+    expect(state.activeTurnId).toBe(2);
+
+    const reset = reducer(state, { type: "reset" });
+    expect(reset.turns).toEqual([]);
+    expect(reset.activeTurnId).toBeNull();
+    expect(reset.snapshot).toBe("2026-09-28");
+  });
 });
 
 describe("splitHighlight", () => {

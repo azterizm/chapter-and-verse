@@ -15,9 +15,13 @@ import {
   FOOTER_NO_PERSONAL_DATA,
   FOOTER_NOT_ADVICE,
   FOOTER_OGL,
+  MEMONSYSTEMS_ARIA_LABEL,
+  MEMONSYSTEMS_LABEL,
+  MEMONSYSTEMS_URL,
   PURPOSE_LINE,
   SEND_LABEL,
   SOURCES_HEADING,
+  START_OVER_LABEL,
   THEME_DARK,
   THEME_LABEL,
   THEME_LIGHT,
@@ -526,6 +530,102 @@ describe("App empty state and shell", () => {
     const sourcesCol = document.querySelector("[data-sources-column]") as HTMLElement | null;
     expect(sourcesCol).not.toBeNull();
     expect(sourcesCol).toContainElement(document.getElementById("w-2-p-2"));
+  });
+
+  it("renders the memonsystems link in both states and keeps the hero wordmark non-interactive", async () => {
+    const user = userEvent.setup();
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) {
+        return new Response(
+          JSON.stringify({ status: "ok", corpus_id: "ukpga", snapshot: "2026-09-28" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/ask")) {
+        return sseResponse([
+          {
+            event: "done",
+            data: { type: "done", timings: { first_source_ms: null, first_sentence_ms: null, total_ms: 10 } },
+          },
+        ]);
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    expect(screen.queryByRole("button", { name: START_OVER_LABEL })).not.toBeInTheDocument();
+    expect(screen.getByText(WORDMARK).closest("button")).toBeNull();
+
+    const emptyLink = screen.getByRole("link", { name: MEMONSYSTEMS_ARIA_LABEL });
+    expect(emptyLink).toHaveTextContent(MEMONSYSTEMS_LABEL);
+    expect(emptyLink).toHaveAttribute("href", MEMONSYSTEMS_URL);
+    expect(emptyLink).toHaveAttribute("target", "_blank");
+    expect(emptyLink).toHaveAttribute("rel", "noopener noreferrer");
+    expect(emptyLink.querySelector("svg")).not.toBeNull();
+    expect(emptyLink).toHaveClass("text-caption", "text-muted-foreground", "hover:text-foreground", "min-h-11");
+
+    const textarea = screen.getByPlaceholderText(COMPOSER_PLACEHOLDER);
+    await user.type(textarea, "First question{Enter}");
+
+    const startOverBtn = await screen.findByRole("button", { name: START_OVER_LABEL });
+    expect(startOverBtn).toHaveTextContent(WORDMARK);
+    expect(startOverBtn).toHaveClass("hover:text-primary", "no-underline");
+
+    const topBarLink = screen.getByRole("link", { name: MEMONSYSTEMS_ARIA_LABEL });
+    expect(topBarLink).toHaveTextContent(MEMONSYSTEMS_LABEL);
+    expect(topBarLink).toHaveAttribute("href", MEMONSYSTEMS_URL);
+    expect(topBarLink).toHaveAttribute("target", "_blank");
+    expect(topBarLink).toHaveAttribute("rel", "noopener noreferrer");
+    expect(topBarLink.querySelector("svg")).not.toBeNull();
+  });
+
+  it("resets to the empty state, clears and focuses the composer, scrolls to top, and aborts an in-flight stream on Start over", async () => {
+    const user = userEvent.setup();
+    const scrollToSpy = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    let capturedSignal: AbortSignal | undefined;
+
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ status: "ok", corpus_id: "ukpga", snapshot: "2026-09-28" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (url.endsWith("/api/ask")) {
+        capturedSignal = init?.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        });
+      }
+      return Promise.resolve(new Response("Not found", { status: 404 }));
+    });
+
+    render(<App />);
+    const textarea = screen.getByPlaceholderText(COMPOSER_PLACEHOLDER);
+    await user.type(textarea, "In-flight question{Enter}");
+
+    const startOverBtn = await screen.findByRole("button", { name: START_OVER_LABEL });
+    await user.type(textarea, "Draft follow-up");
+    expect(textarea).toHaveValue("Draft follow-up");
+
+    await user.click(startOverBtn);
+
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(screen.queryByRole("button", { name: START_OVER_LABEL })).not.toBeInTheDocument();
+    expect(screen.queryByText("In-flight question")).not.toBeInTheDocument();
+    expect(screen.getByText(PURPOSE_LINE)).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: EXAMPLES_LABEL })).toBeInTheDocument();
+    expect(textarea).toHaveValue("");
+    expect(textarea).toHaveFocus();
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });
+    expect(screen.getByRole("link", { name: MEMONSYSTEMS_ARIA_LABEL })).toHaveAttribute("href", MEMONSYSTEMS_URL);
   });
 });
 

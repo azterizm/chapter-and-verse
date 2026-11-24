@@ -134,11 +134,6 @@ export const COPIED_TOAST = "Copied";
 export const COPY_FAILED_TOAST = "Copy failed";
 
 export const ACTION_COPY = "Copy";
-export const ACTION_VERIFY = "Verify";
-export const ACTION_NEW_QUESTION = "New question";
-
-export const RECEIPT_VERIFIED = "Receipt verified";
-export const RECEIPT_MISMATCH = "Receipt does not match";
 
 export const FOOTER_NOT_ADVICE = "Not legal advice";
 export const FOOTER_NO_PERSONAL_DATA = "Do not enter personal data";
@@ -162,7 +157,9 @@ export const SUGGESTIONS_LABEL = "Did you mean";
 export const REFUSAL_LINK_LABEL = "Read on legislation.gov.uk";
 export const OPENS_NEW_TAB = " (opens in a new tab)";
 export const ANSWER_ID_LABEL = "Answer id";
-export const RECEIPT_UNAVAILABLE = "Verification unavailable";
+export const ACTION_DOWNLOAD_EVIDENCE = "Download evidence";
+export const EVIDENCE_DOWNLOADED_TOAST = "Evidence downloaded";
+export const EVIDENCE_MISMATCH = "Evidence does not match this answer";
 export const citationShowTitle = (passageId: string): string => `Show ${passageId} in the sources`;
 export const copyQuoteLabel = (heading: string): string => `Copy ${heading}`;
 export const quoteLinkLabel = (label: string): string =>
@@ -443,3 +440,7 @@ export const THEME_LABEL = "Theme";
 export const THEME_SYSTEM = "System";
 export const THEME_LIGHT = "Light";
 export const THEME_DARK = "Dark";
+export const START_OVER_LABEL = "Start over";
+export const MEMONSYSTEMS_LABEL = "memonsystems";
+export const MEMONSYSTEMS_URL = "https://memonsystems.com";
+export const MEMONSYSTEMS_ARIA_LABEL = "memonsystems website (opens in a new tab)";

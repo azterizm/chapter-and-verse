@@ -31,7 +31,6 @@ interface Props {
   busy: boolean;
   onAsk(query: string): void;
   onShowSource(turnId: number, passageId: string): void;
-  onNewQuestion?: (() => void) | undefined;
 }
 
 function StreamingDots() {
@@ -72,7 +71,7 @@ export function isQuoteAnswer(turn: TurnData): boolean {
   return turn.extractive?.reason === "quote_requested";
 }
 
-export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) {
+export function Turn({ turn, busy, onAsk, onShowSource }: Props) {
   const quoteGroupHeadingId = useId();
   const answered = turn.sentences.length > 0;
   const quoteAnswer = isQuoteAnswer(turn);
@@ -219,7 +218,7 @@ export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) 
         <p className="mt-2 text-caption text-muted-foreground">{STOPPED_TEXT}</p>
       )}
 
-      {turn.phase === "done" && <ActionRow turn={turn} onNewQuestion={onNewQuestion} />}
+      {turn.phase === "done" && <ActionRow turn={turn} />}
     </article>
   );
 }

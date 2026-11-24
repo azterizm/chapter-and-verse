@@ -1,3 +1,4 @@
+import { ArrowUpRight } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { type AskRequest, ask, health, newSessionId } from "./api/client";
 import { Footer } from "./components/Footer";
@@ -19,8 +20,12 @@ import {
   EXAMPLE_QUESTIONS,
   EXAMPLES_LABEL,
   MAIN_HEADING,
+  MEMONSYSTEMS_ARIA_LABEL,
+  MEMONSYSTEMS_LABEL,
+  MEMONSYSTEMS_URL,
   PURPOSE_LINE,
   SKIP_TO_COMPOSER,
+  START_OVER_LABEL,
   WORDMARK,
 } from "./text";
 
@@ -207,6 +212,22 @@ export function App() {
     setPrefill((prev) => ({ text: example, seq: (prev?.seq ?? 0) + 1 }));
   }, []);
 
+  const startOver = useCallback(() => {
+    gateRef.current?.cancel();
+    abort.current?.abort();
+    abort.current = null;
+    dockTopRef.current = null;
+    heroTopRef.current = null;
+    setBotError(null);
+    setHeroFading(false);
+    setWordmarkEntering(false);
+    setScrolled(false);
+    dispatch({ type: "reset" });
+    setPrefill((prev) => ({ text: "", seq: (prev?.seq ?? 0) + 1 }));
+    input.current?.focus();
+    window.scrollTo?.({ top: 0, behavior: reducedMotion() ? "auto" : "smooth" });
+  }, []);
+
   const showSource = useCallback((turnId: number, passageId: string) => {
     dispatch({ type: "focus", turnId });
     // React commits a click's update before the next frame, so the window exists by then.
@@ -279,30 +300,46 @@ export function App() {
             {SKIP_TO_COMPOSER}
           </a>
 
-          {hasTurns && (
-            <header
+          <header
+            className={cn(
+              "z-30 border-b transition-colors duration-[var(--dur-fast)]",
+              hasTurns
+                ? cn("sticky top-0 bg-background/95 backdrop-blur-xs", scrolled ? "border-border" : "border-transparent")
+                : "border-transparent",
+            )}
+          >
+            <div
               className={cn(
-                "sticky top-0 z-30 border-b bg-background/95 backdrop-blur-xs transition-colors duration-[var(--dur-fast)]",
-                scrolled ? "border-border" : "border-transparent",
+                "mx-auto flex h-12 w-full max-w-[728px] items-center px-4 sm:px-6",
+                hasTurns ? "justify-between" : "justify-end",
+                showSourcesColumn && "lg:max-w-[1120px]",
               )}
             >
-              <div
-                className={cn(
-                  "mx-auto flex h-12 w-full max-w-[728px] items-center px-4 sm:px-6",
-                  showSourcesColumn && "lg:max-w-[1120px]",
-                )}
-              >
-                <p
+              {hasTurns && (
+                <button
+                  type="button"
+                  onClick={startOver}
+                  aria-label={START_OVER_LABEL}
                   className={cn(
-                    "masthead-motion origin-left text-ui font-bold text-foreground",
+                    "masthead-motion origin-left cursor-pointer rounded-sm bg-transparent p-0 text-ui font-bold text-foreground no-underline hover:text-primary",
                     wordmarkEntering ? "translate-y-3 scale-115" : "translate-y-0 scale-100",
                   )}
                 >
                   {WORDMARK}
-                </p>
-              </div>
-            </header>
-          )}
+                </button>
+              )}
+              <a
+                href={MEMONSYSTEMS_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={MEMONSYSTEMS_ARIA_LABEL}
+                className="-my-[13px] -mr-3 inline-flex min-h-11 items-center gap-1 rounded-sm px-3 py-[13px] text-caption text-muted-foreground no-underline transition-colors duration-[var(--dur-fast)] hover:text-foreground"
+              >
+                <span>{MEMONSYSTEMS_LABEL}</span>
+                <ArrowUpRight className="h-3 w-3 shrink-0" aria-hidden="true" />
+              </a>
+            </div>
+          </header>
 
           <div
             className={cn(
@@ -367,7 +404,6 @@ export function App() {
                             busy={isBlocked}
                             onAsk={askQuery}
                             onShowSource={showSource}
-                            onNewQuestion={() => input.current?.focus()}
                           />
                           {showInlineSources && (
                             <div>
