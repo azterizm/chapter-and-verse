@@ -29,6 +29,7 @@ from chapterverse.contracts import (
     ReceiptEvent,
     RefusalEvent,
     SentenceEvent,
+    SentenceOut,
     SourcesEvent,
     TemporalStatus,
     TextStore,
@@ -805,3 +806,30 @@ def test_pipeline_daily_cap_checked_first(fixture_router: Router, store: Countin
     notices = [e for e in events_2 if isinstance(e, NoticeEvent)]
     assert any(n.code == "daily_cap" for n in notices)
     assert not any(n.code == "global_budget" for n in notices)
+
+
+def test_refused_sentence_has_no_citation_chips(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    pipeline = make(fixture_router, store, FakeRotation([]))
+    sentence = SentenceOut(
+        index=0,
+        text="I can't confirm this from the law I found, so I won't guess.",
+        verdict="refused",
+        passage_ids=("P1", "P2"),
+        reasons=(),
+        rollbacks=0,
+    )
+    assert pipeline._cite(sentence, {}, None, {}) == ()  # type: ignore[arg-type]
+
+    narration = "The provided passages do not state the general limitation period [P1]."
+    pipeline_run = make(fixture_router, store, FakeRotation([(narration, "stop")]))
+    events, _ = run(pipeline_run, S124_QUERY)
+    sentence_events = of(events, SentenceEvent)
+    assert len(sentence_events) == 1
+    assert sentence_events[0].sentence.verdict == "refused"
+    assert (
+        sentence_events[0].sentence.text
+        == "I can't confirm this from the law I found, so I won't guess."
+    )
+    assert sentence_events[0].citations == ()

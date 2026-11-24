@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -42,11 +43,13 @@ from typing import Any, Final
 from legal_rag_verifier.backends.sglang import SGLangBackend
 from legal_rag_verifier.engine import (
     INJECT_TEMPLATE,
+    Answer,
     Ban,
     Constraint,
     InFlightGenerator,
     Segment,
     Tokens,
+    _Draft,
     _Point,
     _Retry,
     _Stream,
@@ -56,6 +59,7 @@ from legal_rag_verifier.judge import PRESETS
 from legal_rag_verifier.premise import Premise
 from legal_rag_verifier.verifier import SentenceVerdict
 
+from chapterverse.audit.narration import is_narration
 from chapterverse.audit.prompt import (
     STEER_NOTE,
     PriorTurn,
@@ -361,6 +365,87 @@ class _Engine(InFlightGenerator):
         self.on_close(closed)
         return closed
 
+    def generate_verified(self, query: str, premise: Premise) -> Answer:  # noqa: PLR0912, PLR0915
+        t0 = time.perf_counter_ns()
+        prompt = self.backend.chat(self.messages(query, premise))
+        stream = _Stream()
+        carry: _Draft | None = None
+        points: list[dict[str, Any]] = []
+        total_rollbacks = 0
+        stop_reason: str | None = None
+        has_refusal = False
+        by_id = {w.passage_id: w for w in self.positions.values()}
+
+        while stop_reason is None:
+            point = _Point(len(stream.answer))
+            retry = _Retry(carry.lookahead if carry else [], None, None)
+            end = carry.end if carry else None
+            carry = None
+            while True:
+                draft = self._draft(prompt, stream, retry.seed, end, retry.constraint)
+                sentence = self.backend.decode(draft.tokens).strip()
+                if not sentence and point.rollbacks:
+                    if has_refusal:
+                        stop_reason = "abstained"
+                        break
+                    has_refusal = True
+                    stream.commit(self._refusal(stream.answer))
+                    points.append(self._close(point, "refused", self.refusal))
+                    break
+                if not sentence:
+                    stream.commit(draft.tokens)
+                    carry = draft
+                    break
+                verdict = self.verifier.check_sentence(premise, sentence, query=query)
+                attempt = self._attempt(draft, verdict, retry)
+                point.attempts.append(attempt)
+                if verdict.emitted:
+                    text, pids = split_refs(sentence)
+                    cited = tuple(by_id[p].text for p in pids if p in by_id)
+                    if is_narration(text, cited):
+                        if has_refusal:
+                            stop_reason = "abstained"
+                            break
+                        has_refusal = True
+                        attempt["verdict"]["reasons"] = tuple(
+                            dict.fromkeys((*attempt["verdict"].get("reasons", ()), "NARRATION"))
+                        )
+                        stream.commit(self._refusal(stream.answer))
+                        points.append(self._close(point, "refused", self.refusal))
+                        stop_reason = "abstained"
+                        break
+                    if point.injected:
+                        stream.answer += self._separator(stream.answer, draft.tokens)
+                    stream.commit(draft.tokens)
+                    carry = draft
+                    points.append(self._close(point, "emitted", sentence))
+                    break
+                point.rollbacks += 1
+                total_rollbacks += 1
+                if self._refuses(point, total_rollbacks):
+                    if has_refusal:
+                        stop_reason = "abstained"
+                        break
+                    has_refusal = True
+                    attempt["tokens_discarded"] = len(draft.tokens) + len(draft.lookahead)
+                    stream.commit(self._refusal(stream.answer))
+                    points.append(self._close(point, "refused", self.refusal))
+                    if total_rollbacks > self.max_total_rollbacks:
+                        stop_reason = "rollback_budget"
+                    break
+                retry = self._steer(point, draft.tokens, verdict, premise, stream, query=query)
+                end = None
+                kept = len(retry.seed)
+                attempt["tokens_discarded"] = len(draft.tokens) + len(draft.lookahead) - kept
+            if stop_reason is None and carry is not None and carry.end and not carry.lookahead:
+                stop_reason = carry.end
+            if stop_reason is None and len(stream.answer) >= self.max_new_tokens:
+                stop_reason = "length"
+        return Answer(
+            self.backend.decode(stream.answer).strip(),
+            self._trace(prompt, stream.answer, points, stop_reason, time.perf_counter_ns() - t0),
+        )
+
 
 class ModalPathGenerator:
     """Iterate to get the audited :class:`SentenceOut`s of one answer generated on ``backend``.
@@ -402,6 +487,7 @@ class ModalPathGenerator:
         self.sentences: list[SentenceOut] = []
         self.trace: dict[str, Any] | None = None
         self.stop_reason: str | None = None
+        self.has_refusal: bool = False
         self._started = False
 
     def __iter__(self) -> Iterator[SentenceOut]:
@@ -455,6 +541,9 @@ class ModalPathGenerator:
                 rollbacks=int(point["rollbacks"]),
             )
         else:
+            if self.has_refusal:
+                return
+            self.has_refusal = True
             out = SentenceOut(
                 index=len(self.sentences),
                 text=self.policy.refusal_text,

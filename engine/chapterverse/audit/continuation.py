@@ -63,6 +63,7 @@ from legal_rag_verifier.premise import Premise
 from legal_rag_verifier.segmenter import find_boundary
 from legal_rag_verifier.verifier import SentenceVerdict
 
+from chapterverse.audit.narration import is_narration
 from chapterverse.audit.prompt import (
     CHARS_PER_TOKEN,
     ELLIPSIS,
@@ -108,7 +109,15 @@ SAMPLING: Final[Mapping[ChatMode, tuple[float, float]]] = {
 SENTENCE_TOO_LONG: Final = "SENTENCE_TOO_LONG"
 EMPTY_BLOCK: Final = "EMPTY_BLOCK"
 
-StopReason = Literal["stop", "length", "rollback_budget", "block_limit", "content_filter", "other"]
+StopReason = Literal[
+    "stop",
+    "length",
+    "rollback_budget",
+    "block_limit",
+    "content_filter",
+    "other",
+    "abstained",
+]
 
 _PARTIAL_REF = re.compile(r"\s*\[[^\]\n]*\Z")
 _TERMINAL = ".;:"
@@ -183,6 +192,7 @@ class _State:
     noted: bool = False
     injected: set[int] = field(default_factory=set)
     last_reasons: tuple[str, ...] = ()
+    refused: bool = False
 
     def commit(self, text: str) -> None:
         sep = " " if self.context and not self.context[-1].isspace() else ""
@@ -220,6 +230,7 @@ class ChatContinuationGenerator:
             query, windows, mode=mode, session=session, history=history
         )
         self.positions = window_positions(premise, windows)
+        self.by_id = {w.passage_id: w for w in windows}
         self.calls: list[ProviderCall] = []
         self.stop_reason: StopReason | None = None
         self._started = False
@@ -247,6 +258,15 @@ class ChatContinuationGenerator:
                 if not verdict.emitted:
                     rejected = verdict
                     break
+                text, pids = split_refs(raw)
+                cited = tuple(self.by_id[p].text for p in pids if p in self.by_id)
+                if is_narration(text, cited):
+                    self.stop_reason = "abstained"
+                    if not state.refused:
+                        state.refused = True
+                        narration_refusal = self._refuse_narration(state, verdict)
+                        yield narration_refusal
+                    return
                 state.commit(raw)
                 state.answer_chars += len(verdict.text) + 1
                 yield self._emitted(state, raw, verdict)
@@ -277,7 +297,13 @@ class ChatContinuationGenerator:
         if result.finish_reason == "stop":
             self.stop_reason = "stop"
             # A retry that gave nothing: say so (the engine's rule).
-            return self._refuse(state) if not sentences and state.point else None
+            if not sentences and state.point:
+                if state.refused:
+                    self.stop_reason = "abstained"
+                    return None
+                state.refused = True
+                return self._refuse(state)
+            return None
         if result.finish_reason in ("content_filter", "other"):
             self.stop_reason = result.finish_reason
         return None  # cut by the token limit after complete sentences: next block
@@ -333,6 +359,25 @@ class ChatContinuationGenerator:
         state.point = 0
         return out
 
+    def _refuse_narration(self, state: _State, verdict: SentenceVerdict) -> SentenceOut:
+        refusal = self.policy.refusal_text
+        state.commit(refusal)
+        state.answer_chars += len(refusal) + 1
+        reasons = tuple(
+            dict.fromkeys((*reason_codes(verdict.reasons, verdict.details), "NARRATION"))
+        )
+        out = SentenceOut(
+            index=state.index,
+            text=refusal,
+            verdict="refused",
+            passage_ids=(),
+            reasons=reasons,
+            rollbacks=state.point,
+        )
+        state.index += 1
+        state.point = 0
+        return out
+
     def _rollback(
         self, state: _State, reasons: tuple[str, ...], aligned: Sequence[int]
     ) -> SentenceOut | None:
@@ -345,6 +390,10 @@ class ChatContinuationGenerator:
             state.point > policy.max_rollbacks_per_sentence
             or state.total > policy.max_total_rollbacks
         ):
+            if state.refused:
+                self.stop_reason = "abstained"
+                return None
+            state.refused = True
             refusal = self._refuse(state)
             if state.total > policy.max_total_rollbacks:
                 self.stop_reason = "rollback_budget"

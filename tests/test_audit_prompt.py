@@ -5,11 +5,10 @@ from __future__ import annotations
 import re
 
 import pytest
-from legal_rag_verifier.engine import DEFAULT_REFUSAL
 from legal_rag_verifier.judge import STRICT_FIGURES
 from legal_rag_verifier.premise import Premise
 
-from chapterverse.audit.policy import build_policy, verifier_config
+from chapterverse.audit.policy import ABSTAIN_TEXT, build_policy, verifier_config
 from chapterverse.audit.prompt import (
     _TEMPLATE_PARTS,
     CONTEXT_MARGIN_CHARS,
@@ -60,7 +59,7 @@ def windows(premise: Premise) -> tuple[Window, ...]:
 
 def test_prompt_sha_is_the_hash_of_every_template_part() -> None:
     assert re.fullmatch(r"[0-9a-f]{64}", PROMPT_SHA256)
-    assert PROMPT_SHA256 == "23eefcb8725d2c1d98a0960a95eea2132604ecd9f9609b87d22e1bcdce268e26"
+    assert PROMPT_SHA256 == "7264c2bee465b48512cec143f4dec31f59ac88fc8551c84cb80c67d53f625219"
     assert sha256_hex(canonical_json(_TEMPLATE_PARTS)) == PROMPT_SHA256
 
 
@@ -79,14 +78,18 @@ def test_s124_prompt_numbers_passages_and_states_the_rules(windows: tuple[Window
     assert "[P1]" in content
     assert "You may name a section, subsection or paragraph only when the passage" in content
     assert "Never write an SI number" in content
-    assert "do not answer the question, say so plainly" in content
+    assert "Lead with the answer" in content
+    assert 'never to "passages" or "the text provided"' in content
+    assert "When the law shown does not settle the question" in content
+    assert ABSTAIN_TEXT in content
+    assert "do not answer the question, say so plainly" not in content
     assert MODE_RULES["short"] in content
 
 
 def test_s124_prompt_is_lean(windows: tuple[Window, ...]) -> None:
     prompt = build_prompt(QUERY, windows)
-    assert prompt.chars == 3194
-    assert prompt.estimated_tokens == 799  # 3194 characters at 4 a token
+    assert prompt.chars == 3596
+    assert prompt.estimated_tokens == 899  # 3596 characters at 4 a token
     assert prompt.estimated_tokens < 1000
 
 
@@ -181,7 +184,7 @@ def test_policy_carries_the_prompt_hash_and_the_contract_defaults() -> None:
     assert policy.prompt_sha256 == PROMPT_SHA256
     assert policy.judge_preset == "qwen27-ar4"
     assert (policy.max_rollbacks_per_sentence, policy.max_total_rollbacks) == (3, 8)
-    assert policy.refusal_text == DEFAULT_REFUSAL
+    assert policy.refusal_text == ABSTAIN_TEXT
     assert policy.steering == "inject"
     assert verifier_config(policy) is STRICT_FIGURES
     assert build_policy("qwen27-ar4").policy_hash == policy.policy_hash

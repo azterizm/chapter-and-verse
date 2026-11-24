@@ -1238,6 +1238,8 @@ class Pipeline:
         read: _Read,
         provisions: Mapping[Coordinate, Mapping[str, Any]],
     ) -> tuple[RenderedCitation, ...]:
+        if sentence.verdict == "refused":
+            return ()
         out: list[RenderedCitation] = []
         for pid in sentence.passage_ids:
             window = by_id.get(pid)

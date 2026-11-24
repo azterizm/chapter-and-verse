@@ -32,7 +32,7 @@ from chapterverse.audit.modal_path import (
     ModalSGLangBackend,
     _can_ban,
 )
-from chapterverse.audit.policy import build_policy
+from chapterverse.audit.policy import ABSTAIN_TEXT, build_policy
 from chapterverse.audit.prompt import STEER_NOTE
 from chapterverse.contracts import (
     AllProvidersUnavailable,
@@ -50,7 +50,7 @@ from chapterverse.contracts import (
 
 S124 = "uk/ukpga/1996/18/s124"
 QUERY = "What is the maximum compensatory award for unfair dismissal?"
-REFUSAL = "I cannot state this point reliably from the provisions provided."
+REFUSAL = ABSTAIN_TEXT
 
 GOOD1 = (
     "The compensatory award cannot exceed the lower of £123,543 and 52 multiplied by a "
@@ -295,13 +295,36 @@ def test_three_failed_retries_give_the_refusal_sentence(
 
 def test_the_answer_budget_ends_the_answer(run_chat: Callable[..., Run]) -> None:
     wrong = (WRONG, "stop")
-    out, rotation, _, gen = run_chat([wrong] * 9)
-    refused = [s for s in out if s.verdict == "refused"]
-    assert refused == out
-    assert [s.rollbacks for s in out] == [4, 4, 1]  # 9 discarded drafts > 8
-    assert all(s.text == REFUSAL and s.passage_ids == () for s in out)
-    assert gen.stop_reason == "rollback_budget"
-    assert len(rotation.requests) == 9
+    out, rotation, _, gen = run_chat([wrong] * 8)
+    assert len(out) == 1
+    assert out[0] == SentenceOut(0, REFUSAL, "refused", (), ("NLI_CONTRADICTION",), 4)
+    assert gen.stop_reason == "abstained"
+    assert len(rotation.requests) == 8
+
+
+def test_narration_sentence_that_passed_judge_becomes_abstain_text(
+    run_chat: Callable[..., Run],
+) -> None:
+    narration_sentence = "The provided passages do not state the general limitation period [P1]."
+    out, _rotation, _judge, gen = run_chat([(narration_sentence, "stop")])
+    assert len(out) == 1
+    assert out[0] == SentenceOut(
+        0,
+        ABSTAIN_TEXT,
+        "refused",
+        (),
+        ("GROUNDED", "NARRATION"),
+        0,
+    )
+    assert gen.stop_reason == "abstained"
+
+
+def test_two_refusing_points_give_one_abstain_text(run_chat: Callable[..., Run]) -> None:
+    wrong = (WRONG, "stop")
+    out, _, _, gen = run_chat([wrong] * 8)
+    assert len(out) == 1
+    assert out[0] == SentenceOut(0, REFUSAL, "refused", (), ("NLI_CONTRADICTION",), 4)
+    assert gen.stop_reason == "abstained"
 
 
 def test_a_citation_written_by_the_model_fails_without_a_judge_call(
@@ -523,6 +546,44 @@ def test_modal_model_citation_is_refused(
     assert streamed == out
     assert judge.sentences == []
     assert any(c is not None for c in backend.constraints)  # note first, then bans
+
+
+def test_modal_narration_sentence_becomes_abstain_text(
+    premise: Premise, windows: tuple[Window, ...], policy: Policy
+) -> None:
+    narration_sentence = "The provided passages do not state the general limitation period [P1]."
+    gen, _, _judge, streamed = modal({"": narration_sentence}, premise, windows, policy)
+    out = list(gen)
+    assert out == [
+        SentenceOut(
+            0,
+            ABSTAIN_TEXT,
+            "refused",
+            (),
+            ("GROUNDED", "NARRATION"),
+            0,
+        )
+    ]
+    assert streamed == out
+    assert gen.stop_reason == "abstained"
+
+
+def test_modal_two_refusing_points_give_one_abstain_text(
+    premise: Premise, windows: tuple[Window, ...], policy: Policy
+) -> None:
+    stream = {
+        "": CITED,
+        STEER_NOTE: CITED,
+        STEER_NOTE + ABSTAIN_TEXT: CITED,
+        STEER_NOTE + " " + ABSTAIN_TEXT: CITED,
+    }
+    gen, _, _, streamed = modal(stream, premise, windows, policy)
+    out = list(gen)
+    assert len(out) == 1
+    assert out[0].verdict == "refused"
+    assert out[0].text == ABSTAIN_TEXT
+    assert streamed == out
+    assert gen.stop_reason == "abstained"
 
 
 def test_modal_outage_propagates_after_sentences(
