@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from legal_rag_router import RouteContext, Router, RouteResult, RouteStatus, partition_filter
+from legal_rag_router.coordinate import Coordinate as RouterCoordinate
 from legal_rag_verifier.corpus import instrument_coordinate
 from legal_rag_verifier.premise import Passage, Premise
 from symspellpy import SymSpell  # type: ignore[import-untyped]
@@ -75,6 +76,7 @@ from chapterverse.audit.prompt import (
     estimate_tokens,
     render_passage,
 )
+from chapterverse.bound_rank import InstrumentRanges, expand_siblings, rank_sections
 from chapterverse.citations import instrument_name, provision_label, render_citation
 from chapterverse.contracts import (
     AllProvidersUnavailable,
@@ -298,7 +300,7 @@ class Selection:
     """The windows sent to the model, renumbered ``P1..Pk`` in document order."""
 
     windows: tuple[Window, ...]
-    strategy: Literal["all", "lexical", "leading", "none"]
+    strategy: Literal["all", "lexical", "leading", "none", "ranked"]
     total: int
     estimated_tokens: int
 
@@ -309,6 +311,89 @@ def _cost(window: Window) -> int:
 
 def _renumber(windows: Iterable[Window]) -> tuple[Window, ...]:
     return tuple(dataclasses.replace(w, passage_id=f"P{i}") for i, w in enumerate(windows, start=1))
+
+
+def _order_section_windows(
+    sec_windows: list[tuple[int, Window]],
+    terms: frozenset[str],
+) -> list[tuple[int, Window, tuple[int, int] | None]]:
+    scored = []
+    best_candidate = None
+    best_tuple = (-1, -1, -1)
+    for idx, w in sec_windows:
+        span, distinct, matches = highlight_span(w.text, terms)
+        item = (idx, w, span)
+        scored.append(item)
+        if distinct > 0:
+            tup = (w.status is TemporalStatus.IN_FORCE, distinct, matches)
+            if tup > best_tuple:
+                best_tuple = tup
+                best_candidate = item
+
+    if best_candidate is not None:
+        return [best_candidate, *(item for item in scored if item[0] != best_candidate[0])]
+    return scored
+
+
+def select_ranked_windows(
+    windows: Sequence[Window],
+    ranked_sections: Sequence[tuple[Coordinate, float]],
+    query: str,
+    *,
+    budget_tokens: int = PREMISE_BUDGET_TOKENS,
+    max_windows: int = MAX_PROMPT_WINDOWS,
+) -> Selection:
+    """Cap ``windows`` using section rank order (requirements R3).
+
+    Walks sections best first and adds that section's windows (the window with the best
+    lexical highlight first, then the rest of the section in order) while they fit the
+    budget and the window cap, keeping highlight trimming as ``select_windows`` does.
+    """
+    if budget_tokens < 1 or max_windows < 1:
+        raise ValueError("budget_tokens and max_windows must be positive")
+    if not windows:
+        return Selection((), "none", 0, 0)
+    full = sum(_cost(w) for w in windows)
+    if full <= budget_tokens and len(windows) <= max_windows:
+        return Selection(_renumber(windows), "all", len(windows), full)
+
+    terms = query_terms(query)
+    chosen: dict[int, Window] = {}
+    used = 0
+    window_index_map = {id(w): i for i, w in enumerate(windows)}
+
+    for sec_coord, _ in ranked_sections:
+        if len(chosen) >= max_windows:
+            break
+        sec_windows = [
+            (window_index_map[id(w)], w)
+            for w in windows
+            if w.coordinate == sec_coord or w.coordinate.startswith(f"{sec_coord}/")
+        ]
+        if not sec_windows:
+            continue
+
+        for idx, w, span in _order_section_windows(sec_windows, terms):
+            if len(chosen) >= max_windows:
+                break
+            if idx in chosen:
+                continue
+            trimmed = dataclasses.replace(w, highlight=span) if span is not None else w
+            cost = _cost(trimmed)
+            if used + cost > budget_tokens:
+                if chosen:
+                    continue
+                frame = len(render_passage(dataclasses.replace(w, text="", highlight=None)))
+                room = int(budget_tokens * CHARS_PER_TOKEN) - frame - CONTEXT_MARGIN_CHARS - 8
+                trimmed = dataclasses.replace(w, highlight=(0, max(1, min(len(w.text), room))))
+                cost = _cost(trimmed)
+            chosen[idx] = trimmed
+            used += cost
+
+    if not chosen:
+        return select_windows(windows, query, budget_tokens=budget_tokens, max_windows=max_windows)
+
+    return Selection(_renumber(chosen[i] for i in sorted(chosen)), "ranked", len(windows), used)
 
 
 def select_windows(
@@ -572,6 +657,7 @@ class Pipeline:
         dictionary: SymSpell | None = None,
         dense: DenseRetriever | None = None,
         colbert: ColbertScorer | None = None,
+        bound_ranker: InstrumentRanges | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -581,6 +667,13 @@ class Pipeline:
         self.modal_kv = modal_kv
         self.dense = dense
         self.colbert = colbert
+        if bound_ranker is None:
+            concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
+            if concepts is not None:
+                bound_ranker = InstrumentRanges()
+                bound_ranker.start_background_build(concepts)
+        self.bound_ranker = bound_ranker
+        self._logged_bound_rank_fallback = False
         if primary_provider is None and isinstance(rotation, ProviderRotation):
             order = rotation.order("generate")
             primary_provider = order[0] if order else None
@@ -625,6 +718,22 @@ class Pipeline:
         if self._clock is not None:
             return self._clock().astimezone(UTC).date()
         return datetime.now(UTC).date()
+
+    def _log_bound_rank_fallback(self) -> None:
+        if not self._logged_bound_rank_fallback:
+            self._logged_bound_rank_fallback = True
+            log.info("bound ranking not ready or unavailable; falling back to lexical selection")
+
+    def _expand_bound_result(self, result: RouteResult, query: str) -> RouteResult:
+        if not result.coordinates:
+            return result
+        expanded: list[str] = []
+        for c in result.coordinates:
+            expanded.extend(expand_siblings(query, str(c), self.store))
+        if expanded and expanded != [str(c) for c in result.coordinates]:
+            new_coords = tuple(RouterCoordinate.parse(s) for s in expanded)
+            return dataclasses.replace(result, coordinates=new_coords)
+        return result
 
     def __repr__(self) -> str:
         return f"Pipeline(rotation={self.rotation!r}, modal_kv={self.modal_kv is not None})"
@@ -858,6 +967,7 @@ class Pipeline:
         # If the raw result is ROUTE_BOUNDED, use it and the raw text;
         # spelling correction is not applied and no corrections notice is sent.
         if raw_result.status is RouteStatus.BOUNDED:
+            raw_result = self._expand_bound_result(raw_result, raw)
             stream.outcome.route_status = raw_result.status.value
             stream(RouteEvent.from_route_result(raw_result))
             self._bounded(request, raw_result, stream, cancelled, norm_text=raw)
@@ -869,6 +979,7 @@ class Pipeline:
         # or if the raw result was ROUTE_UNRESOLVED (then discovery runs on the normalised text);
         # in every other case keep the raw result (raw abstentions and clarifications stand).
         if norm_result.status is RouteStatus.BOUNDED:
+            norm_result = self._expand_bound_result(norm_result, raw)
             self._emit_route_with_corrections(stream, norm_result, norm.corrections)
             self._bounded(
                 request, norm_result, stream, cancelled, masked=masked, norm_text=norm.text
@@ -885,7 +996,10 @@ class Pipeline:
 
     def _read(self, request: AskRequest, result: RouteResult) -> _Read:
         partition_filter(result)  # validates every coordinate; raises FilterError
-        bound = _minimal([str(c) for c in result.coordinates])
+        expanded: list[str] = []
+        for c in result.coordinates:
+            expanded.extend(expand_siblings(request.query, str(c), self.store))
+        bound = _minimal([str(c) for c in (expanded or result.coordinates)])
         excluded = [str(c) for c in result.excluded]
         read = _Read()
         for coordinate in bound:
@@ -914,10 +1028,10 @@ class Pipeline:
             for row in rows:
                 if row.get("record_type") == "instrument":
                     continue
-                c = str(row.get("coordinate"))
-                if c in seen or _excluded(c, excluded):
+                row_coord = str(row.get("coordinate"))
+                if row_coord in seen or _excluded(row_coord, excluded):
                     continue
-                seen.add(c)
+                seen.add(row_coord)
                 kept.append(row)
         return read
 
@@ -985,12 +1099,8 @@ class Pipeline:
             stream(NoticeEvent(code="status_excluded", message=message))
 
         windows, passages, titles, citations, provisions = self._windows(request, result, read)
-        selection = select_windows(
-            windows,
-            norm_text,
-            budget_tokens=self.config.premise_budget_tokens,
-            max_windows=self.config.max_prompt_windows,
-        )
+        bound = _minimal([str(c) for c in result.coordinates])
+        selection = self._select_windows_for_bound(windows, norm_text, bound)
         stream.outcome.windows_total = selection.total
         stream.outcome.windows_sent = len(selection.windows)
         stream.outcome.selection = selection.strategy
@@ -1062,6 +1172,56 @@ class Pipeline:
             spans=spans,
             sentences=sentences,
             calls=calls,
+        )
+
+    def _select_windows_for_bound(
+        self,
+        windows: Sequence[Window],
+        norm_text: str,
+        bound: list[str],
+    ) -> Selection:
+        is_whole_instrument = len(bound) == 1 and len(bound[0].split("/")) in (4, 5)
+        full_cost = sum(_cost(w) for w in windows)
+        windows_fit = (
+            full_cost <= self.config.premise_budget_tokens
+            and len(windows) <= self.config.max_prompt_windows
+        )
+        if not is_whole_instrument or windows_fit:
+            return select_windows(
+                windows,
+                norm_text,
+                budget_tokens=self.config.premise_budget_tokens,
+                max_windows=self.config.max_prompt_windows,
+            )
+
+        ranked_sections: list[tuple[Coordinate, float]] = []
+        if self.bound_ranker is not None and self.bound_ranker.ready:
+            concepts = getattr(self.router, "concepts", None) or getattr(
+                self.router, "_concepts", None
+            )
+            if concepts is not None:
+                ranked_sections = rank_sections(
+                    norm_text,
+                    bound[0],
+                    concepts=concepts,
+                    ranges=self.bound_ranker,
+                    dense=self.dense,
+                )
+        if ranked_sections:
+            return select_ranked_windows(
+                windows,
+                ranked_sections,
+                norm_text,
+                budget_tokens=self.config.premise_budget_tokens,
+                max_windows=self.config.max_prompt_windows,
+            )
+
+        self._log_bound_rank_fallback()
+        return select_windows(
+            windows,
+            norm_text,
+            budget_tokens=self.config.premise_budget_tokens,
+            max_windows=self.config.max_prompt_windows,
         )
 
     def _windows(

@@ -95,6 +95,7 @@ from tokenizers import Tokenizer
 
 from chapterverse.audit.modal_path import BearerPost, ModalSGLangBackend
 from chapterverse.audit.policy import build_policy
+from chapterverse.bound_rank import InstrumentRanges
 from chapterverse.config import ConfigError, Settings
 from chapterverse.contracts import (
     AllProvidersUnavailable,
@@ -748,6 +749,11 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     )
     router = Router.from_path(settings.router_index, concepts=settings.concepts_index)
     check_snapshots(store, router)
+    concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
+    bound_ranker: InstrumentRanges | None = None
+    if concepts is not None:
+        bound_ranker = InstrumentRanges()
+        bound_ranker.start_background_build(concepts)
     log.info(
         "data open in %.1fs: corpus %s, snapshot %s",
         time.perf_counter() - t0,
@@ -800,6 +806,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         dictionary=sym_dict,
         dense=dense_retriever,
         colbert=colbert_scorer,
+        bound_ranker=bound_ranker,
     )
     limiter = TokenBucket(
         per_minute=_env_number(env, "RATE_LIMIT_PER_MINUTE", 10.0),

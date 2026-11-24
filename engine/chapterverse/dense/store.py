@@ -46,6 +46,15 @@ class VectorStore(Protocol):
         """Search top-k doc_ids with their float similarity scores."""
         ...
 
+    def score_rows(
+        self,
+        query: np.ndarray,
+        start: int,
+        end: int,
+    ) -> np.ndarray:
+        """Score rows in range [start, end) against query."""
+        ...
+
 
 class BinaryInt8Store:
     """Exact vector store with int8 scalar quantisation and binary sign codes.
@@ -204,3 +213,17 @@ class BinaryInt8Store:
         k_res = min(k, len(cands))
         order = np.lexsort((cands, -scores))[:k_res]
         return [(int(cands[i]), float(scores[i])) for i in order]
+
+    def score_rows(
+        self,
+        query: np.ndarray,
+        start: int,
+        end: int,
+    ) -> np.ndarray:
+        """Exact float32 dequantised dot product scores for rows in [start, end)."""
+        if start >= end or self.count == 0:
+            return np.zeros(0, dtype=np.float32)
+        q_float = query.astype(np.float32)
+        rows = self._vectors[start:end].astype(np.float32)
+        floats = rows * self._scales
+        return np.asarray(floats.dot(q_float), dtype=np.float32)
