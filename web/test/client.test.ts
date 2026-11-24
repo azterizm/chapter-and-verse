@@ -79,6 +79,17 @@ describe("parseEventData", () => {
     const raw = sources!.raw.replace('"IN_FORCE"', '"MAYBE"');
     expect(() => parseEventData("sources", raw)).toThrow(PayloadError);
   });
+
+  it("accepts quote_requested extractive reason and rejects unknown reasons", () => {
+    const ev = events("extractive").find((e) => e.event.type === "extractive")!;
+    const quoteRaw = ev.raw.replace('"providers_unavailable"', '"quote_requested"');
+    const parsed = parseEventData("extractive", quoteRaw);
+    expect(parsed.type).toBe("extractive");
+    if (parsed.type === "extractive") expect(parsed.reason).toBe("quote_requested");
+
+    const badRaw = ev.raw.replace('"providers_unavailable"', '"unknown_reason"');
+    expect(() => parseEventData("extractive", badRaw)).toThrow(PayloadError);
+  });
 });
 
 describe("receipt bytes", () => {

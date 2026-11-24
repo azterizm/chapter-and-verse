@@ -90,6 +90,7 @@ from chapterverse.contracts import (
     DoneEvent,
     ErrorEvent,
     Event,
+    ExtractiveEvent,
     ExtractiveReason,
     NoticeEvent,
     Policy,
@@ -118,7 +119,13 @@ from chapterverse.discovery import (
     is_named_private_document,
     remove_bare_section,
 )
-from chapterverse.extractive import extractive_answer, highlight_span, query_terms
+from chapterverse.extractive import (
+    MAX_EXTRACTIVE_WINDOWS,
+    extractive_answer,
+    highlight_span,
+    query_terms,
+)
+from chapterverse.intent import is_quote_request
 from chapterverse.nlp import analyse
 from chapterverse.normalise import Normalised, find_protected_spans, load_dictionary, normalise
 from chapterverse.pii import Masked, mask_pii
@@ -145,6 +152,7 @@ from chapterverse.templates import (
     provider_fallback_notice,
     provider_warming_notice,
     providers_unavailable_notice,
+    quote_truncated_notice,
     route_refusal,
     status_refusal,
 )
@@ -1106,7 +1114,7 @@ class Pipeline:
 
         return None
 
-    def _bounded(
+    def _bounded(  # noqa: PLR0912, PLR0915
         self,
         request: AskRequest,
         result: RouteResult,
@@ -1151,6 +1159,31 @@ class Pipeline:
 
         windows, passages, titles, citations, provisions = self._windows(request, result, read)
         bound = _minimal([str(c) for c in result.coordinates])
+        if (
+            windows
+            and is_quote_request(norm_text)
+            and bound
+            and all(c != instrument_coordinate(c) for c in bound)
+        ):
+            shown = _renumber(
+                dataclasses.replace(w, highlight=None) for w in windows[:MAX_EXTRACTIVE_WINDOWS]
+            )
+            stream.outcome.windows_total = len(windows)
+            stream.outcome.windows_sent = len(shown)
+            stream.outcome.selection = "quote"
+            stream(SourcesEvent(windows=shown))
+            stream(ExtractiveEvent(reason="quote_requested", windows=shown))
+            if len(windows) > MAX_EXTRACTIVE_WINDOWS:
+                stream(quote_truncated_notice(len(shown), len(windows)))
+            self._receipt(
+                stream,
+                result,
+                mode="extractive",
+                version_dates=version_dates,
+                passages={w.passage_id: w.coordinate for w in shown},
+                spans={},
+            )
+            return
         selection = self._select_windows_for_bound(windows, norm_text, bound)
         stream.outcome.windows_total = selection.total
         stream.outcome.windows_sent = len(selection.windows)

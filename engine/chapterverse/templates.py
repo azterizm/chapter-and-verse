@@ -56,6 +56,7 @@ __all__ = [
     "provider_fallback_notice",
     "provider_warming_notice",
     "providers_unavailable_notice",
+    "quote_truncated_notice",
     "refusal",
     "route_refusal",
     "status_refusal",
@@ -159,6 +160,7 @@ EXTRACTIVE_BANNERS: Final[Mapping[ExtractiveReason, str]] = {
         "The model is starting up. The provision text is shown, with the part matching the "
         "question highlighted. Ask again in a few minutes for a written answer."
     ),
+    "quote_requested": "Statutory text, quoted from legislation.gov.uk.",
 }
 
 DAILY_CAP_MESSAGE: Final = (
@@ -183,6 +185,7 @@ NOTICE_CODES: Final = (
     "daily_cap",
     "global_budget",
     "providers_unavailable",
+    "quote_truncated",
 )
 
 _MONTHS: Final = (
@@ -455,6 +458,17 @@ def daily_cap_notice() -> NoticeEvent:
 def global_budget_notice() -> NoticeEvent:
     """The daily limit for generated answers across all users was reached."""
     return NoticeEvent(code="global_budget", message=GLOBAL_BUDGET_MESSAGE)
+
+
+def quote_truncated_notice(shown: int, total: int) -> NoticeEvent:
+    """Only ``shown`` of ``total`` provisions fit in a quote response."""
+    return NoticeEvent(
+        code="quote_truncated",
+        message=(
+            f"Showing {shown} of {total} provisions. Read the full text at the "
+            "legislation.gov.uk link."
+        ),
+    )
 
 
 def corrections_notice(corrections: Sequence[tuple[str, str]]) -> NoticeEvent | None:
