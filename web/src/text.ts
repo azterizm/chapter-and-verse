@@ -114,3 +114,40 @@ export function splitHighlight(text: string, span: [number, number] | null): [st
 }
 
 export const shortId = (hex: string): string => hex.slice(0, 12);
+
+// Redesign foundation copy (design.md section 7)
+export const PURPOSE_LINE = "UK law, answered with the section it comes from.";
+export const COMPOSER_PLACEHOLDER = "Ask about UK legislation";
+export const SEND_LABEL = "Send";
+
+export const EXAMPLE_QUESTIONS: readonly string[] = [
+  "How long do I have to sue in tort?",
+  "How long is the short-term right to reject?",
+  "Quote section 172(1) of the Companies Act 2006",
+];
+
+export const STATUS_STEPS = ["Finding the law", "Reading", "Checking each point"] as const;
+
+export const SOURCES_HEADING = "Sources";
+export const SOURCE_LINK_LABEL = "legislation.gov.uk";
+export const COPIED_TOAST = "Copied";
+export const COPY_FAILED_TOAST = "Copy failed";
+
+export const ACTION_COPY = "Copy";
+export const ACTION_VERIFY = "Verify";
+export const ACTION_NEW_QUESTION = "New question";
+
+export const RECEIPT_VERIFIED = "Receipt verified";
+export const RECEIPT_MISMATCH = "Receipt does not match";
+
+export const FOOTER_NOT_ADVICE = "Not legal advice";
+export const FOOTER_NO_PERSONAL_DATA = "Do not enter personal data";
+export const FOOTER_OGL =
+  "Contains public sector information licensed under the Open Government Licence v3.0";
+export const footerSnapshot = (snapshot: string): string => `Law as at ${snapshot}`;
+
+// W2 answer strings
+
+// W3 source strings
+
+// W4 shell strings
