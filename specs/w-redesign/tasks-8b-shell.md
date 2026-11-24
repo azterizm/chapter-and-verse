@@ -1,0 +1,3 @@
+# W8b: tasks (parallel with W8a)
+Fix review-3.md items 2 and 3, and stop passing `onNewQuestion` to Turn in App.tsx (the other worker removes the prop). Files you own: `web/src/App.tsx`, `web/src/state/reducer.ts` (only if a reset action is needed), `web/test/reducer.test.ts`, the W4 block of `web/src/text.ts`, `web/test/dom/shell.test.tsx`. Allowed shell commands: exactly as in tasks-1-foundation.md.
+- [ ] 1. Items 2 and 3, tests (reset restores the empty state and focuses the composer; the memonsystems link has the right href, target, rel and label in both states). Run the four npm scripts. Print a short summary.
