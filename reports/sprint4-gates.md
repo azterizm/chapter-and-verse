@@ -35,5 +35,12 @@ Seal: `batteries/legal/SEAL.json` sha256 0bfaa91b... The test split was run once
 
 Before Sprint 4 (live, 23 Nov): L01 36.6 s to an abstention with 8 citations on a "not stated" sentence; L07 paraphrase plus the abstention printed twice.
 
-## Not yet run
-- Live probes and live legal battery (after deploy).
+## Live (deployed 24 Nov 2026 16:26 UTC: Worker version 8a698b1e, A1 engine at sprint-4 87ab979)
+
+- Engine restart to healthy about 25 s; instrument ranges built in 1.50 s (69,925 instruments, 9.4 MB); dense on.
+- Site 200, origin health 200. Live probes at pace 7: 29/29.
+- Live legal answers (rubric 3/3 pass): L01 six years [s.2] then the abstention (84abcad47059); L07 quote of s.172(1)(a) to (d) (101e824cc8bd); L09 "lasts for 30 days, unless a specific exception applies" [s.22(3)] then the incomplete notice (268bc1a4a44c).
+- L09 stopped early because Groq's minute window was full from L01 run 10 s before (6,667 of 8,000 tokens), a Cloudflare judge call took 11.1 s and the next Cloudflare call hit the 12 s timeout; Modal was cold. Safe outcome (one verified sentence, honest notice).
+
+## Follow-up (F12, later sprint)
+- Groq's 8,000 tokens a minute holds about one answer a minute (each call sends about 1,100 to 1,400 prompt tokens, 57 to 63% premise). Send the judge only the cited passages (needs the sealed judge gate), and consider a Modal warm-up when Groq's window is full.
