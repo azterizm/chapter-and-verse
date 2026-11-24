@@ -147,7 +147,55 @@ export const FOOTER_OGL =
 export const footerSnapshot = (snapshot: string): string => `Law as at ${snapshot}`;
 
 // W2 answer strings
+export const QUESTION_LABEL = "Question: ";
+export const NOTICES_ARIA_LABEL = "Notices";
+export const CLARIFY_ARIA_LABEL = "Clarify";
+export const CLARIFY_TITLE = "Choose a provision";
+export const EXTRACTIVE_ARIA_LABEL = "Provision text";
+export const EMPTY_ANSWER_TEXT = "No point could be stated reliably from these provisions.";
+export const STOPPED_TEXT = "Stopped.";
+export const ERROR_SERVER_TITLE = "The server stopped this answer";
+export const ERROR_CLIENT_TITLE = "This answer failed";
+export const ACTION_RETRY = "Retry";
+export const SUGGESTIONS_LABEL = "Did you mean";
+export const REFUSAL_LINK_LABEL = "Read on legislation.gov.uk";
+export const OPENS_NEW_TAB = " (opens in a new tab)";
+export const ANSWER_ID_LABEL = "Answer id";
+export const RECEIPT_UNAVAILABLE = "Verification unavailable";
+export const citationShowTitle = (passageId: string): string => `Show ${passageId} in the sources`;
+export const copyQuoteLabel = (heading: string): string => `Copy ${heading}`;
+export const refusalSnapshotText = (snapshot: string): string => `Corpus snapshot ${formatDate(snapshot)}.`;
+export const answerIdCopyLine = (answerId: string): string => `Answer id: ${answerId}`;
 
 // W3 source strings
+export const SOURCE_STATUS_BADGE: Partial<Record<TemporalStatus, string>> = {
+  NOT_YET_IN_FORCE: "Not in force",
+  REPEALED: "Repealed",
+  TEXT_NOT_HELD: "Text not held",
+  HISTORY_NOT_HELD: "Text not held",
+};
+
+export const SOURCE_STATUS_PREFIX = "Status: ";
+export const SOURCE_LINK_NEW_TAB = " (opens in a new tab)";
+export const SOURCE_FINDING = "Finding the provisions";
+
+export function sourceVersionDate(formattedDate: string): string {
+  return `Version of ${formattedDate}`;
+}
+
+export function formatSourceCopy(text: string, label: string, url: string): string {
+  return `${text}\n\n${label}\n${url}`;
+}
 
 // W4 shell strings
+export const WORDMARK = "Chapter & Verse";
+export const SKIP_TO_COMPOSER = "Skip to the question box";
+export const MAIN_HEADING = "Ask about UK legislation";
+export const EXAMPLES_LABEL = "Example questions";
+export const COMPOSER_FORM_LABEL = "Ask a question";
+export const COMPOSER_TOO_LONG = "Question is too long.";
+export const FOOTER_SNAPSHOT_UNKNOWN = "not known";
+export const THEME_LABEL = "Theme";
+export const THEME_SYSTEM = "System";
+export const THEME_LIGHT = "Light";
+export const THEME_DARK = "Dark";

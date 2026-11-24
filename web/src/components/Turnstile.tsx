@@ -244,5 +244,5 @@ export function Turnstile({ resetKey, onToken, onError, onTimeout }: Props) {
     }
   }, [resetKey]);
 
-  return <div className="turnstile" ref={el} />;
+  return <div className="mb-2 flex justify-start" ref={el} />;
 }

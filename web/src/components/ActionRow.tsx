@@ -1,0 +1,221 @@
+import { Check, Copy, Plus, ShieldCheck, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { copyText } from "../lib/clipboard";
+import { panelWindows, type Turn as TurnData } from "../state/reducer";
+import {
+  ACTION_COPY,
+  ACTION_NEW_QUESTION,
+  ACTION_VERIFY,
+  answerIdCopyLine,
+  COPIED_TOAST,
+  COPY_FAILED_TOAST,
+  RECEIPT_MISMATCH,
+  RECEIPT_UNAVAILABLE,
+  RECEIPT_VERIFIED,
+  refusalTitle,
+  SOURCES_HEADING,
+} from "../text";
+import { downloadReceipt, type ReceiptCheck, verifyReceiptHash } from "./Receipt";
+import { Button } from "./ui/button";
+import { useToast } from "./ui/toast";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+
+interface Props {
+  turn: TurnData;
+  onNewQuestion?: (() => void) | undefined;
+}
+
+const COPIED_RESET_MS = 1500;
+
+/** Format a finished turn into the plain-text R4 clipboard layout. */
+export function formatAnswerCopyText(turn: TurnData): string {
+  const sections: string[] = [];
+
+  if (turn.sentences.length > 0) {
+    const lines = turn.sentences.map((ev) => {
+      if (ev.sentence.verdict !== "refused" && ev.citations.length > 0) {
+        const labels = ev.citations.map((c) => c.label).join(", ");
+        return `${ev.sentence.text} [${labels}]`;
+      }
+      return ev.sentence.text;
+    });
+    sections.push(lines.join("\n"));
+  } else if (turn.extractive !== null && turn.extractive.windows.length > 0) {
+    sections.push(turn.extractive.windows.map((w) => `${w.heading}\n${w.text}`).join("\n\n"));
+  } else if (turn.refusal !== null) {
+    sections.push(`${refusalTitle(turn.refusal.kind)}\n${turn.refusal.message}`);
+  }
+
+  const sources: { label: string; url: string }[] = [];
+  const seen = new Set<string>();
+  for (const ev of turn.sentences) {
+    if (ev.sentence.verdict === "refused") continue;
+    for (const c of ev.citations) {
+      const key = `${c.label}\0${c.url}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        sources.push({ label: c.label, url: c.url });
+      }
+    }
+  }
+  if (sources.length === 0) {
+    for (const w of panelWindows(turn)) {
+      const key = `${w.heading}\0${w.source_url}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        sources.push({ label: w.heading, url: w.source_url });
+      }
+    }
+  }
+  if (sources.length > 0) {
+    const sourceLines = sources.map((s) => `- ${s.label}: ${s.url}`);
+    sections.push(`${SOURCES_HEADING}:\n${sourceLines.join("\n")}`);
+  }
+
+  if (turn.receipt !== null) {
+    sections.push(answerIdCopyLine(turn.receipt.answer_id));
+  }
+
+  return sections.join("\n\n");
+}
+
+function hasCopyableContent(turn: TurnData): boolean {
+  return (
+    turn.sentences.length > 0 ||
+    (turn.extractive !== null && turn.extractive.windows.length > 0) ||
+    turn.refusal !== null
+  );
+}
+
+/** Post-answer action row: Copy, Verify (receipt), and New question. */
+export function ActionRow({ turn, onNewQuestion }: Props) {
+  const [copied, setCopied] = useState(false);
+  const [verifyState, setVerifyState] = useState<{ answerId: string; result: ReceiptCheck } | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { showToast } = useToast();
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  async function handleCopy() {
+    const ok = await copyText(formatAnswerCopyText(turn));
+    if (ok) {
+      setCopied(true);
+      showToast(COPIED_TOAST);
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
+        setCopied(false);
+      }, COPIED_RESET_MS);
+    } else {
+      showToast(COPY_FAILED_TOAST);
+    }
+  }
+
+  async function handleVerify() {
+    if (!turn.receipt) return;
+    const targetReceipt = turn.receipt;
+    downloadReceipt(targetReceipt);
+    const result = await verifyReceiptHash(targetReceipt);
+    setVerifyState({ answerId: targetReceipt.answer_id, result });
+  }
+
+  function handleNewQuestion() {
+    if (onNewQuestion) {
+      onNewQuestion();
+      return;
+    }
+    const composer = document.getElementById("q");
+    if (composer instanceof HTMLElement) {
+      composer.focus();
+    }
+  }
+
+  const verified =
+    turn.receipt !== null && verifyState?.answerId === turn.receipt.answer_id ? verifyState.result : null;
+
+  return (
+    <TooltipProvider delayDuration={300}>
+      <div className="mt-4 flex flex-wrap items-center gap-1">
+        {hasCopyableContent(turn) && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="md"
+                className="h-11 w-11 px-0 text-muted-foreground hover:text-primary min-[400px]:w-auto min-[400px]:px-3"
+                aria-label={ACTION_COPY}
+                onClick={() => void handleCopy()}
+              >
+                {copied ? (
+                  <Check className="h-4 w-4 text-primary copy-morph" aria-hidden="true" />
+                ) : (
+                  <Copy className="h-4 w-4" aria-hidden="true" />
+                )}
+                <span className="hidden min-[400px]:inline">{ACTION_COPY}</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{ACTION_COPY}</TooltipContent>
+          </Tooltip>
+        )}
+
+        {turn.receipt !== null && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="md"
+                className="h-11 w-11 px-0 text-muted-foreground hover:text-primary min-[400px]:w-auto min-[400px]:px-3"
+                aria-label={ACTION_VERIFY}
+                onClick={() => void handleVerify()}
+              >
+                <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                <span className="hidden min-[400px]:inline">{ACTION_VERIFY}</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{ACTION_VERIFY}</TooltipContent>
+          </Tooltip>
+        )}
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="md"
+              className="h-11 w-11 px-0 text-muted-foreground hover:text-primary min-[400px]:w-auto min-[400px]:px-3"
+              aria-label={ACTION_NEW_QUESTION}
+              onClick={handleNewQuestion}
+            >
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              <span className="hidden min-[400px]:inline">{ACTION_NEW_QUESTION}</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{ACTION_NEW_QUESTION}</TooltipContent>
+        </Tooltip>
+
+        {verified !== null && (
+          <span
+            role="status"
+            aria-live="polite"
+            className="ml-1 inline-flex items-center gap-1 text-caption text-muted-foreground"
+          >
+            {verified === "match" ? (
+              <>
+                <Check className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+                <span>{RECEIPT_VERIFIED}</span>
+              </>
+            ) : (
+              <>
+                <X className="h-3.5 w-3.5 text-foreground" aria-hidden="true" />
+                <span>{verified === "mismatch" ? RECEIPT_MISMATCH : RECEIPT_UNAVAILABLE}</span>
+              </>
+            )}
+          </span>
+        )}
+      </div>
+    </TooltipProvider>
+  );
+}

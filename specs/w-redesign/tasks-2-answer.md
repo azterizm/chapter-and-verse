@@ -6,8 +6,8 @@ Contract with the other workers: `Turn` keeps its current props and adds none ex
 
 Allowed shell commands: exactly as in tasks-1-foundation.md.
 
-- [ ] 1. Read `specs/w-redesign/requirements.md` (R2, R4, R5, R7), `design.md` (sections 3, 5, 6, 7), the files you own, `web/src/components/ui/*`, `web/src/index.css`, `web/src/lib/*`.
-- [ ] 2. Restyle Turn with tokens and Tailwind classes only: question line, StatusLine, sentences with sentence-in motion and chips, muted abstention, Notice lines, QuoteBlock for `quote_requested` extractive answers (and the same block, without per-block copy, for other extractive reasons with their notice), refusal/clarify/error cards (Retry on error re-sends as today).
-- [ ] 3. ActionRow after done: Copy (R4 text format, toast), Verify (existing receipt logic, inline result), New question.
-- [ ] 4. Tests: sentence chips render engine labels; abstention has no chips; Copy produces the exact R4 text for a fixture turn; quote blocks render full text and copy buttons; action row appears only when done; reduced-motion class presence is not required.
-- [ ] 5. Run the four npm scripts. Print a short summary.
+- [x] 1. Read `specs/w-redesign/requirements.md` (R2, R4, R5, R7), `design.md` (sections 3, 5, 6, 7), the files you own, `web/src/components/ui/*`, `web/src/index.css`, `web/src/lib/*`.
+- [x] 2. Restyle Turn with tokens and Tailwind classes only: question line, StatusLine, sentences with sentence-in motion and chips, muted abstention, Notice lines, QuoteBlock for `quote_requested` extractive answers (and the same block, without per-block copy, for other extractive reasons with their notice), refusal/clarify/error cards (Retry on error re-sends as today).
+- [x] 3. ActionRow after done: Copy (R4 text format, toast), Verify (existing receipt logic, inline result), New question.
+- [x] 4. Tests: sentence chips render engine labels; abstention has no chips; Copy produces the exact R4 text for a fixture turn; quote blocks render full text and copy buttons; action row appears only when done; reduced-motion class presence is not required.
+- [x] 5. Run the four npm scripts. Print a short summary.
