@@ -162,6 +162,7 @@ export function Turn({ turn, busy, onAsk, onShowSource, onNewQuestion }: Props) 
               window={w}
               turnId={turn.id}
               label={quoteLabels?.blockLabels[i]}
+              grouped={Boolean(quoteLabels?.groupHeading)}
               allowCopy={quoteAnswer}
               onShowSource={quoteAnswer ? undefined : onShowSource}
             />

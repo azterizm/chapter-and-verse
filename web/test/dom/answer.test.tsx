@@ -441,8 +441,10 @@ describe("QuoteBlock and extractive answers", () => {
     renderTurn(turn);
 
     expect(screen.getByRole("heading", { level: 3, name: "Companies Act 2006, section 172(1)" })).toBeInTheDocument();
-    expect(screen.getByText("(a)")).toBeInTheDocument();
-    expect(screen.getByText("(b)")).toBeInTheDocument();
+    expect(screen.queryByText("(a)")).not.toBeInTheDocument();
+    expect(screen.queryByText("(b)")).not.toBeInTheDocument();
+    expect(screen.getByText(w1.text)).toBeInTheDocument();
+    expect(screen.getByText(w2.text)).toBeInTheDocument();
     expect(screen.queryByText(w1.heading)).not.toBeInTheDocument();
     expect(screen.queryByText(w2.heading)).not.toBeInTheDocument();
     expect(screen.queryByText(SOURCE_LINK_LABEL)).not.toBeInTheDocument();
@@ -454,8 +456,52 @@ describe("QuoteBlock and extractive answers", () => {
     expect(linkB).toHaveAttribute("href", w2.source_url);
     expect(linkB.textContent).toBe("");
 
-    await user.click(screen.getByRole("button", { name: "Copy (a)" }));
+    const copyA = screen.getByRole("button", { name: "Copy (a)" });
+    expect(screen.getByRole("button", { name: "Copy (b)" })).toBeInTheDocument();
+    expect(copyA.closest("blockquote")?.querySelector("p")).toHaveTextContent(w1.text);
+    expect(copyA.parentElement?.parentElement).toHaveClass("flex", "items-start", "justify-between");
+    expect(copyA.parentElement?.parentElement).toContainElement(screen.getByText(w1.text));
+
+    await user.click(copyA);
     expect(writeText).toHaveBeenCalledWith(`${w1.heading}\n${w1.text}\n${w1.source_url}`);
+  });
+
+  it("keeps the separate block label in a grouped quote when the text does not start with that label", () => {
+    const w1 = makeWindow({
+      passage_id: "P1",
+      coordinate: "uk/ukpga/2006/46/s172/1",
+      heading: "Companies Act 2006, section 172(1) (Duty to promote the success of the company)",
+      text: "(1) A director of a company must act in the way he considers, in good faith, would be most likely to promote the success of the company.",
+      source_url: "https://www.legislation.gov.uk/ukpga/2006/46/section/172/1",
+    });
+    const w2 = makeWindow({
+      passage_id: "P2",
+      coordinate: "uk/ukpga/2006/46/s172/2/a",
+      heading: "Companies Act 2006, section 172(2)(a) (Duty to promote the success of the company)",
+      text: "(a) if or to the extent that the purposes of the company consist of or include purposes other than the benefit of its members,",
+      source_url: "https://www.legislation.gov.uk/ukpga/2006/46/section/172/2/a",
+    });
+
+    const turn = makeTurn({
+      query: "Quote section 172 of the Companies Act 2006",
+      sentences: [],
+      windows: [w1, w2],
+      extractive: {
+        type: "extractive",
+        reason: "quote_requested",
+        windows: [w1, w2],
+      },
+    });
+
+    renderTurn(turn);
+
+    expect(screen.getByRole("heading", { level: 3, name: "Companies Act 2006, section 172" })).toBeInTheDocument();
+    expect(screen.queryByText("(1)")).not.toBeInTheDocument();
+    expect(screen.getByText("(2)(a)")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: quoteLinkLabel("(1)") })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy (2)(a)" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: quoteLinkLabel("(2)(a)") })).toBeInTheDocument();
   });
 
   it("omits group heading and uses short coordinate labels when quote windows do not share a parent", () => {

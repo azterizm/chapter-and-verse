@@ -1,0 +1,3 @@
+# W7: tasks
+Files you own: `web/src/components/QuoteBlock.tsx`, `web/src/components/Turn.tsx` (quote rendering only), `web/test/dom/answer.test.tsx`. Allowed shell commands: exactly as in tasks-1-foundation.md.
+- [x] 1. In a grouped quote, when the block's statute text already starts with its own short label (for example the text "(a) the likely consequences ..." and the label "(a)"), do not render the separate label line; keep the label as the copy button's and link's accessible name context (aria-label "Copy (a)", "Open (a) on legislation.gov.uk"). Align the copy and link icons with the first line of text. Add a test. Run the four npm scripts and print a short summary.
