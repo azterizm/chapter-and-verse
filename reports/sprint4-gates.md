@@ -23,6 +23,17 @@ Seal: `batteries/legal/SEAL.json` sha256 0bfaa91b... The test split was run once
 | Concept battery dev (discovery) | hand hit@10 0.929, MRR 0.750 (identical) |
 | Security probes, local | 29/29 |
 
+## Answer level (local engine, real providers Groq and Cloudflare, no database), code 0e3138e
+
+| Row | Run | Result | Time | Answer |
+|---|---|---|---|---|
+| L01 Limitation Act tort | 1 | pass | 3.6 s | "You generally have six years from the date the cause of action accrued to bring an action founded on tort." [s.2], then the abstention (further sentence rejected, DEONTIC_SHIFT) |
+| L07 s.172(1)(a) to (d) quote | 1 | pass | 17 ms | extractive `quote_requested`, all four paragraphs, no model call |
+| L09 CRA short-term right to reject | 1 | pass | 10.0 s (backup provider: Groq minute window full after back-to-back runs) | 30 days unless an exception applies [s.22(3)], start of the period [s.22(3)], loss of the right [s.22(1)], earlier-expiry agreements not binding [s.22(2)] |
+| L09 | 2 | abstained | 2.5 s | judge rejected a dropped qualifier ("unless subsection (4) applies") |
+| L09 | 3 | pass in substance | 1.4 s | when the 30-day period starts [s.22(3)] |
+
+Before Sprint 4 (live, 23 Nov): L01 36.6 s to an abstention with 8 citations on a "not stated" sentence; L07 paraphrase plus the abstention printed twice.
+
 ## Not yet run
-- Answer level of the legal battery (needs provider calls; off-peak).
 - Live probes and live legal battery (after deploy).
