@@ -201,6 +201,7 @@ class _State:
     last_reasons: tuple[str, ...] = ()
     refused: bool = False
     last_rejected: SentenceVerdict | None = None
+    abstain_on_retry: bool = False
 
     def commit(self, text: str) -> None:
         sep = " " if self.context and not self.context[-1].isspace() else ""
@@ -287,16 +288,20 @@ class ChatContinuationGenerator:
         limit: int,
     ) -> Iterator[SentenceOut]:
         state.last_rejected = None
+        state.abstain_on_retry = False
         for raw in sentences:
             if self._timed_out():
                 self.stop_reason = "time_budget"
                 return
             if is_abstention(raw):
-                self.stop_reason = "abstained"
-                if not state.refused:
-                    state.refused = True
-                    yield self._refuse_abstention(state)
-                return
+                if state.point == 0:
+                    self.stop_reason = "abstained"
+                    if not state.refused:
+                        state.refused = True
+                        yield self._refuse_abstention(state)
+                    return
+                state.abstain_on_retry = True
+                break
             text, pids = split_refs(raw)
             cited = tuple(self.by_id[p].text for p in pids if p in self.by_id)
             if is_narration(text, cited):
@@ -328,10 +333,15 @@ class ChatContinuationGenerator:
         """Decide what a block that emitted no further sentence means. Sets ``stop_reason``
         when the answer ends; returns a refusal sentence to stream, if one was committed."""
         if rejected is not None:
-            reasons = reason_codes(rejected.reasons, rejected.details)
-            return self._rollback(state, reasons, rejected.aligned)
-        if not sentences and result.finish_reason == "length":
-            reasons = (EMPTY_BLOCK if not result.text.strip() else SENTENCE_TOO_LONG,)
+            return self._rollback(
+                state, reason_codes(rejected.reasons, rejected.details), rejected.aligned
+            )
+        if state.abstain_on_retry or (not sentences and result.finish_reason == "length"):
+            reasons = (
+                ("ABSTAIN_ON_RETRY",)
+                if state.abstain_on_retry
+                else (EMPTY_BLOCK if not result.text.strip() else SENTENCE_TOO_LONG,)
+            )
             return self._rollback(state, reasons, ())
         if result.finish_reason == "stop":
             self.stop_reason = "stop"

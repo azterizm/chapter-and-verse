@@ -4,6 +4,6 @@ Files you own: `engine/chapterverse/audit/continuation.py`, `engine/chapterverse
 
 Allowed shell commands, exactly: `uv run ruff check`, `uv run ruff format <your files>`, `uv run ruff format --check`, `uv run mypy`, `uv run pytest -q` (optionally with paths or `-k`), `grep`, `ls`, `cat`. Nothing else: no cd, no pipes, no redirection, no git. Never call a real provider. Run every command in the foreground and wait for it.
 
-- [ ] 1. Read the "Follow-up 2" section of `specs/s4-answer-voice/requirements.md` and both generators' abstention handling.
-- [ ] 2. R13.
-- [ ] 3. R14 tests, then all steering checks. Print a short summary.
+- [x] 1. Read the "Follow-up 2" section of `specs/s4-answer-voice/requirements.md` and both generators' abstention handling.
+- [x] 2. R13.
+- [x] 3. R14 tests, then all steering checks. Print a short summary.

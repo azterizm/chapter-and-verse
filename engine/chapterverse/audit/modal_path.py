@@ -58,6 +58,7 @@ from legal_rag_verifier.engine import Backend as EngineBackend
 from legal_rag_verifier.judge import PRESETS
 from legal_rag_verifier.premise import Premise
 from legal_rag_verifier.verifier import SentenceVerdict
+from legal_rag_verifier.verifier import Verdict as VerifierVerdict
 
 from chapterverse.audit.narration import is_narration
 from chapterverse.audit.prompt import (
@@ -301,6 +302,40 @@ def _can_ban(backend: EngineBackend) -> bool:
     return True
 
 
+def _synthetic_attempt(
+    draft: _Draft,
+    retry: _Retry,
+    sentence: str,
+    verdict_label: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "verdict": {
+            "text": sentence,
+            "span": [0, len(sentence)],
+            "verdict": verdict_label,
+            "reasons": [reason],
+            "claims": [],
+            "deontics": [],
+            "aligned_windows": [],
+            "nli": None,
+            "repair": None,
+            "claim_latency_ns": 0,
+            "nli_latency_ns": 0,
+            "details": [],
+        },
+        "steering": retry.steering,
+        "constraint": retry.constraint.to_dict() if retry.constraint else None,
+        "injected": retry.injection,
+        "tokens": len(draft.tokens),
+        "tokens_reused": len(retry.seed),
+        "tokens_discarded": 0,
+        "decode_calls": draft.calls,
+        "prefix_cache_hit_tokens": draft.hit_tokens,
+        "decode_latency_ns": draft.latency_ns,
+    }
+
+
 class _Engine(InFlightGenerator):
     """``InFlightGenerator`` with this app's prompt, source rendering and sentence callback."""
 
@@ -416,82 +451,44 @@ class _Engine(InFlightGenerator):
                     carry = draft
                     break
                 if is_abstention(sentence):
-                    if has_refusal:
+                    if point.rollbacks == 0:
+                        if has_refusal:
+                            stop_reason = "abstained"
+                            break
+                        has_refusal = True
+                        point.attempts.append(
+                            _synthetic_attempt(draft, retry, sentence, "refused", "ABSTAINED")
+                        )
+                        stream.commit(self._refusal(stream.answer))
+                        points.append(self._close(point, "refused", self.refusal))
                         stop_reason = "abstained"
                         break
-                    has_refusal = True
-                    attempt = {
-                        "verdict": {
-                            "text": sentence,
-                            "span": [0, len(sentence)],
-                            "verdict": "refused",
-                            "reasons": ["ABSTAINED"],
-                            "claims": [],
-                            "deontics": [],
-                            "aligned_windows": [],
-                            "nli": None,
-                            "repair": None,
-                            "claim_latency_ns": 0,
-                            "nli_latency_ns": 0,
-                            "details": [],
-                        },
-                        "steering": retry.steering,
-                        "constraint": retry.constraint.to_dict() if retry.constraint else None,
-                        "injected": retry.injection,
-                        "tokens": len(draft.tokens),
-                        "tokens_reused": len(retry.seed),
-                        "tokens_discarded": 0,
-                        "decode_calls": draft.calls,
-                        "prefix_cache_hit_tokens": draft.hit_tokens,
-                        "decode_latency_ns": draft.latency_ns,
-                    }
-                    point.attempts.append(attempt)
-                    stream.commit(self._refusal(stream.answer))
-                    points.append(self._close(point, "refused", self.refusal))
-                    stop_reason = "abstained"
-                    break
-                text, pids = split_refs(sentence)
-                cited = tuple(by_id[p].text for p in pids if p in by_id)
-                if is_narration(text, cited):
-                    if has_refusal:
+                    verdict = SentenceVerdict(
+                        sentence, 0, len(sentence), VerifierVerdict.ROLLBACK, ()
+                    )
+                    attempt = _synthetic_attempt(
+                        draft, retry, sentence, VerifierVerdict.ROLLBACK.value, "ABSTAIN_ON_RETRY"
+                    )
+                else:
+                    text, pids = split_refs(sentence)
+                    cited = tuple(by_id[p].text for p in pids if p in by_id)
+                    if is_narration(text, cited):
+                        if has_refusal:
+                            stop_reason = "abstained"
+                            break
+                        has_refusal = True
+                        point.attempts.append(
+                            _synthetic_attempt(draft, retry, sentence, "refused", "NARRATION")
+                        )
+                        stream.commit(self._refusal(stream.answer))
+                        points.append(self._close(point, "refused", self.refusal))
                         stop_reason = "abstained"
                         break
-                    has_refusal = True
-                    attempt = {
-                        "verdict": {
-                            "text": sentence,
-                            "span": [0, len(sentence)],
-                            "verdict": "refused",
-                            "reasons": ["NARRATION"],
-                            "claims": [],
-                            "deontics": [],
-                            "aligned_windows": [],
-                            "nli": None,
-                            "repair": None,
-                            "claim_latency_ns": 0,
-                            "nli_latency_ns": 0,
-                            "details": [],
-                        },
-                        "steering": retry.steering,
-                        "constraint": retry.constraint.to_dict() if retry.constraint else None,
-                        "injected": retry.injection,
-                        "tokens": len(draft.tokens),
-                        "tokens_reused": len(retry.seed),
-                        "tokens_discarded": 0,
-                        "decode_calls": draft.calls,
-                        "prefix_cache_hit_tokens": draft.hit_tokens,
-                        "decode_latency_ns": draft.latency_ns,
-                    }
-                    point.attempts.append(attempt)
-                    stream.commit(self._refusal(stream.answer))
-                    points.append(self._close(point, "refused", self.refusal))
-                    stop_reason = "abstained"
-                    break
-                if self._timed_out():
-                    stop_reason = "time_budget"
-                    break
-                verdict = self.verifier.check_sentence(premise, sentence, query=query)
-                attempt = self._attempt(draft, verdict, retry)
+                    if self._timed_out():
+                        stop_reason = "time_budget"
+                        break
+                    verdict = self.verifier.check_sentence(premise, sentence, query=query)
+                    attempt = self._attempt(draft, verdict, retry)
                 point.attempts.append(attempt)
                 if verdict.emitted:
                     if point.injected:

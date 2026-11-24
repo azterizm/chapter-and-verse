@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import pytest
-from legal_rag_verifier.engine import INJECT_TEMPLATE, Constraint, Segment, Tokens
+from legal_rag_verifier.engine import INJECT_TEMPLATE, Ban, Constraint, Segment, Tokens
 from legal_rag_verifier.premise import Premise
 
 from chapterverse.audit.continuation import (
@@ -135,7 +135,7 @@ class FakeBackend:
     name = "fake"
     model_id = "fake-qwen"
 
-    def __init__(self, stream: Mapping[str, str]) -> None:
+    def __init__(self, stream: Mapping[str, str | Sequence[str]]) -> None:
         self.stream = dict(stream)
         self.prompt_len = 0
         self.constraints: list[Constraint | None] = []
@@ -151,14 +151,27 @@ class FakeBackend:
     def decode(self, tokens: Sequence[int]) -> str:
         return "".join(chr(t) for t in tokens)
 
-    def _rest(self, context: str) -> str:
+    def _rest(self, context: str, constraint: Constraint | None = None) -> str:
+        banned = constraint.token_ids if isinstance(constraint, Ban) else frozenset()
         best = ""
-        found = False
-        for base, text in self.stream.items():
-            full = base + text
-            if context.startswith(base) and full.startswith(context) and len(base) >= len(best):
-                best, found = base, True
-        return (best + self.stream[best])[len(context) :] if found else ""
+        best_rest = ""
+        for base, entry in self.stream.items():
+            if isinstance(entry, str):
+                full = base + entry
+                if context.startswith(base) and full.startswith(context) and len(base) >= len(best):
+                    best, best_rest = base, full[len(context) :]
+                continue
+            for text in entry:
+                full = base + text
+                if not (context.startswith(base) and full.startswith(context)):
+                    continue
+                rest = full[len(context) :]
+                if rest and self.encode(rest)[0] in banned:
+                    continue
+                if len(base) >= len(best):
+                    best, best_rest = base, rest
+                break
+        return best_rest
 
     def extend(
         self,
@@ -169,7 +182,7 @@ class FakeBackend:
         constraint: Constraint | None,
     ) -> Segment:
         self.constraints.append(constraint)
-        rest = self._rest(self.decode(committed[self.prompt_len :]))
+        rest = self._rest(self.decode(committed[self.prompt_len :]), constraint)
         if not rest:
             return Segment((), "", "eos", len(committed), 1000)
         cut, finish = len(rest), "eos"
@@ -342,6 +355,34 @@ def test_chat_drafted_abstention_gives_one_refusal_and_zero_judge_calls(
     assert gen.stop_reason == "abstained"
 
 
+def test_chat_abstention_on_retry_rolls_back_until_supported(
+    run_chat: Callable[..., Run],
+) -> None:
+    out, rotation, judge, gen = run_chat([(WRONG, "stop"), (ABSTAIN_TEXT, "stop"), (GOOD1, "stop")])
+    assert out == [supported(0, TEXT1, ("P2",), rollbacks=2)]
+    assert judge.sentences == [WRONG.replace(" [P2]", ""), TEXT1]
+    assert [c.purpose for c in gen.calls] == ["generate", "judge", "generate", "generate", "judge"]
+    assert [r.seed for r in rotation.requests] == [0, 0, 1]
+    assert gen.stop_reason == "stop"
+
+
+def test_chat_abstention_on_retry_exhausting_budget_commits_refusal(
+    run_chat: Callable[..., Run],
+) -> None:
+    out, _, judge, gen = run_chat(
+        [
+            (WRONG, "stop"),
+            (ABSTAIN_TEXT, "stop"),
+            (ABSTAIN_TEXT, "stop"),
+            (ABSTAIN_TEXT, "stop"),
+            ("", "stop"),
+        ]
+    )
+    assert out == [SentenceOut(0, ABSTAIN_TEXT, "refused", (), ("ABSTAIN_ON_RETRY",), 4)]
+    assert judge.sentences == [WRONG.replace(" [P2]", "")]
+    assert gen.stop_reason == "stop"
+
+
 def test_two_refusing_points_give_one_abstain_text(run_chat: Callable[..., Run]) -> None:
     wrong = (WRONG, "stop")
     out, _, _, gen = run_chat([wrong] * 8)
@@ -509,7 +550,7 @@ def test_split_block(text: str, final: bool, sentences: list[str], complete: boo
 
 
 def modal(
-    stream: Mapping[str, str],
+    stream: Mapping[str, str | Sequence[str]],
     premise: Premise,
     windows: Sequence[Window],
     policy: Policy,
@@ -614,6 +655,38 @@ def test_modal_drafted_abstention_gives_one_refusal_and_zero_judge_calls(
     assert judge.sentences == []
     assert [c for c in gen.calls if c.purpose == "judge"] == []
     assert gen.stop_reason == "abstained"
+
+
+def test_modal_abstention_on_retry_rolls_back_until_supported(
+    premise: Premise, windows: tuple[Window, ...], policy: Policy
+) -> None:
+    source = inject(windows, 2)
+    stream: dict[str, str | Sequence[str]] = {"": WRONG, source: (ABSTAIN_TEXT, GOOD1)}
+    gen, _, judge, streamed = modal(stream, premise, windows, policy)
+    out = list(gen)
+    assert out == [supported(0, TEXT1, ("P2",), rollbacks=2)]
+    assert streamed == out
+    assert judge.sentences == [WRONG.replace(" [P2]", ""), TEXT1]
+    assert [c.purpose for c in gen.calls if c.purpose == "judge"] == ["judge", "judge"]
+    assert gen.trace is not None
+    attempts = gen.trace["sentences"][0]["attempts"]
+    assert [a["verdict"]["reasons"] for a in attempts] == [
+        ["NLI_CONTRADICTION"],
+        ["ABSTAIN_ON_RETRY"],
+        ["GROUNDED"],
+    ]
+    assert gen.stop_reason == "eos"
+
+
+def test_modal_abstention_on_retry_exhausting_budget_commits_refusal(
+    premise: Premise, windows: tuple[Window, ...], policy: Policy
+) -> None:
+    source = inject(windows, 2)
+    gen, _, judge, streamed = modal({"": WRONG, source: ABSTAIN_TEXT}, premise, windows, policy)
+    out = list(gen)
+    assert out == [SentenceOut(0, ABSTAIN_TEXT, "refused", (), ("ABSTAIN_ON_RETRY",), 4)]
+    assert streamed == out
+    assert judge.sentences == [WRONG.replace(" [P2]", "")]
 
 
 def test_modal_two_refusing_points_give_one_abstain_text(
