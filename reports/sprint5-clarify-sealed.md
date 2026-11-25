@@ -24,3 +24,35 @@ No change to code, parameters, prior or index between this commit and the runs. 
 2. Safety identical to the control: phantom candidates 0, route status mismatches none, user probe rows refused 12 of 12, appendix B confident share equal to the control's.
 
 If either fails, the prior stays off in production (`CLARIFY_PRIOR_PATH` unset) and the result is reported here.
+
+## Results
+
+Run 25 Nov 2026 from a clean git worktree at the pre-registration commit 908d27a, each run once. The gate needs a value for `--sealed-test` (a reference file shown side by side, not the seal; the seal is checked separately): both runs used `seals/concept-2026-09-29.json`. A first launch of both runs failed on argument parsing before any row was scored (the flag without a value; then the candidate's arguments passed as one word); the runs below are the only scored ones. Concept seal checked by the gate.
+
+### Gate 1, accuracy (hand rows, 91, dense on)
+
+| Pipeline | hit@1 | hit@5 | hit@10 | MRR |
+|---|---|---|---|---|
+| Slice 3 sealed (23 Nov) | 0.593 | 0.813 | 0.912 | 0.695 |
+| Control, prior off (this commit) | 0.604 | 0.802 | 0.912 | 0.698 |
+| Candidate, prior on | 0.626 | 0.824 | 0.934 | 0.719 |
+
+Without dense, hand rows: control hit@10 0.879, MRR 0.623; candidate 0.879, 0.645.
+
+Candidate at least the control and the Slice 3 figures on hit@10 and MRR: **pass**.
+
+### Gate 2, safety
+
+| Check | Control | Candidate |
+|---|---|---|
+| Phantom candidates | 0 | 0 |
+| Route status mismatches | none | none |
+| User probe rows refused (fictional instruments) | 12 of 12 | 12 of 12 |
+| Appendix B negatives, confident share | 0.30 | 0.30 |
+| Rows whose confident flag, route status or mode changed | | 0 of 153 |
+
+**Pass.**
+
+## Decision
+
+Both gates pass. The clarify prior may be turned on in production by shipping `clarify_prior.json` (sha256 81c1cc...) and setting `CLARIFY_PRIOR_PATH`; the prior is refused automatically if the router snapshot changes.
