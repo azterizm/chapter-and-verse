@@ -21,6 +21,7 @@ export type Scenario =
   | "extractive"
   | "quote"
   | "clarify"
+  | "clarify-tort"
   | "out-of-coverage"
   | "too-long"
   | "broken";
@@ -35,6 +36,7 @@ export function pickScenario(query: string): Scenario {
   if (q.includes("invalid direction") || q.includes("1980/15") || q.includes("title only")) return "text-not-held";
   if (q.includes("violation")) return "broken";
   if (q.startsWith("uk/") && !q.startsWith("uk/ukpga/")) return "out-of-coverage";
+  if (q.includes("sue in tort") && !q.includes("(")) return "clarify-tort";
   if (q.includes("124") && !q.includes("1996")) return "clarify";
   return "answer";
 }

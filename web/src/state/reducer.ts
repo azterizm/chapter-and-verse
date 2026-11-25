@@ -4,6 +4,7 @@ import type {
   ClarifyEvent,
   CvEvent,
   ExtractiveEvent,
+  LabelledCoordinate,
   NoticeEvent,
   RefusalEvent,
   RouteEvent,
@@ -29,9 +30,16 @@ export interface TurnError {
   message: string;
 }
 
+export interface TurnChoice {
+  citation: string;
+  alternatives: LabelledCoordinate[];
+}
+
 export interface Turn {
   id: number;
   query: string;
+  question?: string;
+  choice?: TurnChoice | null;
   phase: TurnPhase;
   route: RouteEvent | null;
   clarify: ClarifyEvent | null;
@@ -55,6 +63,14 @@ export interface AppState {
 
 export type Action =
   | { type: "start"; turnId: number; query: string }
+  | {
+      type: "replace";
+      oldTurnId: number;
+      turnId: number;
+      query: string;
+      question: string;
+      choice: TurnChoice | null;
+    }
   | { type: "event"; turnId: number; event: CvEvent; raw: string }
   | { type: "failure"; turnId: number; failure: AskFailure }
   | { type: "health"; snapshot: string }
@@ -63,10 +79,12 @@ export type Action =
 
 export const initialState: AppState = { turns: [], activeTurnId: null, snapshot: null };
 
-function newTurn(id: number, query: string): Turn {
+function newTurn(id: number, query: string, question: string, choice: TurnChoice | null): Turn {
   return {
     id,
     query,
+    question,
+    choice,
     phase: "streaming",
     route: null,
     clarify: null,
@@ -145,14 +163,27 @@ export function reducer(state: AppState, action: Action): AppState {
     case "start":
       return {
         ...state,
-        turns: [...state.turns, newTurn(action.turnId, action.query)],
+        turns: [...state.turns, newTurn(action.turnId, action.query, action.query, null)],
         activeTurnId: action.turnId,
       };
+    case "replace": {
+      const idx = state.turns.findIndex((t) => t.id === action.oldTurnId);
+      if (idx === -1) return state;
+      const replacement = newTurn(action.turnId, action.query, action.question, action.choice);
+      const turns = state.turns.map((t, i) => (i === idx ? replacement : t));
+      return {
+        ...state,
+        turns,
+        activeTurnId: action.turnId,
+      };
+    }
     case "event": {
+      if (!state.turns.some((t) => t.id === action.turnId)) return state;
       const next = updateTurn(state, action.turnId, (t) => applyEvent(t, action.event, action.raw));
       return action.event.type === "route" ? { ...next, snapshot: action.event.index_snapshot } : next;
     }
     case "failure":
+      if (!state.turns.some((t) => t.id === action.turnId)) return state;
       return updateTurn(state, action.turnId, (t) => {
         if (t.phase !== "streaming") return t;
         const error = failureToError(action.failure);

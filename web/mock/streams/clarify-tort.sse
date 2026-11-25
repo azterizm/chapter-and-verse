@@ -1,0 +1,9 @@
+event: route
+data: {"coordinates":[],"corrections":[],"index_snapshot":"2026-09-28","messages":[],"next_action":"ASK_USER","status":"ROUTE_AMBIGUOUS","type":"route"}
+
+event: clarify
+data: {"candidates":[{"coordinate":"uk/ukpga/1980/58/s2","label":"s.2 Limitation Act 1980: Time limit for actions founded on tort"},{"coordinate":"uk/ukpga/1980/58/s11","label":"s.11 Limitation Act 1980: Special time limit for actions in respect of personal injuries"},{"coordinate":"uk/ukpga/1980/58/s14A","label":"s.14A Limitation Act 1980: Special time limit for negligence actions where facts relevant to cause of action are not known at date of accrual"}],"question":"Several provisions match. Which one do you mean?","type":"clarify"}
+
+event: done
+data: {"timings":{"first_sentence_ms":null,"first_source_ms":null,"total_ms":31.4},"type":"done"}
+

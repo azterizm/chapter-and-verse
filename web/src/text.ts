@@ -152,6 +152,7 @@ export const STOPPED_TEXT = "Stopped.";
 export const ERROR_SERVER_TITLE = "The server stopped this answer";
 export const ERROR_CLIENT_TITLE = "This answer failed";
 export const ACTION_RETRY = "Retry";
+export const ACTION_CHANGE = "Change";
 export const ACTION_DETAILS = "Details";
 export const SUGGESTIONS_LABEL = "Did you mean";
 export const REFUSAL_LINK_LABEL = "Read on legislation.gov.uk";
@@ -166,6 +167,18 @@ export const quoteLinkLabel = (label: string): string =>
   `Read ${label} on ${SOURCE_LINK_LABEL}${OPENS_NEW_TAB}`;
 export const refusalSnapshotText = (snapshot: string): string => `Corpus snapshot ${formatDate(snapshot)}.`;
 export const answerIdCopyLine = (answerId: string): string => `Answer id: ${answerId}`;
+export const usingCitationText = (citation: string): string => `Using ${citation}`;
+
+/** Extract the short citation up to the first ": " from a clarify or suggestion label. */
+export function candidateCitation(label: string): string {
+  const idx = label.indexOf(": ");
+  return idx === -1 ? label : label.slice(0, idx);
+}
+
+/** Append a chosen citation in brackets to the original question. */
+export function composeChoiceQuery(question: string, citation: string): string {
+  return `${question} (${citation})`;
+}
 
 export function formatDetailsTimings(firstSentenceMs: number | null, totalMs: number): string {
   if (firstSentenceMs !== null) {

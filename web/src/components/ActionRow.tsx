@@ -80,12 +80,9 @@ export function formatAnswerCopyText(turn: TurnData): string {
   return sections.join("\n\n");
 }
 
-function hasCopyableContent(turn: TurnData): boolean {
-  return (
-    turn.sentences.length > 0 ||
-    (turn.extractive !== null && turn.extractive.windows.length > 0) ||
-    turn.refusal !== null
-  );
+/** Whether a turn has a generated or extractive answer eligible for the action row. */
+export function hasAnswerContent(turn: TurnData): boolean {
+  return turn.sentences.length > 0 || (turn.extractive !== null && turn.extractive.windows.length > 0);
 }
 
 /** Post-answer action row: Copy, Download evidence, and Details toggle. */
@@ -102,6 +99,10 @@ export function ActionRow({ turn }: Props) {
       if (timerRef.current !== null) clearTimeout(timerRef.current);
     };
   }, []);
+
+  if (turn.phase !== "done" || !hasAnswerContent(turn)) {
+    return null;
+  }
 
   async function handleCopy() {
     const ok = await copyText(formatAnswerCopyText(turn));
@@ -139,7 +140,7 @@ export function ActionRow({ turn }: Props) {
   return (
     <TooltipProvider delayDuration={300}>
       <div className="mt-4 flex flex-wrap items-center gap-1">
-        {hasCopyableContent(turn) && (
+        {hasAnswerContent(turn) && (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { type AppState, initialState, panelWindows, reducer, type Turn } from "../src/state/reducer";
-import { splitHighlight } from "../src/text";
+import { type AppState, initialState, panelWindows, reducer, type Turn, type TurnChoice } from "../src/state/reducer";
+import { candidateCitation, composeChoiceQuery, splitHighlight } from "../src/text";
 import { events } from "./helpers";
 
 function run(name: string, query = "q"): { state: AppState; turn: Turn } {
@@ -129,6 +129,161 @@ describe("reducer, failures and focus", () => {
     expect(reset.turns).toEqual([]);
     expect(reset.activeTurnId).toBeNull();
     expect(reset.snapshot).toBe("2026-09-28");
+  });
+});
+
+describe("reducer, replace, choice, and retry", () => {
+  const alternatives = [
+    { coordinate: "uk/ukpga/1980/58/s2", label: "s.2 Limitation Act 1980: Time limit for actions founded on tort" },
+    { coordinate: "uk/ukpga/1980/58/s11", label: "s.11 Limitation Act 1980: Special time limit for actions in respect of personal injuries" },
+  ];
+
+  it("start sets question equal to query and choice to null", () => {
+    const state = reducer(initialState, { type: "start", turnId: 1, query: "How long do I have to sue in tort?" });
+    expect(state.turns[0]?.query).toBe("How long do I have to sue in tort?");
+    expect(state.turns[0]?.question).toBe("How long do I have to sue in tort?");
+    expect(state.turns[0]?.choice).toBeNull();
+  });
+
+  it("replace keeps position, removes the old turn, and sets activeTurnId", () => {
+    let state = run("answer", "First question").state;
+    state = reducer(state, { type: "start", turnId: 2, query: "How long do I have to sue in tort?" });
+    for (const { event, raw } of events("clarify")) {
+      state = reducer(state, { type: "event", turnId: 2, event, raw });
+    }
+    state = reducer(state, { type: "start", turnId: 3, query: "Third question" });
+    expect(state.turns.map((t) => t.id)).toEqual([1, 2, 3]);
+    expect(state.activeTurnId).toBe(3);
+
+    const citation = candidateCitation(alternatives[0]!.label);
+    const choice: TurnChoice = { citation, alternatives };
+    state = reducer(state, {
+      type: "replace",
+      oldTurnId: 2,
+      turnId: 4,
+      query: composeChoiceQuery("How long do I have to sue in tort?", citation),
+      question: "How long do I have to sue in tort?",
+      choice,
+    });
+
+    expect(state.turns.map((t) => t.id)).toEqual([1, 4, 3]);
+    expect(state.turns.find((t) => t.id === 2)).toBeUndefined();
+    expect(state.activeTurnId).toBe(4);
+    expect(state.turns[1]).toMatchObject({
+      id: 4,
+      phase: "streaming",
+      question: "How long do I have to sue in tort?",
+      query: "How long do I have to sue in tort? (s.2 Limitation Act 1980)",
+      choice,
+      clarify: null,
+    });
+  });
+
+  it("choosing twice keeps the original question and does not nest brackets", () => {
+    const question = "How long do I have to sue in tort?";
+    let state = reducer(initialState, { type: "start", turnId: 1, query: question });
+
+    const firstCitation = candidateCitation(alternatives[0]!.label);
+    state = reducer(state, {
+      type: "replace",
+      oldTurnId: 1,
+      turnId: 2,
+      query: composeChoiceQuery(state.turns[0]!.question ?? state.turns[0]!.query, firstCitation),
+      question: state.turns[0]!.question ?? state.turns[0]!.query,
+      choice: { citation: firstCitation, alternatives },
+    });
+
+    const secondCitation = candidateCitation(alternatives[1]!.label);
+    const current = state.turns[0]!;
+    state = reducer(state, {
+      type: "replace",
+      oldTurnId: 2,
+      turnId: 3,
+      query: composeChoiceQuery(current.question ?? current.query, secondCitation),
+      question: current.question ?? current.query,
+      choice: { citation: secondCitation, alternatives },
+    });
+
+    expect(state.turns).toHaveLength(1);
+    expect(state.turns[0]?.question).toBe(question);
+    expect(state.turns[0]?.query).toBe("How long do I have to sue in tort? (s.11 Limitation Act 1980)");
+    expect(state.turns[0]?.choice?.citation).toBe("s.11 Limitation Act 1980");
+  });
+
+  it("retry replaces an errored turn with the same query, question, and choice", () => {
+    const question = "How long do I have to sue in tort?";
+    const choice: TurnChoice = { citation: "s.2 Limitation Act 1980", alternatives };
+    let state = reducer(initialState, { type: "start", turnId: 1, query: question });
+    state = reducer(state, {
+      type: "replace",
+      oldTurnId: 1,
+      turnId: 2,
+      query: composeChoiceQuery(question, choice.citation),
+      question,
+      choice,
+    });
+    state = reducer(state, {
+      type: "failure",
+      turnId: 2,
+      failure: { kind: "network", message: "Connection dropped." },
+    });
+    expect(state.turns[0]?.phase).toBe("failed");
+
+    const failed = state.turns[0]!;
+    state = reducer(state, {
+      type: "replace",
+      oldTurnId: failed.id,
+      turnId: 3,
+      query: failed.query,
+      question: failed.question ?? failed.query,
+      choice: failed.choice ?? null,
+    });
+
+    expect(state.turns).toHaveLength(1);
+    expect(state.turns[0]?.id).toBe(3);
+    expect(state.turns[0]?.phase).toBe("streaming");
+    expect(state.turns[0]?.error).toBeNull();
+    expect(state.turns[0]?.question).toBe(question);
+    expect(state.turns[0]?.query).toBe("How long do I have to sue in tort? (s.2 Limitation Act 1980)");
+    expect(state.turns[0]?.choice).toEqual(choice);
+  });
+
+  it("ignores events and failures for a replaced (gone) turn id", () => {
+    let state = reducer(initialState, { type: "start", turnId: 1, query: "q" });
+    state = reducer(state, {
+      type: "replace",
+      oldTurnId: 1,
+      turnId: 2,
+      query: "q (s.2 Limitation Act 1980)",
+      question: "q",
+      choice: { citation: "s.2 Limitation Act 1980", alternatives },
+    });
+
+    for (const { event, raw } of events("answer")) {
+      const next = reducer(state, { type: "event", turnId: 1, event, raw });
+      expect(next).toBe(state);
+    }
+
+    const afterFailure = reducer(state, {
+      type: "failure",
+      turnId: 1,
+      failure: { kind: "network", message: "late" },
+    });
+    expect(afterFailure).toBe(state);
+  });
+
+  it("reset clears everything including replaced turns and choices", () => {
+    let state = reducer(initialState, { type: "start", turnId: 1, query: "q" });
+    state = reducer(state, {
+      type: "replace",
+      oldTurnId: 1,
+      turnId: 2,
+      query: "q (s.2 Limitation Act 1980)",
+      question: "q",
+      choice: { citation: "s.2 Limitation Act 1980", alternatives },
+    });
+    const reset = reducer(state, { type: "reset" });
+    expect(reset).toEqual(initialState);
   });
 });
 

@@ -16,11 +16,27 @@ describe("mock scenario keywords", () => {
     ["What does the National Health Service (Invalid Direction) Act 1980 say?", "text-not-held"],
     ["s.124 ERA 1996 when every provider returns 429", "extractive"],
     ["Employment Rights Act section 124", "clarify"],
+    ["How long do I have to sue in tort?", "clarify-tort"],
+    ["How long do I have to sue in tort? (s.2 Limitation Act 1980)", "answer"],
     ["uk/nisi/1996/1919", "out-of-coverage"],
     ["order violation please", "broken"],
     ["x".repeat(4097), "too-long"],
   ])("%s", (query, want) => {
     expect(pickScenario(query)).toBe(want);
+  });
+
+  it("provides a valid clarify-tort stream with three candidates in engine label format", () => {
+    const bytes = streamBytes("clarify-tort");
+    const parsed = parseChunks([bytes]);
+    expect(validateOrder(parsed.map((e) => e.event))).toBe(true);
+    for (const r of parsed) {
+      expect(() => parseEventData(r.event, r.data)).not.toThrow();
+    }
+    const clarify = events("clarify-tort").find((e) => e.event.type === "clarify")?.event as
+      | Extract<CvEvent, { type: "clarify" }>
+      | undefined;
+    expect(clarify?.candidates).toHaveLength(3);
+    expect(clarify?.candidates[0]?.label).toMatch(/^s\.2 Limitation Act 1980: /);
   });
 
   it("splits a recorded stream into whole events", () => {

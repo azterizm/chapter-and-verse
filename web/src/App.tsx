@@ -4,7 +4,7 @@ import { type AskRequest, ask, health, newSessionId } from "./api/client";
 import { Footer } from "./components/Footer";
 import { QueryBox, type QueryPrefill } from "./components/QueryBox";
 import { SourcePanel } from "./components/SourcePanel";
-import { isQuoteAnswer, Turn } from "./components/Turn";
+import { isQuoteAnswer, type ReplaceRequest, Turn } from "./components/Turn";
 import {
   Turnstile,
   TURNSTILE_SITE_KEY,
@@ -58,6 +58,7 @@ export function App() {
   const sessionId = useRef<string>(newSessionId());
   const nextTurnId = useRef(1);
   const abort = useRef<AbortController | null>(null);
+  const pendingReplaceRef = useRef<ReplaceRequest | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const heroRef = useRef<HTMLDivElement>(null);
@@ -141,8 +142,10 @@ export function App() {
   }, [heroFading]);
 
   const executeAsk = useCallback(
-    (query: string, turnstileToken: string | null) => {
-      if (!prevHasTurns.current) {
+    (query: string, turnstileToken: string | null, replaceReq: ReplaceRequest | null = null) => {
+      abort.current?.abort();
+      abort.current = null;
+      if (!replaceReq && !prevHasTurns.current) {
         dockTopRef.current = composerDockRef.current?.getBoundingClientRect().top ?? null;
         heroTopRef.current = heroRef.current?.getBoundingClientRect().top ?? null;
         if (!reducedMotion()) {
@@ -152,7 +155,18 @@ export function App() {
       const turnId = nextTurnId.current++;
       const req: AskRequest = { query, session_id: sessionId.current };
       if (turnstileToken) req.turnstile_token = turnstileToken;
-      dispatch({ type: "start", turnId, query });
+      if (replaceReq) {
+        dispatch({
+          type: "replace",
+          oldTurnId: replaceReq.oldTurnId,
+          turnId,
+          query,
+          question: replaceReq.question,
+          choice: replaceReq.choice,
+        });
+      } else {
+        dispatch({ type: "start", turnId, query });
+      }
       const ctl = new AbortController();
       abort.current = ctl;
       void ask(
@@ -170,6 +184,9 @@ export function App() {
         if (abort.current === ctl) abort.current = null;
       });
       requestAnimationFrame(() => {
+        if (replaceReq) {
+          document.getElementById(`turn-${turnId}-q`)?.focus?.({ preventScroll: true });
+        }
         document
           .getElementById(`turn-${turnId}`)
           ?.scrollIntoView?.({ block: "start", behavior: reducedMotion() ? "auto" : "smooth" });
@@ -182,10 +199,17 @@ export function App() {
   const getGate = useCallback((): TurnstileGate => {
     if (gateRef.current == null) {
       gateRef.current = new TurnstileGate({
-        onSend: (query, token) => executeAsk(query, token),
+        onSend: (query, token) => {
+          const replaceReq = pendingReplaceRef.current;
+          pendingReplaceRef.current = null;
+          executeAsk(query, token, replaceReq);
+        },
         onReset: () => setResetKey((k) => k + 1),
         onStatusChange: (status) => setChecking(status),
-        onError: (err) => setBotError(err),
+        onError: (err) => {
+          pendingReplaceRef.current = null;
+          setBotError(err);
+        },
       });
     }
     return gateRef.current;
@@ -202,10 +226,22 @@ export function App() {
     (query: string) => {
       const gate = getGate();
       if (busy || gate.isWaiting()) return;
+      pendingReplaceRef.current = null;
       setBotError(null);
       gate.ask(query, Boolean(TURNSTILE_SITE_KEY));
     },
     [busy, getGate],
+  );
+
+  const replaceTurn = useCallback(
+    (req: ReplaceRequest) => {
+      const gate = getGate();
+      if (gate.isWaiting()) return;
+      pendingReplaceRef.current = req;
+      setBotError(null);
+      gate.ask(req.query, Boolean(TURNSTILE_SITE_KEY));
+    },
+    [getGate],
   );
 
   const fillExample = useCallback((example: string) => {
@@ -214,6 +250,7 @@ export function App() {
 
   const startOver = useCallback(() => {
     gateRef.current?.cancel();
+    pendingReplaceRef.current = null;
     abort.current?.abort();
     abort.current = null;
     dockTopRef.current = null;
@@ -402,7 +439,7 @@ export function App() {
                           <Turn
                             turn={t}
                             busy={isBlocked}
-                            onAsk={askQuery}
+                            onReplace={replaceTurn}
                             onShowSource={showSource}
                           />
                           {showInlineSources && (

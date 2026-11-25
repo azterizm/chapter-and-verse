@@ -4,7 +4,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatAnswerCopyText } from "@/components/ActionRow";
-import { isQuoteAnswer, Turn } from "@/components/Turn";
+import { isQuoteAnswer, type ReplaceRequest, Turn } from "@/components/Turn";
 import { ToastProvider } from "@/components/ui/toast";
 import type { AnswerFactObject, Window } from "@/api/events";
 import type { Turn as TurnData } from "@/state/reducer";
@@ -116,23 +116,23 @@ function renderTurn(
   turn: TurnData,
   handlers: {
     busy?: boolean;
-    onAsk?: (q: string) => void;
+    onReplace?: (req: ReplaceRequest) => void;
     onShowSource?: (turnId: number, passageId: string) => void;
   } = {},
 ) {
-  const onAsk = handlers.onAsk ?? vi.fn();
+  const onReplace = handlers.onReplace ?? vi.fn();
   const onShowSource = handlers.onShowSource ?? vi.fn();
   const result = render(
     <ToastProvider>
       <Turn
         turn={turn}
         busy={handlers.busy ?? false}
-        onAsk={onAsk}
+        onReplace={onReplace}
         onShowSource={onShowSource}
       />
     </ToastProvider>,
   );
-  return { ...result, onAsk, onShowSource };
+  return { ...result, onReplace, onShowSource };
 }
 
 afterEach(() => {
@@ -280,7 +280,7 @@ describe("Turn answer rendering", () => {
     });
     rerender(
       <ToastProvider>
-        <Turn turn={step1} busy={true} onAsk={vi.fn()} onShowSource={vi.fn()} />
+        <Turn turn={step1} busy={true} onReplace={vi.fn()} onShowSource={vi.fn()} />
       </ToastProvider>,
     );
     expect(screen.getByText(STATUS_STEPS[1])).toHaveAttribute("role", "status");
@@ -293,7 +293,7 @@ describe("Turn answer rendering", () => {
     });
     rerender(
       <ToastProvider>
-        <Turn turn={step2} busy={true} onAsk={vi.fn()} onShowSource={vi.fn()} />
+        <Turn turn={step2} busy={true} onReplace={vi.fn()} onShowSource={vi.fn()} />
       </ToastProvider>,
     );
     expect(screen.getByText(STATUS_STEPS[2])).toHaveAttribute("role", "status");
@@ -305,7 +305,7 @@ describe("Turn answer rendering", () => {
     });
     rerender(
       <ToastProvider>
-        <Turn turn={streamingWithSentence} busy={true} onAsk={vi.fn()} onShowSource={vi.fn()} />
+        <Turn turn={streamingWithSentence} busy={true} onReplace={vi.fn()} onShowSource={vi.fn()} />
       </ToastProvider>,
     );
     expect(screen.queryByText(STATUS_STEPS[2])).not.toBeInTheDocument();
@@ -578,7 +578,7 @@ describe("ActionRow", () => {
     });
     rerender(
       <ToastProvider>
-        <Turn turn={failed} busy={false} onAsk={vi.fn()} onShowSource={vi.fn()} />
+        <Turn turn={failed} busy={false} onReplace={vi.fn()} onShowSource={vi.fn()} />
       </ToastProvider>,
     );
     expect(screen.queryByRole("button", { name: ACTION_COPY })).not.toBeInTheDocument();
@@ -586,7 +586,7 @@ describe("ActionRow", () => {
     const done = makeTurn({ phase: "done" });
     rerender(
       <ToastProvider>
-        <Turn turn={done} busy={false} onAsk={vi.fn()} onShowSource={vi.fn()} />
+        <Turn turn={done} busy={false} onReplace={vi.fn()} onShowSource={vi.fn()} />
       </ToastProvider>,
     );
     expect(screen.getByRole("button", { name: ACTION_COPY })).toBeInTheDocument();
@@ -761,17 +761,20 @@ describe("ActionRow", () => {
 });
 
 describe("Refusal, clarify, and error cards", () => {
-  it("renders refusal, clarify, and error cards with Retry re-sending the query", async () => {
+  it("replaces in place with composed query on clarify/refusal choices and same payload on Retry, with no action row", async () => {
     const user = userEvent.setup();
+    const candidates = [
+      { coordinate: "uk/ukpga/1996/18/s124", label: "s.124 Employment Rights Act 1996: Limit of award" },
+    ];
     const turn = makeTurn({
+      query: "What is the limit?",
+      question: "What is the limit?",
       sentences: [],
       windows: [],
       clarify: {
         type: "clarify",
         question: "Several instruments match. Which one do you mean?",
-        candidates: [
-          { coordinate: "uk/ukpga/1996/18/s124", label: "s.124 Employment Rights Act 1996" },
-        ],
+        candidates,
       },
       refusal: {
         type: "refusal",
@@ -788,15 +791,40 @@ describe("Refusal, clarify, and error cards", () => {
       },
     });
 
-    const { onAsk } = renderTurn(turn);
+    const { onReplace } = renderTurn(turn);
 
-    await user.click(screen.getByRole("button", { name: "s.124 Employment Rights Act 1996" }));
-    expect(onAsk).toHaveBeenCalledWith("uk/ukpga/1996/18/s124");
+    expect(screen.queryByRole("button", { name: ACTION_COPY })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: ACTION_DOWNLOAD_EVIDENCE })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: ACTION_DETAILS })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "s.124 Employment Rights Act 1996: Limit of award" }));
+    expect(onReplace).toHaveBeenNthCalledWith(1, {
+      oldTurnId: 1,
+      query: "What is the limit? (s.124 Employment Rights Act 1996)",
+      question: "What is the limit?",
+      choice: {
+        citation: "s.124 Employment Rights Act 1996",
+        alternatives: candidates,
+      },
+    });
 
     await user.click(screen.getByRole("button", { name: "Arbitration Act 1996" }));
-    expect(onAsk).toHaveBeenCalledWith("uk/ukpga/1996/23");
+    expect(onReplace).toHaveBeenNthCalledWith(2, {
+      oldTurnId: 1,
+      query: "What is the limit? (Arbitration Act 1996)",
+      question: "What is the limit?",
+      choice: {
+        citation: "Arbitration Act 1996",
+        alternatives: [],
+      },
+    });
 
     await user.click(screen.getByRole("button", { name: ACTION_RETRY }));
-    expect(onAsk).toHaveBeenCalledWith(turn.query);
+    expect(onReplace).toHaveBeenNthCalledWith(3, {
+      oldTurnId: 1,
+      query: "What is the limit?",
+      question: "What is the limit?",
+      choice: null,
+    });
   });
 });

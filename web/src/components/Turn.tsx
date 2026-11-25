@@ -1,12 +1,15 @@
-import { useId } from "react";
-import type { SentenceEvent } from "../api/events";
+import { useId, useRef, useState } from "react";
+import type { LabelledCoordinate, SentenceEvent } from "../api/events";
 import { cn } from "../lib/utils";
-import type { Turn as TurnData } from "../state/reducer";
+import type { Turn as TurnData, TurnChoice } from "../state/reducer";
 import {
+  ACTION_CHANGE,
   ACTION_RETRY,
+  candidateCitation,
   citationInstrumentKey,
   CLARIFY_ARIA_LABEL,
   CLARIFY_TITLE,
+  composeChoiceQuery,
   EMPTY_ANSWER_TEXT,
   ERROR_CLIENT_TITLE,
   ERROR_SERVER_TITLE,
@@ -16,8 +19,9 @@ import {
   NOTICES_ARIA_LABEL,
   QUESTION_LABEL,
   STOPPED_TEXT,
+  usingCitationText,
 } from "../text";
-import { ActionRow } from "./ActionRow";
+import { ActionRow, hasAnswerContent } from "./ActionRow";
 import { Citation } from "./Citation";
 import { Notice } from "./Notice";
 import { QuoteBlock } from "./QuoteBlock";
@@ -26,10 +30,17 @@ import { StatusLine } from "./StatusLine";
 import { Button } from "./ui/button";
 import { Chip } from "./ui/chip";
 
+export interface ReplaceRequest {
+  oldTurnId: number;
+  query: string;
+  question: string;
+  choice: TurnChoice | null;
+}
+
 interface Props {
   turn: TurnData;
   busy: boolean;
-  onAsk(query: string): void;
+  onReplace(req: ReplaceRequest): void;
   onShowSource(turnId: number, passageId: string): void;
 }
 
@@ -71,8 +82,12 @@ export function isQuoteAnswer(turn: TurnData): boolean {
   return turn.extractive?.reason === "quote_requested";
 }
 
-export function Turn({ turn, busy, onAsk, onShowSource }: Props) {
+export function Turn({ turn, busy, onReplace, onShowSource }: Props) {
   const quoteGroupHeadingId = useId();
+  const changeListId = useId();
+  const changeBtnRef = useRef<HTMLButtonElement>(null);
+  const [changing, setChanging] = useState(false);
+
   const answered = turn.sentences.length > 0;
   const quoteAnswer = isQuoteAnswer(turn);
   const quoteLabels = quoteAnswer && turn.extractive ? groupQuoteLabels(turn.extractive.windows) : null;
@@ -93,16 +108,89 @@ export function Turn({ turn, busy, onAsk, onShowSource }: Props) {
   }
   const showCitationYear = instruments.size >= 2;
 
+  const displayQuestion = turn.question ?? turn.query;
+  const alternatives = turn.choice?.alternatives ?? [];
+
+  function chooseLabel(label: string, nextAlternatives: LabelledCoordinate[]) {
+    const citation = candidateCitation(label);
+    onReplace({
+      oldTurnId: turn.id,
+      query: composeChoiceQuery(displayQuestion, citation),
+      question: displayQuestion,
+      choice: { citation, alternatives: nextAlternatives },
+    });
+  }
+
   return (
     <article
-      className="mb-7 scroll-mt-4 border-b border-border pb-7"
+      className="scroll-mt-4"
       id={`turn-${turn.id}`}
       aria-labelledby={`turn-${turn.id}-q`}
     >
-      <h2 className="mb-3 text-ui font-bold text-foreground" id={`turn-${turn.id}-q`}>
+      <h2
+        className={cn(
+          "text-ui font-bold text-foreground focus:outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+          !turn.choice && "mb-3",
+        )}
+        id={`turn-${turn.id}-q`}
+        tabIndex={-1}
+      >
         <span className="sr-only">{QUESTION_LABEL}</span>
-        {turn.query}
+        {displayQuestion}
       </h2>
+
+      {turn.choice && (
+        <div
+          className="mb-3 mt-1"
+          onKeyDown={(e) => {
+            if (changing && e.key === "Escape") {
+              e.stopPropagation();
+              setChanging(false);
+              changeBtnRef.current?.focus();
+            }
+          }}
+        >
+          <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
+            <span>{usingCitationText(turn.choice.citation)}</span>
+            {alternatives.length > 0 && (
+              <button
+                ref={changeBtnRef}
+                type="button"
+                disabled={busy}
+                aria-expanded={changing}
+                aria-controls={changeListId}
+                onClick={() => setChanging((v) => !v)}
+                className="cursor-pointer rounded-sm text-caption text-primary hover:underline underline-offset-4 disabled:cursor-default disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                {ACTION_CHANGE}
+              </button>
+            )}
+          </div>
+          {changing && alternatives.length > 0 && (
+            <ul id={changeListId} className="mt-2 flex flex-wrap gap-2" aria-label={CLARIFY_ARIA_LABEL}>
+              {alternatives.map((c) => {
+                const citation = candidateCitation(c.label);
+                const isCurrent = citation === turn.choice?.citation;
+                return (
+                  <li key={c.coordinate}>
+                    <Chip
+                      variant="outline"
+                      selected={isCurrent}
+                      disabled={busy || isCurrent}
+                      onClick={() => {
+                        setChanging(false);
+                        chooseLabel(c.label, alternatives);
+                      }}
+                    >
+                      {c.label}
+                    </Chip>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
 
       {inlineNotices.length > 0 && (
         <ul className="mb-3 space-y-1.5" aria-label={NOTICES_ARIA_LABEL}>
@@ -114,26 +202,43 @@ export function Turn({ turn, busy, onAsk, onShowSource }: Props) {
         </ul>
       )}
 
-      {turn.clarify && (
-        <section
-          className="mb-4 rounded-card border border-border bg-surface p-4"
-          aria-label={CLARIFY_ARIA_LABEL}
-        >
-          <h3 className="text-ui font-bold text-foreground">{CLARIFY_TITLE}</h3>
-          <p className="mt-1.5 text-ui text-muted-foreground">{turn.clarify.question}</p>
-          <ul className="mt-3 flex flex-wrap gap-2">
-            {turn.clarify.candidates.map((c) => (
-              <li key={c.coordinate}>
-                <Chip variant="outline" disabled={busy} onClick={() => onAsk(c.coordinate)}>
-                  {c.label}
-                </Chip>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      {turn.clarify && (() => {
+        const { question, candidates } = turn.clarify;
+        return (
+          <section
+            className="mb-4 rounded-card border border-border bg-surface p-4"
+            aria-label={CLARIFY_ARIA_LABEL}
+          >
+            <h3 className="text-ui font-bold text-foreground">{CLARIFY_TITLE}</h3>
+            <p className="mt-1.5 text-ui text-muted-foreground">{question}</p>
+            <ul className="mt-3 flex flex-wrap gap-2">
+              {candidates.map((c) => (
+                <li key={c.coordinate}>
+                  <Chip
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => chooseLabel(c.label, candidates)}
+                  >
+                    {c.label}
+                  </Chip>
+                </li>
+              ))}
+            </ul>
+          </section>
+        );
+      })()}
 
-      {turn.refusal && <RefusalCard refusal={turn.refusal} onAsk={onAsk} disabled={busy} />}
+      {turn.refusal && (() => {
+        const refusal = turn.refusal;
+        const refusalAlternatives = refusal.suggestions.length > 1 ? refusal.suggestions : [];
+        return (
+          <RefusalCard
+            refusal={refusal}
+            onChoose={(label) => chooseLabel(label, refusalAlternatives)}
+            disabled={busy}
+          />
+        );
+      })()}
 
       {turn.extractive && (
         <section
@@ -206,7 +311,14 @@ export function Turn({ turn, busy, onAsk, onShowSource }: Props) {
               variant="outline"
               size="md"
               disabled={busy}
-              onClick={() => onAsk(turn.query)}
+              onClick={() =>
+                onReplace({
+                  oldTurnId: turn.id,
+                  query: turn.query,
+                  question: displayQuestion,
+                  choice: turn.choice ?? null,
+                })
+              }
             >
               {ACTION_RETRY}
             </Button>
@@ -218,7 +330,7 @@ export function Turn({ turn, busy, onAsk, onShowSource }: Props) {
         <p className="mt-2 text-caption text-muted-foreground">{STOPPED_TEXT}</p>
       )}
 
-      {turn.phase === "done" && <ActionRow turn={turn} />}
+      {turn.phase === "done" && hasAnswerContent(turn) && <ActionRow turn={turn} />}
     </article>
   );
 }

@@ -5,12 +5,12 @@ import { Chip } from "./ui/chip";
 
 interface Props {
   refusal: RefusalEvent;
-  onAsk(query: string): void;
+  onChoose(label: string): void;
   disabled: boolean;
 }
 
 /** Single-card refusal message with optional suggestion chips and legislation.gov.uk link. */
-export function RefusalCard({ refusal, onAsk, disabled }: Props) {
+export function RefusalCard({ refusal, onChoose, disabled }: Props) {
   const kind = refusal.kind.toLowerCase().replace(/_/g, "-");
   const title = refusalTitle(refusal.kind);
   return (
@@ -28,7 +28,7 @@ export function RefusalCard({ refusal, onAsk, disabled }: Props) {
           <ul className="mt-2 flex flex-wrap gap-2" aria-labelledby={`sugg-${kind}`}>
             {refusal.suggestions.map((s) => (
               <li key={s.coordinate}>
-                <Chip variant="outline" disabled={disabled} onClick={() => onAsk(s.coordinate)}>
+                <Chip variant="outline" disabled={disabled} onClick={() => onChoose(s.label)}>
                   {s.label}
                 </Chip>
               </li>
