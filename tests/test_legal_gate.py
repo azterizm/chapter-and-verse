@@ -21,10 +21,13 @@ import chapterverse.app  # noqa: E402
 from chapterverse.audit.policy import build_policy  # noqa: E402
 from chapterverse.contracts import (  # noqa: E402
     AnswerFactObject,
+    ClarifyEvent,
     DoneEvent,
     ExtractiveEvent,
+    LabelledCoordinate,
     ProviderCall,
     ReceiptEvent,
+    RefusalEvent,
     RenderedCitation,
     RouteEvent,
     SentenceEvent,
@@ -59,41 +62,53 @@ def test_battery_file_validates() -> None:
     assert DEFAULT_BATTERY.is_file(), f"{DEFAULT_BATTERY} does not exist"
     rows = load_battery(DEFAULT_BATTERY)
 
-    assert len(rows) == 40, f"Expected 40 rows, got {len(rows)}"
+    assert len(rows) == 80, f"Expected 80 rows, got {len(rows)}"
 
     ids = [r["id"] for r in rows]
     assert len(ids) == len(set(ids)), f"Duplicate IDs found: {ids}"
 
     dev_rows = [r for r in rows if r["split"] == "dev"]
     test_rows = [r for r in rows if r["split"] == "test"]
-    assert len(dev_rows) == 20, f"Expected 20 dev rows, got {len(dev_rows)}"
-    assert len(test_rows) == 20, f"Expected 20 test rows, got {len(test_rows)}"
+    assert len(dev_rows) == 40, f"Expected 40 dev rows, got {len(dev_rows)}"
+    assert len(test_rows) == 40, f"Expected 40 test rows, got {len(test_rows)}"
 
     for row in rows:
         assert row["split"] in ("dev", "test")
         assert row["question"].strip()
         inst = row["instrument"].strip()
-        assert inst.startswith("uk/ukpga/")
+        assert inst.startswith(("uk/ukpga/", "uk/uksi/"))
+        other_insts = row.get("other_instruments") or []
+        assert isinstance(other_insts, list)
+        for oi in other_insts:
+            assert oi.startswith(("uk/ukpga/", "uk/uksi/"))
+        all_insts = [inst, *other_insts]
 
+        checks = row["answer_checks"]
         must_reach = row["must_reach"]
-        assert len(must_reach) >= 1, f"Row {row['id']} has empty must_reach"
+        if checks is not None and checks.get("expect_abstention"):
+            assert must_reach == [], f"Abstention row {row['id']} must have empty must_reach"
+        else:
+            assert len(must_reach) >= 1, f"Row {row['id']} has empty must_reach"
         for m in must_reach:
-            assert m.startswith(inst + "/"), (
-                f"must_reach item {m} not inside instrument {inst} in {row['id']}"
+            assert any(m.startswith(i + "/") for i in all_insts), (
+                f"must_reach item {m} not inside instruments {all_insts} in {row['id']}"
             )
 
         for s in row["should_reach"]:
-            assert s.startswith(inst + "/"), (
-                f"should_reach item {s} not inside instrument {inst} in {row['id']}"
+            assert any(s.startswith(i + "/") for i in all_insts), (
+                f"should_reach item {s} not inside instruments {all_insts} in {row['id']}"
             )
 
-        checks = row["answer_checks"]
         if checks is not None:
             assert "required_citations" in checks
             assert "forbidden_phrases" in checks
             assert "max_abstentions" in checks
             assert "no_citations_on_abstention" in checks
             assert "no_duplicate_sentences" in checks
+            for c in checks["required_citations"] + checks.get("credit_citations", []):
+                assert any(c.startswith(i + "/") for i in all_insts), (
+                    f"citation item {c} not inside instruments {all_insts} in {row['id']}"
+                )
 
 
 # ============================================================================ 2. Seal check
@@ -946,3 +961,307 @@ def test_rows_option_works_for_record_and_answers_and_omits_calls_when_absent(
     )
     assert rc_l02 == 0
     assert seen_queries == ["Contract limitation period?"]
+
+
+# ============================================================================ 8. S5 additions
+def test_rubric_expect_abstention_passes_and_fails() -> None:
+    policy = build_policy(JUDGE_PRESET_NAME)
+    refusal_text = policy.refusal_text
+
+    row = {
+        "id": "L75",
+        "split": "dev",
+        "question": (
+            "What is the national minimum wage hourly rate under the Employment Rights Act 1996?"
+        ),
+        "instrument": "uk/ukpga/1996/18",
+        "other_instruments": ["uk/ukpga/1998/39"],
+        "must_reach": [],
+        "should_reach": [],
+        "answer_checks": {
+            "required_citations": [],
+            "credit_citations": [],
+            "forbidden_phrases": ["£", "per hour"],
+            "max_abstentions": 1,
+            "no_citations_on_abstention": True,
+            "no_duplicate_sentences": True,
+            "expect_abstention": True,
+        },
+    }
+
+    # Pass: single abstention sentence with no citations
+    pass_events = [
+        SentenceEvent(
+            sentence=SentenceOut(
+                index=0,
+                text=refusal_text,
+                verdict="refused",
+                passage_ids=(),
+                reasons=(),
+                rollbacks=0,
+            ),
+            citations=(),
+        )
+    ]
+    res_pass = evaluate_answer(row, pass_events, refusal_text)
+    assert res_pass["passed"] is True
+    assert res_pass["failure_reasons"] == []
+
+    # Fail 1: no abstention sentence
+    fail_no_abstain = [
+        SentenceEvent(
+            sentence=SentenceOut(
+                index=0,
+                text="The rate is not stated.",
+                verdict="supported",
+                passage_ids=(),
+                reasons=(),
+                rollbacks=0,
+            ),
+            citations=(),
+        )
+    ]
+    res_no_abstain = evaluate_answer(row, fail_no_abstain, refusal_text)
+    assert res_no_abstain["passed"] is False
+    assert any("expected abstention sentence" in r for r in res_no_abstain["failure_reasons"])
+
+    # Fail 2: abstention present, but a non-abstention sentence cites a provision in row instrument
+    fail_with_cit = [
+        SentenceEvent(
+            sentence=SentenceOut(
+                index=0,
+                text="The Employment Rights Act 1996 mentions the minimum wage in dismissals.",
+                verdict="supported",
+                passage_ids=("P1",),
+                reasons=("GROUNDED",),
+                rollbacks=0,
+            ),
+            citations=(
+                RenderedCitation(
+                    passage_id="P1",
+                    coordinate="uk/ukpga/1996/18/s104A",
+                    label="s.104A",
+                    url="http://example.com",
+                ),
+            ),
+        ),
+        SentenceEvent(
+            sentence=SentenceOut(
+                index=1,
+                text=refusal_text,
+                verdict="refused",
+                passage_ids=(),
+                reasons=(),
+                rollbacks=0,
+            ),
+            citations=(),
+        ),
+    ]
+    res_with_cit = evaluate_answer(row, fail_with_cit, refusal_text)
+    assert res_with_cit["passed"] is False
+    assert any(
+        "non-abstention sentence cites row instrument" in r for r in res_with_cit["failure_reasons"]
+    )
+
+    # Fail 3: non-abstention sentence cites provision in other_instruments
+    fail_other_inst = [
+        SentenceEvent(
+            sentence=SentenceOut(
+                index=0,
+                text="The Act sets out entitlement rules.",
+                verdict="supported",
+                passage_ids=("P1",),
+                reasons=("GROUNDED",),
+                rollbacks=0,
+            ),
+            citations=(
+                RenderedCitation(
+                    passage_id="P1",
+                    coordinate="uk/ukpga/1998/39/s1",
+                    label="s.1",
+                    url="http://example.com",
+                ),
+            ),
+        ),
+        SentenceEvent(
+            sentence=SentenceOut(
+                index=1,
+                text=refusal_text,
+                verdict="refused",
+                passage_ids=(),
+                reasons=(),
+                rollbacks=0,
+            ),
+            citations=(),
+        ),
+    ]
+    res_other = evaluate_answer(row, fail_other_inst, refusal_text)
+    assert res_other["passed"] is False
+
+
+def test_rubric_row_forbidden_phrases_add_to_defaults() -> None:
+    policy = build_policy(JUDGE_PRESET_NAME)
+    refusal_text = policy.refusal_text
+
+    row = {
+        "id": "L75",
+        "split": "dev",
+        "question": "Minimum wage?",
+        "instrument": "uk/ukpga/1996/18",
+        "must_reach": [],
+        "should_reach": [],
+        "answer_checks": {
+            "required_citations": [],
+            "forbidden_phrases": ["£", "per hour"],
+            "max_abstentions": 1,
+            "no_citations_on_abstention": True,
+            "no_duplicate_sentences": True,
+        },
+    }
+
+    # Default forbidden phrase still triggers even though not listed on row
+    ev_default_phrase = [
+        SentenceEvent(
+            sentence=SentenceOut(
+                index=0,
+                text="Based on the passages, no rate is set.",
+                verdict="supported",
+                passage_ids=(),
+                reasons=(),
+                rollbacks=0,
+            ),
+            citations=(),
+        )
+    ]
+    res_def = evaluate_answer(row, ev_default_phrase, refusal_text)
+    assert res_def["passed"] is False
+    assert any("the passages" in r for r in res_def["failure_reasons"])
+
+    # Row-specific forbidden phrase also triggers
+    ev_row_phrase = [
+        SentenceEvent(
+            sentence=SentenceOut(
+                index=0,
+                text="The rate is £10.",
+                verdict="supported",
+                passage_ids=(),
+                reasons=(),
+                rollbacks=0,
+            ),
+            citations=(),
+        )
+    ]
+    res_row = evaluate_answer(row, ev_row_phrase, refusal_text)
+    assert res_row["passed"] is False
+    assert any("£" in r for r in res_row["failure_reasons"])
+
+
+def test_retrieval_gate_empty_must_reach_rule() -> None:
+    class _StubPipeline:
+        def __init__(self, events_by_query: dict[str, list[Any]]) -> None:
+            self.events_by_query = events_by_query
+
+        def run(self, request: Any, emit: Any) -> None:
+            for ev in self.events_by_query[request.query]:
+                emit(ev)
+
+    rows = [
+        {
+            "id": "E1",
+            "question": "Q bound matching instrument no windows",
+            "instrument": "uk/ukpga/1996/18",
+            "must_reach": [],
+            "should_reach": [],
+        },
+        {
+            "id": "E2",
+            "question": "Q refused",
+            "instrument": "uk/ukpga/1968/60",
+            "must_reach": [],
+            "should_reach": [],
+        },
+        {
+            "id": "E3",
+            "question": "Q clarified",
+            "instrument": "uk/ukpga/2015/15",
+            "must_reach": [],
+            "should_reach": [],
+        },
+        {
+            "id": "E4",
+            "question": "Q bound wrong instrument",
+            "instrument": "uk/ukpga/1988/52",
+            "must_reach": [],
+            "should_reach": [],
+        },
+    ]
+
+    pipeline: Any = _StubPipeline(
+        {
+            "Q bound matching instrument no windows": [
+                RouteEvent(
+                    status="ROUTE_BOUNDED",
+                    next_action="answer",
+                    coordinates=("uk/ukpga/1996/18",),
+                    corrections=(),
+                    messages=(),
+                    index_snapshot="2026-09-28",
+                ),
+                SourcesEvent(windows=()),
+            ],
+            "Q refused": [
+                RouteEvent(
+                    status="ROUTE_UNRESOLVED",
+                    next_action="refuse",
+                    coordinates=(),
+                    corrections=(),
+                    messages=(),
+                    index_snapshot="2026-09-28",
+                ),
+                RefusalEvent(
+                    kind="UNRESOLVED",
+                    message="Not found.",
+                    suggestions=(),
+                    snapshot="2026-09-28",
+                ),
+            ],
+            "Q clarified": [
+                RouteEvent(
+                    status="ROUTE_AMBIGUOUS",
+                    next_action="clarify",
+                    coordinates=(),
+                    corrections=(),
+                    messages=(),
+                    index_snapshot="2026-09-28",
+                ),
+                ClarifyEvent(
+                    question="Which?",
+                    candidates=(LabelledCoordinate("uk/ukpga/2015/15", "CRA 2015"),),
+                ),
+            ],
+            "Q bound wrong instrument": [
+                RouteEvent(
+                    status="ROUTE_BOUNDED",
+                    next_action="answer",
+                    coordinates=("uk/ukpga/1980/58",),
+                    corrections=(),
+                    messages=(),
+                    index_snapshot="2026-09-28",
+                ),
+                SourcesEvent(windows=()),
+            ],
+        }
+    )
+
+    report = run_retrieval_gate(rows, pipeline)
+    by_id = {r["id"]: r for r in report["rows"]}
+    assert by_id["E1"]["passed"] is True
+    assert by_id["E1"]["bound"] == "yes"
+    assert by_id["E2"]["passed"] is True
+    assert by_id["E2"]["bound"] == "no"
+    assert by_id["E3"]["passed"] is True
+    assert by_id["E3"]["bound"] == "no"
+    assert by_id["E4"]["passed"] is False
+    assert by_id["E4"]["bound"] == "no"
+    assert report["totals"]["rows_passed"] == 3
+    assert report["totals"]["rows_failed"] == 1

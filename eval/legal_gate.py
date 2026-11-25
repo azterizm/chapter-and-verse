@@ -22,7 +22,7 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -33,10 +33,12 @@ import chapterverse.app
 from chapterverse.audit.policy import build_policy
 from chapterverse.config import Settings
 from chapterverse.contracts import (
+    ClarifyEvent,
     ErrorEvent,
     Event,
     ExtractiveEvent,
     ReceiptEvent,
+    RefusalEvent,
     RouteEvent,
     SentenceEvent,
     SourcesEvent,
@@ -59,9 +61,11 @@ __all__ = [
     "DEFAULT_SEAL",
     "HTTP_OK",
     "evaluate_answer",
+    "extract_provider_calls",
     "is_descendant_or_equal",
     "load_battery",
     "main",
+    "parse_row_ids",
     "run_recorder",
     "run_retrieval_gate",
     "run_rubric",
@@ -204,6 +208,18 @@ def run_retrieval_gate(
         bound_coords = list(route_ev.coordinates) if route_ev is not None else []
         windows_sent = [w.coordinate for w in sources_ev.windows] if sources_ev is not None else []
 
+        row_instruments = [
+            inst
+            for inst in (row.get("instrument"), *(row.get("other_instruments") or []))
+            if isinstance(inst, str) and inst.strip()
+        ]
+        bound_yes = bool(row_instruments) and any(
+            is_descendant_or_equal(b, inst) for b in bound_coords for inst in row_instruments
+        )
+        refused_or_clarified = any(
+            isinstance(e, (RefusalEvent, ClarifyEvent)) for e in events
+        ) or route_status not in ("ROUTE_BOUNDED", "NO_ROUTE_EVENT")
+
         must_reach: list[str] = row.get("must_reach", [])
         should_reach: list[str] = row.get("should_reach", [])
 
@@ -215,7 +231,7 @@ def run_retrieval_gate(
         ]
         should_missing = [s for s in should_reach if s not in should_hits]
 
-        row_passed = len(missing_must) == 0
+        row_passed = (len(missing_must) == 0) if must_reach else (bound_yes or refused_or_clarified)
         if row_passed:
             rows_passed += 1
 
@@ -229,6 +245,7 @@ def run_retrieval_gate(
                 "id": row["id"],
                 "question": row["question"],
                 "route_status": route_status,
+                "bound": "yes" if bound_yes else "no",
                 "bound_coordinates": bound_coords,
                 "windows_sent": windows_sent,
                 "passed": row_passed,
@@ -335,8 +352,9 @@ def evaluate_answer(  # noqa: PLR0912
         cc for cc in credit_cits if any(is_descendant_or_equal(ac, cc) for ac in all_citations)
     ]
 
-    # 3. forbidden_phrases
-    forbidden: list[str] = checks.get("forbidden_phrases", list(DEFAULT_FORBIDDEN_PHRASES))
+    # 3. forbidden_phrases (row phrases add to defaults)
+    row_forbidden = checks.get("forbidden_phrases") or []
+    forbidden = list(dict.fromkeys((*DEFAULT_FORBIDDEN_PHRASES, *row_forbidden)))
     found_forbidden: list[str] = []
     for stext in sentence_texts:
         for phrase in forbidden:
@@ -371,6 +389,26 @@ def evaluate_answer(  # noqa: PLR0912
             seen.add(norm)
         if duplicate_sentences:
             failure_reasons.append(f"duplicate sentences found: {duplicate_sentences}")
+
+    # 7. expect_abstention
+    expect_abstention: bool = bool(checks.get("expect_abstention", False))
+    if expect_abstention:
+        if abstention_count < 1:
+            failure_reasons.append("expected abstention sentence, none found")
+        row_instruments = [
+            inst
+            for inst in (row.get("instrument"), *(row.get("other_instruments") or []))
+            if isinstance(inst, str) and inst.strip()
+        ]
+        bad_cits = [
+            c
+            for stext, cits in sentences
+            if stext.strip() != refusal_stripped
+            for c in cits
+            if any(is_descendant_or_equal(c, inst) for inst in row_instruments)
+        ]
+        if bad_cits:
+            failure_reasons.append(f"non-abstention sentence cites row instrument: {bad_cits}")
 
     passed = len(failure_reasons) == 0
     return {
@@ -421,14 +459,18 @@ def run_rubric(
     }
 
 
-def _parse_row_ids(raw: str | None) -> list[str] | None:
+def parse_row_ids(raw: str | None) -> list[str] | None:
     if raw is None:
         return None
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def _local_runtime_env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+_parse_row_ids = parse_row_ids
+
+
+def _local_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    source = os.environ if environ is None else environ
+    env = {k: v for k, v in source.items() if k != "DATABASE_URL"}
     if (
         "DAILY_ASK_CAP" not in env
         and len(env.get("CAP_SALT", "").strip()) < chapterverse.app.MIN_CAP_SALT_LEN
@@ -448,7 +490,7 @@ def _available_providers(rotation: Any, purpose: Literal["generate", "judge"]) -
         return [str(name) for name in rotation.available()]
 
 
-def _extract_provider_calls(events: Sequence[Any]) -> list[dict[str, Any]]:
+def extract_provider_calls(events: Sequence[Any]) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
     for ev in events:
         if isinstance(ev, ReceiptEvent):
@@ -475,6 +517,9 @@ def _extract_provider_calls(events: Sequence[Any]) -> list[dict[str, Any]]:
     return calls
 
 
+_extract_provider_calls = extract_provider_calls
+
+
 def _build_record_line(
     row_id: str,
     events: Sequence[Any],
@@ -498,10 +543,11 @@ def _record_local(
     *,
     pace: float,
     pipeline: Any,
+    environ: Mapping[str, str] | None = None,
 ) -> None:
     runtime = None
     if pipeline is None:
-        runtime = chapterverse.app.build_runtime(_local_runtime_env())
+        runtime = chapterverse.app.build_runtime(_local_runtime_env(environ))
         active_pipeline: Any = runtime.pipeline
     else:
         active_pipeline = pipeline
@@ -580,6 +626,7 @@ def run_recorder(
     transport: httpx.BaseTransport | None = None,
     pipeline: Any = None,
     router_repo: Path | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> int:
     """Record engine answers for rows with answer_checks (or selected/all) to out_path."""
     del router_repo
@@ -591,7 +638,7 @@ def run_recorder(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if target == "local":
-        _record_local(target_rows, out_path, pace=pace, pipeline=pipeline)
+        _record_local(target_rows, out_path, pace=pace, pipeline=pipeline, environ=environ)
     elif target == "live":
         _record_live(
             target_rows,
@@ -723,9 +770,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0912, PLR0915
     for r in report["rows"]:
         tag = "PASS" if r["passed"] else "FAIL"
         print(
-            f"[{tag}] {r['id']}: status={r['route_status']}; bound={r['bound_coordinates']}; "
-            f"windows={len(r['windows_sent'])}; missing={r['missing_must_reach']}; "
-            f"should_hits={r['should_reach_hits']}"
+            f"[{tag}] {r['id']}: status={r['route_status']}; bound={r['bound']} "
+            f"{r['bound_coordinates']}; windows={len(r['windows_sent'])}; "
+            f"missing={r['missing_must_reach']}; should_hits={r['should_reach_hits']}"
         )
 
     totals = report["totals"]
@@ -765,10 +812,28 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0912, PLR0915
     failing = [r for r in report["rows"] if not r["passed"]]
     if failing:
         for f_row in failing:
-            missing_str = ", ".join(f_row["missing_must_reach"])
-            md_lines.append(f"- {f_row['id']}: missing {missing_str}")
+            if f_row["missing_must_reach"]:
+                missing_str = ", ".join(f_row["missing_must_reach"])
+                md_lines.append(f"- {f_row['id']}: missing {missing_str}")
+            else:
+                md_lines.append(
+                    f"- {f_row['id']}: bound: {f_row['bound']}, status: {f_row['route_status']}"
+                )
     else:
         md_lines.append("None")
+
+    empty_must = [
+        r
+        for r in report["rows"]
+        if not next((x.get("must_reach") for x in rows if x["id"] == r["id"]), None)
+    ]
+    if empty_must:
+        md_lines.extend(["", "## Empty must_reach rows", ""])
+        md_lines.extend(
+            f"- {e_row['id']}: bound: {e_row['bound']}, status: {e_row['route_status']}, "
+            f"passed: {'yes' if e_row['passed'] else 'no'}"
+            for e_row in empty_must
+        )
     md_lines.append("")
 
     (out / "legal-gate.md").write_text("\n".join(md_lines), encoding="utf-8")
