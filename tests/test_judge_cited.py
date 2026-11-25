@@ -18,7 +18,7 @@ from chapterverse.audit.policy import (
     verifier_config,
 )
 from chapterverse.audit.verify import AuditVerifier, make_verifier
-from chapterverse.contracts import JudgeReply, ProviderCall
+from chapterverse.contracts import JudgeReply, Policy, ProviderCall
 
 
 class RecordingChat:
@@ -34,6 +34,10 @@ class RecordingChat:
         self.prompts.append(messages[1]["content"])
         reply = self.script.pop(0) if self.script else {"label": "supported", "passage": 1}
         return {"content": json.dumps(reply), "ms": 1.0, "tokens": 5, "finish": "stop"}
+
+
+def _cited_policy() -> Policy:
+    return build_policy("qwen27-ar4", verifier_config_name=CITED_PASSAGES_CONFIG)
 
 
 def _statute_premise() -> Premise:
@@ -81,7 +85,7 @@ def test_cited_judge_keeps_only_cited_window_and_elements_numbered_from_1() -> N
     premise = _statute_premise()
     chat = RecordingChat([{"label": "supported", "passage": 1}])
     calls: list[ProviderCall] = []
-    verifier = make_verifier(chat, build_policy("qwen27-ar4"), ["P1", "P2", "P3"], calls)
+    verifier = make_verifier(chat, _cited_policy(), ["P1", "P2", "P3"], calls)
 
     verdict = verifier.check_sentence(premise, "The maximum week's pay is £700 [P2].")
     assert verdict.verdict is Verdict.EMIT
@@ -105,7 +109,7 @@ def test_cited_judge_keeps_joined_candidate_starting_at_cited_window() -> None:
     # P1 cites subsection (2), so _nli_candidates builds a joined (P1, P2) candidate.
     chat = RecordingChat([{"label": "supported", "passage": 2}])
     calls: list[ProviderCall] = []
-    verifier = make_verifier(chat, build_policy("qwen27-ar4"), ["P1", "P2", "P3"], calls)
+    verifier = make_verifier(chat, _cited_policy(), ["P1", "P2", "P3"], calls)
 
     verdict = verifier.check_sentence(
         premise, "An employee receives a basic award up to £700 [P1]."
@@ -151,7 +155,7 @@ def test_not_stated_still_points_to_cited_window_not_index_0() -> None:
     premise = _statute_premise()
     chat = RecordingChat([{"label": "not_stated", "passage": 0}])
     calls: list[ProviderCall] = []
-    verifier = make_verifier(chat, build_policy("qwen27-ar4"), ["P1", "P2", "P3"], calls)
+    verifier = make_verifier(chat, _cited_policy(), ["P1", "P2", "P3"], calls)
 
     verdict = verifier.check_sentence(premise, "The claimant receives a bonus [P3].")
     assert verdict.verdict is Verdict.ROLLBACK
@@ -170,7 +174,7 @@ def test_no_cited_passage_reaching_judge_falls_back_and_logs_once_without_senten
         [{"label": "supported", "passage": 1}, {"label": "supported", "passage": 1}]
     )
     calls: list[ProviderCall] = []
-    verifier = make_verifier(chat, build_policy("qwen27-ar4"), ["P1", "P2", "P3"], calls)
+    verifier = make_verifier(chat, _cited_policy(), ["P1", "P2", "P3"], calls)
 
     sentence = "The statement holds; the rule applies."
     with caplog.at_level(logging.WARNING, logger="chapterverse.audit.verify"):
@@ -211,7 +215,7 @@ def test_claim_checks_still_see_uncited_window_figure() -> None:
 
     chat = RecordingChat([{"label": "supported", "passage": 1}])
     calls: list[ProviderCall] = []
-    verifier = make_verifier(chat, build_policy("qwen27-ar4"), ["P1", "P2"], calls)
+    verifier = make_verifier(chat, _cited_policy(), ["P1", "P2"], calls)
 
     verdict = verifier.check_sentence(premise, "An employee may receive up to £500 [P1].")
     assert verdict.verdict is Verdict.EMIT
@@ -230,18 +234,21 @@ def test_policy_names_hashes_and_make_verifier_scope() -> None:
     assert VERIFIER_CONFIGS[CITED_PASSAGES_CONFIG] is STRICT_FIGURES
 
     default_policy = build_policy("qwen27-ar4")
+    cited_policy = _cited_policy()
     all_policy = build_policy("qwen27-ar4", verifier_config_name=ALL_PASSAGES_CONFIG)
-    assert default_policy.verifier_config_name == CITED_PASSAGES_CONFIG
+    # The held-out gate failed (reports/heldout-qwen-modal-cited.md): the default stays all.
+    assert default_policy == all_policy
+    assert cited_policy.verifier_config_name == CITED_PASSAGES_CONFIG
     assert all_policy.verifier_config_name == ALL_PASSAGES_CONFIG
-    assert verifier_config(default_policy) is STRICT_FIGURES
+    assert verifier_config(cited_policy) is STRICT_FIGURES
     assert verifier_config(all_policy) is STRICT_FIGURES
-    assert default_policy.policy_hash != all_policy.policy_hash
+    assert cited_policy.policy_hash != all_policy.policy_hash
 
     premise = _statute_premise()
     all_chat = RecordingChat([{"label": "supported", "passage": 2}])
     cited_chat = RecordingChat([{"label": "supported", "passage": 1}])
     v_all = make_verifier(all_chat, all_policy, ["P1", "P2", "P3"], [])
-    v_cited = make_verifier(cited_chat, default_policy, ["P1", "P2", "P3"], [])
+    v_cited = make_verifier(cited_chat, cited_policy, ["P1", "P2", "P3"], [])
 
     v_all.check_sentence(premise, "The maximum week's pay is £700 [P2].")
     v_cited.check_sentence(premise, "The maximum week's pay is £700 [P2].")

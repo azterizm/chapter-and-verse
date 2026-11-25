@@ -1,0 +1,740 @@
+{
+  "utc_date": "2026-11-25",
+  "label": "cited-4b47845",
+  "split": "dev",
+  "totals": {
+    "rows_total": 23,
+    "rows_passed": 19,
+    "rows_failed": 4,
+    "incomplete_notices_by_reason": {
+      "providers_unavailable": 1
+    }
+  },
+  "rows": [
+    {
+      "id": "L01",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 1506.2,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 360.9
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "judge",
+          "latency_ms": 1005.6
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "cloudflare"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "You have six years from the date the cause of action accrued to bring an action founded on tort."
+    },
+    {
+      "id": "L07",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 6.9,
+      "provider_calls": [],
+      "providers_used": [],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "the likely consequences of any decision in the long term, the interests of the company's employees, the need to foster the company's business relationships with suppliers, customers and others, the impact of the company's operations on the community and the environment,"
+    },
+    {
+      "id": "L09",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 1088.9,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 382.4
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 125.2
+        },
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 294.9
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 133.9
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "The 30-day period starts on the first day after ownership or possession of the goods has been transferred to you, the goods have been delivered, and, if required by the contract, the trader has notified you that any necessary installation or other action to enable you to use them has been taken."
+    },
+    {
+      "id": "L41",
+      "passed": false,
+      "failed_checks": [
+        "missing required citations: ['uk/uksi/1998/1833/reg13', 'uk/uksi/1998/1833/reg13A']"
+      ],
+      "elapsed_ms": 641.6,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 601.5
+        }
+      ],
+      "providers_used": [
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "I can't confirm this from the law I found, so I won't guess."
+    },
+    {
+      "id": "L43",
+      "passed": false,
+      "failed_checks": [
+        "missing required citations: ['uk/uksi/1998/1833/reg4', 'uk/uksi/1998/1833/reg5']"
+      ],
+      "elapsed_ms": 2104.6,
+      "provider_calls": [
+        {
+          "provider": "cloudflare",
+          "purpose": "generate",
+          "latency_ms": 1386.5
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 164.3
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "generate",
+          "latency_ms": 458.7
+        }
+      ],
+      "providers_used": [
+        "cloudflare",
+        "groq",
+        "cloudflare"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "I can't confirm this from the law I found, so I won't guess."
+    },
+    {
+      "id": "L45",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 1182.3,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 577.1
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 161.8
+        },
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 246.9
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 123.0
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "For a standard online purchase of goods, the cancellation period is 14 days after you or a person you identified to receive the goods takes physical possession of them."
+    },
+    {
+      "id": "L47",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 2793.9,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 536.3
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 123.9
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 152.2
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "judge",
+          "latency_ms": 924.2
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "judge",
+          "latency_ms": 983.6
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq",
+        "cloudflare",
+        "cloudflare"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "When a relevant transfer occurs, your contract of employment does not terminate, but instead continues to have effect as if it had originally been made between you and the transferee. Consequently, all of the transferor\u2019s rights, powers, duties, and liabilities under or in connection with your contr"
+    },
+    {
+      "id": "L49",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 5228.7,
+      "provider_calls": [
+        {
+          "provider": "cloudflare",
+          "purpose": "generate",
+          "latency_ms": 3155.7
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 164.9
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 132.1
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "judge",
+          "latency_ms": 874.3
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "judge",
+          "latency_ms": 833.3
+        }
+      ],
+      "providers_used": [
+        "cloudflare",
+        "groq",
+        "groq",
+        "cloudflare",
+        "cloudflare"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "An employer must make a suitable and sufficient assessment of the risks to the health and safety of their employees while at work, as well as the risks to persons not in their employment arising from the conduct of the undertaking. This assessment is intended to identify the measures needed to compl"
+    },
+    {
+      "id": "L51",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 1082.1,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 467.0
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 125.2
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 136.7
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 129.1
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 146.1
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "No, a business cannot exclude or restrict its liability for death or personal injury resulting from negligence. For any other loss or damage, a business can only exclude or restrict its liability for negligence if the contract term or notice satisfies the requirement of reasonableness. Additionally,"
+    },
+    {
+      "id": "L53",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 1420.7,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 839.2
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 126.4
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 140.6
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 124.0
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "You are exempt from the fairness assessment for terms that specify the main subject matter of the contract or where the assessment concerns the appropriateness of the price payable by comparison with the goods, digital content, or services supplied. However, these terms are only excluded from the as"
+    },
+    {
+      "id": "L55",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 1158.8,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 557.2
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 119.5
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 129.9
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "Yes, a dismissal is regarded as unfair if the reason or principal reason for it is that the employee made a protected disclosure. However, the standard qualifying period of continuous employment for not less than two years generally applies to dismissals under the Act. I can't confirm this from the "
+    },
+    {
+      "id": "L57",
+      "passed": false,
+      "failed_checks": [
+        "missing required citations: ['uk/ukpga/1996/18/s23']"
+      ],
+      "elapsed_ms": 6743.2,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 357.8
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 141.5
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "generate",
+          "latency_ms": 2754.2
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 392.0
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "generate",
+          "latency_ms": 1951.2
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 131.4
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "generate",
+          "latency_ms": 662.6
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "cloudflare",
+        "groq",
+        "cloudflare",
+        "groq",
+        "cloudflare"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "I can't confirm this from the law I found, so I won't guess."
+    },
+    {
+      "id": "L59",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 13150.3,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 573.1
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 130.1
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 149.5
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": true,
+      "incomplete_reason": "providers_unavailable",
+      "answer_text": "You are subject to indirect discrimination if a person applies a provision, criterion, or practice to you that is discriminatory in relation to one of your relevant protected characteristics. This occurs when the provision, criterion, or practice is applied to people who do not share that characteri"
+    },
+    {
+      "id": "L61",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 24.2,
+      "provider_calls": [],
+      "providers_used": [],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "(1) A person is guilty of theft if he dishonestly appropriates property belonging to another with the intention of permanently depriving the other of it; and \u201cthief\u201d and \u201csteal\u201d shall be construed accordingly. (2) It is immaterial whether the appropriation is made with a view to gain, or is made for"
+    },
+    {
+      "id": "L63",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 17.2,
+      "provider_calls": [],
+      "providers_used": [],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "(1) A director of a company must exercise reasonable care, skill and diligence. (2) This means the care, skill and diligence that would be exercised by a reasonably diligent person with\u2014 (a) the general knowledge, skill and experience that may reasonably be expected of a person carrying out the func"
+    },
+    {
+      "id": "L65",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 1248.2,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 443.7
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 266.6
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 282.4
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 149.2
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "The limitation period is postponed until you have discovered the fraud, concealment, or mistake, or until you could have discovered it with reasonable diligence. This applies when the action is based on the defendant\u2019s fraud, when a relevant fact has been deliberately concealed from you by the defen"
+    },
+    {
+      "id": "L67",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 1224.4,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 552.2
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 124.9
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 138.3
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 189.0
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 146.5
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "Yes, the court may allow a personal injury claim to proceed after the time limit has expired if it appears equitable to do so, having regard to the degree to which the relevant time limit provisions prejudice the plaintiff and the defendant. This discretion applies to the provisions of section 11, 1"
+    },
+    {
+      "id": "L69",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 12538.3,
+      "provider_calls": [],
+      "providers_used": [],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "(4) For the purposes of this section and section 241, a company enters into a transaction with a person at an undervalue if\u2014 (a) the company makes a gift to that person or otherwise enters into a transaction with that person on terms that provide for the company to receive no consideration, or (b) t"
+    },
+    {
+      "id": "L71",
+      "passed": false,
+      "failed_checks": [
+        "missing required citations: ['uk/ukpga/1984/60/s58']"
+      ],
+      "elapsed_ms": 8412.3,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 514.8
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 134.6
+        },
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 416.0
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 128.4
+        },
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 261.6
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 119.6
+        },
+        {
+          "provider": "cloudflare",
+          "purpose": "generate",
+          "latency_ms": 635.5
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq",
+        "groq",
+        "groq",
+        "groq",
+        "cloudflare"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "I can't confirm this from the law I found, so I won't guess."
+    },
+    {
+      "id": "L73",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 2605.2,
+      "provider_calls": [
+        {
+          "provider": "cloudflare",
+          "purpose": "generate",
+          "latency_ms": 2200.4
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 163.5
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 130.0
+        }
+      ],
+      "providers_used": [
+        "cloudflare",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "A public authority must comply with a request for information not later than the twentieth working day following the date of receipt. A \"working day\" is defined as any day other than a Saturday, a Sunday, Christmas Day, Good Friday, or a bank holiday under the Banking and Financial Dealings Act 1971"
+    },
+    {
+      "id": "L75",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 4270.3,
+      "provider_calls": [
+        {
+          "provider": "cloudflare",
+          "purpose": "generate",
+          "latency_ms": 3961.3
+        }
+      ],
+      "providers_used": [
+        "cloudflare"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "I can't confirm this from the law I found, so I won't guess."
+    },
+    {
+      "id": "L77",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 588.3,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 410.6
+        }
+      ],
+      "providers_used": [
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "I can't confirm this from the law I found, so I won't guess."
+    },
+    {
+      "id": "L79",
+      "passed": true,
+      "failed_checks": [],
+      "elapsed_ms": 1342.7,
+      "provider_calls": [
+        {
+          "provider": "groq",
+          "purpose": "generate",
+          "latency_ms": 528.6
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 167.2
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 138.3
+        },
+        {
+          "provider": "groq",
+          "purpose": "judge",
+          "latency_ms": 140.3
+        }
+      ],
+      "providers_used": [
+        "groq",
+        "groq",
+        "groq",
+        "groq"
+      ],
+      "incomplete_notice": false,
+      "incomplete_reason": null,
+      "answer_text": "The Consumer Rights Act 2015 governs a term in a consumer contract that excludes a trader's liability for personal injury resulting from negligence, as section 65(1) explicitly bars such exclusion. The Unfair Contract Terms Act 1977 does not apply to terms in a consumer contract because section 2 of"
+    }
+  ]
+}

@@ -39,7 +39,7 @@ to cited passages."""
 def build_policy(
     judge_preset: str,
     *,
-    verifier_config_name: str = CITED_PASSAGES_CONFIG,
+    verifier_config_name: str = ALL_PASSAGES_CONFIG,
 ) -> Policy:
     """The policy for an answer judged with ``judge_preset`` under the current prompt.
 
