@@ -118,7 +118,6 @@ from chapterverse.discovery import (
     check_out_of_scope,
     discover_step,
     is_named_private_document,
-    load_clarify_prior,
     remove_bare_section,
 )
 from chapterverse.extractive import (
@@ -187,14 +186,6 @@ TOP_SECTION_WINDOWS: Final = 3
 """Maximum windows allocated to the top-ranked section in round 1 (requirement R8)."""
 MAX_CONTEXT_COORDINATES: Final = 10
 """Previous-turn coordinates accepted as routing context."""
-DEFAULT_CLARIFY_PRIOR_PATH: Final = Path("artefacts/clarify_prior.json")
-
-
-class _Unset:
-    pass
-
-
-_UNSET: Final = _Unset()
 
 INCOMPLETE_NOTICE: Final = providers_unavailable_notice()
 NO_TEXT_NOTICE: Final = NoticeEvent(
@@ -727,7 +718,7 @@ class Pipeline:
         dense: DenseRetriever | None = None,
         colbert: ColbertScorer | None = None,
         bound_ranker: InstrumentRanges | None = None,
-        clarify_prior: ClarifyPrior | _Unset | None = _UNSET,
+        clarify_prior: ClarifyPrior | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -737,18 +728,7 @@ class Pipeline:
         self.modal_kv = modal_kv
         self.dense = dense
         self.colbert = colbert
-        if isinstance(clarify_prior, _Unset):
-            router_index = getattr(router, "index", None)
-            manifest = getattr(router_index, "manifest", None)
-            is_partial = manifest.get("partial", True) if isinstance(manifest, Mapping) else True
-            if not is_partial:
-                env_prior = os.environ.get("CLARIFY_PRIOR_PATH")
-                prior_path = Path(env_prior) if env_prior else DEFAULT_CLARIFY_PRIOR_PATH
-                self.clarify_prior: ClarifyPrior | None = load_clarify_prior(prior_path)
-            else:
-                self.clarify_prior = None
-        else:
-            self.clarify_prior = clarify_prior
+        self.clarify_prior = clarify_prior
         if bound_ranker is None:
             concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
             if concepts is not None:

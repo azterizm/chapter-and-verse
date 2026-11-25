@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from legal_rag_router import Router, RouteStatus
 
-from chapterverse.audit.policy import build_policy
-from chapterverse.contracts import (
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from chapterverse.app import _load_clarify_prior  # noqa: E402
+from chapterverse.audit.policy import build_policy  # noqa: E402
+from chapterverse.contracts import (  # noqa: E402
     ChatRequest,
     ChatResult,
     ClarifyEvent,
@@ -19,15 +27,17 @@ from chapterverse.contracts import (
     SourcesEvent,
     TextStore,
 )
-from chapterverse.dense.retriever import DenseHit, DenseRetriever
-from chapterverse.discovery import (
+from chapterverse.dense.retriever import DenseHit, DenseRetriever  # noqa: E402
+from chapterverse.discovery import (  # noqa: E402
     ClarifyPrior,
     Suggest,
     discover_step,
     load_clarify_prior,
 )
-from chapterverse.pipeline import AskRequest, Pipeline
-from chapterverse.providers.presets import JUDGE_PRESET_NAME
+from chapterverse.pipeline import AskRequest, Pipeline  # noqa: E402
+from chapterverse.providers.presets import JUDGE_PRESET_NAME  # noqa: E402
+from eval import clarify_rank as eval_clarify_rank  # noqa: E402
+from eval import discovery_gate as eval_discovery_gate  # noqa: E402
 
 
 class _EmptyRotation:
@@ -190,16 +200,16 @@ def test_cited_query_still_binds_with_prior(
 
 
 def test_load_clarify_prior_optional_and_safe(tmp_path: Path) -> None:
-    assert load_clarify_prior(None) is None
-    assert load_clarify_prior(tmp_path / "absent.json") is None
+    assert load_clarify_prior(None, router_snapshot="2026-09-28") is None
+    assert load_clarify_prior(tmp_path / "absent.json", router_snapshot="2026-09-28") is None
 
     bad_json = tmp_path / "bad.json"
     bad_json.write_text("{not json", encoding="utf-8")
-    assert load_clarify_prior(bad_json) is None
+    assert load_clarify_prior(bad_json, router_snapshot="2026-09-28") is None
 
     bad_ver = tmp_path / "ver.json"
     bad_ver.write_text(json.dumps({"format_version": 99}), encoding="utf-8")
-    assert load_clarify_prior(bad_ver) is None
+    assert load_clarify_prior(bad_ver, router_snapshot="2026-09-28") is None
 
     valid = tmp_path / "valid.json"
     payload: dict[str, Any] = {
@@ -209,7 +219,179 @@ def test_load_clarify_prior_optional_and_safe(tmp_path: Path) -> None:
         "instruments": {"uk/ukpga/1996/18": 15},
     }
     valid.write_text(json.dumps(payload), encoding="utf-8")
-    loaded = load_clarify_prior(valid)
+    loaded = load_clarify_prior(valid, router_snapshot="2026-09-28")
     assert loaded is not None
+    assert loaded.snapshot == "2026-09-28"
     assert loaded.section_count("uk/ukpga/1996/18/s124/1") == 7
     assert loaded.instrument_count("uk/ukpga/1996/18/s124") == 15
+
+
+def test_load_clarify_prior_snapshot_mismatch_gives_none(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    empty_snap = tmp_path / "empty_snap.json"
+    empty_snap.write_text(
+        json.dumps({"format_version": 1, "snapshot": "", "sections": {"uk/ukpga/1996/18/s1": 1}}),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="chapterverse.discovery"):
+        assert load_clarify_prior(empty_snap, router_snapshot="2026-09-28") is None
+    assert len(caplog.records) == 1
+
+    caplog.clear()
+    stale_snap = tmp_path / "stale_snap.json"
+    stale_snap.write_text(
+        json.dumps(
+            {"format_version": 1, "snapshot": "2026-09-01", "sections": {"uk/ukpga/1996/18/s1": 1}}
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="chapterverse.discovery"):
+        assert load_clarify_prior(stale_snap, router_snapshot="2026-09-28") is None
+    assert len(caplog.records) == 1
+
+
+def test_pipeline_default_does_not_read_filesystem_for_prior(
+    fixture_router: Router,
+    fixture_text_store: TextStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prior_file = tmp_path / "prior.json"
+    prior_file.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "snapshot": fixture_router.index.snapshot,
+                "sections": {"uk/ukpga/1996/18/s124": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLARIFY_PRIOR_PATH", str(prior_file))
+
+    def _forbid_read(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("Pipeline() must not read clarify prior files")
+
+    monkeypatch.setattr("chapterverse.discovery.load_clarify_prior", _forbid_read)
+
+    pipeline = Pipeline(
+        router=fixture_router,
+        store=fixture_text_store,
+        rotation=_EmptyRotation(),
+        policy=build_policy(JUDGE_PRESET_NAME),
+    )
+    assert pipeline.clarify_prior is None
+
+    # Even with a non-partial router manifest, default Pipeline() still has no prior.
+    non_partial_router = MagicMock(spec=Router)
+    non_partial_router.index = MagicMock(snapshot="2026-09-28", manifest={"partial": False})
+    non_partial_router.concepts = None
+    non_partial_router._concepts = None
+    pipeline_full = Pipeline(
+        router=non_partial_router,
+        store=fixture_text_store,
+        rotation=_EmptyRotation(),
+        policy=build_policy(JUDGE_PRESET_NAME),
+    )
+    assert pipeline_full.clarify_prior is None
+
+
+def test_app_load_clarify_prior_env(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="chapterverse.app"):
+        assert _load_clarify_prior({}, router_snapshot="2026-09-28") is None
+    assert any("clarify prior off" in r.message and "unset" in r.message for r in caplog.records)
+
+    prior_file = tmp_path / "prior.json"
+    prior_file.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "snapshot": "2026-09-28",
+                "sections": {"uk/ukpga/1996/18/s124": 7},
+                "instruments": {"uk/ukpga/1996/18": 15},
+            }
+        ),
+        encoding="utf-8",
+    )
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="chapterverse.app"):
+        loaded = _load_clarify_prior(
+            {"CLARIFY_PRIOR_PATH": str(prior_file)}, router_snapshot="2026-09-28"
+        )
+    assert loaded is not None
+    assert any("clarify prior on" in r.message for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="chapterverse.app"):
+        mismatched = _load_clarify_prior(
+            {"CLARIFY_PRIOR_PATH": str(prior_file)}, router_snapshot="2026-09-29"
+        )
+    assert mismatched is None
+    assert any("clarify prior off" in r.message for r in caplog.records)
+
+
+def test_eval_prior_flags_and_pipeline_wiring(
+    fixture_router: Router, fixture_text_store: TextStore, tmp_path: Path
+) -> None:
+    custom = tmp_path / "custom.json"
+    custom.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "snapshot": fixture_router.index.snapshot,
+                "sections": {"uk/ukpga/1996/18/s124": 5},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    for parser_fn in (eval_discovery_gate._parse_args, eval_clarify_rank._parse_args):
+        default_args = parser_fn([])
+        assert default_args.prior == Path("artefacts/clarify_prior.json")
+        assert default_args.no_prior is False
+
+        no_prior_args = parser_fn(["--no-prior"])
+        assert no_prior_args.no_prior is True
+
+        custom_args = parser_fn(["--prior", str(custom)])
+        assert custom_args.prior == custom
+        assert custom_args.no_prior is False
+
+    loaded = eval_discovery_gate.load_eval_clarify_prior(
+        custom, no_prior=False, router_snapshot=fixture_router.index.snapshot
+    )
+    assert loaded is not None
+    assert (
+        eval_discovery_gate.load_eval_clarify_prior(
+            custom, no_prior=True, router_snapshot=fixture_router.index.snapshot
+        )
+        is None
+    )
+    assert (
+        eval_discovery_gate.load_eval_clarify_prior(
+            custom, no_prior=False, router_snapshot="different-snapshot"
+        )
+        is None
+    )
+
+    _, _, p_nodense_on, _, _ = eval_discovery_gate._build_pipelines(
+        fixture_router, fixture_text_store, None, tmp_path, prior=loaded
+    )
+    assert p_nodense_on.clarify_prior is loaded
+
+    _, _, p_nodense_off, _, _ = eval_discovery_gate._build_pipelines(
+        fixture_router, fixture_text_store, None, tmp_path, prior=None
+    )
+    assert p_nodense_off.clarify_prior is None
+
+    assert eval_discovery_gate.clarify_prior_report(loaded, prior_path=custom, no_prior=False) == {
+        "on": True,
+        "path": str(custom),
+        "snapshot": fixture_router.index.snapshot,
+    }
+    assert eval_discovery_gate.clarify_prior_report(None, prior_path=custom, no_prior=True) == {
+        "on": False,
+        "path": None,
+        "snapshot": None,
+    }

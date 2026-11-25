@@ -40,6 +40,7 @@ from chapterverse.dense.colbert import ColbertScorer
 from chapterverse.dense.embed import load_model
 from chapterverse.dense.retriever import DenseRetriever
 from chapterverse.dense.store import BinaryInt8Store
+from chapterverse.discovery import ClarifyPrior, load_clarify_prior
 from chapterverse.nlp import analyse
 from chapterverse.normalise import find_protected_spans, normalise
 from chapterverse.pii import mask_pii
@@ -49,6 +50,9 @@ from chapterverse.store import open_store
 from eval.run import EmptyRotation
 
 __all__ = [
+    "add_prior_args",
+    "clarify_prior_report",
+    "load_eval_clarify_prior",
     "load_router_discovery_code",
     "main",
 ]
@@ -59,6 +63,7 @@ ROUTER_REPO: Final = Path(
 SEAL: Final = "seals/concept-2026-09-29.json"
 BATTERY: Final = "batteries/concept/uk.jsonl"
 SEALED_TEST: Final = "reports/discovery-uk-test.json"
+DEFAULT_PRIOR: Final = Path("artefacts/clarify_prior.json")
 TOP_K_RANK: Final = 10
 GATE_HIT10_THRESHOLD: Final = 0.88
 GATE_MRR_THRESHOLD: Final = 0.63
@@ -115,6 +120,47 @@ def load_router_discovery_code(repo: Path) -> RouterDiscoveryCode:
     return RouterDiscoveryCode(schema=schema, seal=seal, discovery=discovery)
 
 
+def add_prior_args(parser: argparse.ArgumentParser) -> None:
+    """Register ``--prior`` and ``--no-prior`` flags on an eval argument parser."""
+    parser.add_argument(
+        "--prior",
+        type=Path,
+        default=DEFAULT_PRIOR,
+        help="Path to clarify prior JSON (default: artefacts/clarify_prior.json)",
+    )
+    parser.add_argument(
+        "--no-prior",
+        action="store_true",
+        help="Disable clarify prior ranking",
+    )
+
+
+def load_eval_clarify_prior(
+    prior_path: Path | None,
+    *,
+    no_prior: bool,
+    router_snapshot: str,
+) -> ClarifyPrior | None:
+    """Load the clarify prior for an eval run against ``router_snapshot`` unless disabled."""
+    if no_prior or prior_path is None:
+        return None
+    return load_clarify_prior(prior_path, router_snapshot=router_snapshot)
+
+
+def clarify_prior_report(
+    prior: ClarifyPrior | None,
+    *,
+    prior_path: Path,
+    no_prior: bool,
+) -> dict[str, Any]:
+    """Structured clarify-prior status for eval JSON reports."""
+    return {
+        "on": prior is not None,
+        "path": None if no_prior else str(prior_path),
+        "snapshot": prior.snapshot if prior is not None else None,
+    }
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     default_out = Path(os.environ.get("CV_SCRATCH", "scratch")) / "s2-gates" / "discovery"
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
@@ -137,6 +183,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=Path("artefacts/models"),
         help="Path to models directory (default: artefacts/models)",
     )
+    add_prior_args(parser)
     parser.add_argument("--out", type=Path, default=default_out, help="output directory")
     return parser.parse_args(argv)
 
@@ -495,7 +542,9 @@ def _build_pipelines(
     store: Any,
     dense_dir: Path | None,
     models_dir: Path,
+    *,
     colbert_dir: Path | None = None,
+    prior: ClarifyPrior | None = None,
 ) -> tuple[
     DenseRetriever | None,
     ColbertScorer | None,
@@ -524,6 +573,7 @@ def _build_pipelines(
         policy=build_policy(JUDGE_PRESET_NAME),
         dense=None,
         colbert=None,
+        clarify_prior=prior,
     )
     pipeline_dense = (
         Pipeline(
@@ -533,6 +583,7 @@ def _build_pipelines(
             policy=build_policy(JUDGE_PRESET_NAME),
             dense=dense_retriever,
             colbert=None,
+            clarify_prior=prior,
         )
         if dense_retriever is not None
         else None
@@ -545,6 +596,7 @@ def _build_pipelines(
             policy=build_policy(JUDGE_PRESET_NAME),
             dense=dense_retriever,
             colbert=colbert_scorer,
+            clarify_prior=prior,
         )
         if (colbert_scorer is not None)
         else None
@@ -648,6 +700,15 @@ def _enrich_summary_with_stages(
             summary["colbert_beats_rrf"] = (colbert_mrr > rrf_mrr) and (colbert_hit10 >= rrf_hit10)
 
 
+def _write_gate_outputs(out: Path, summary: dict[str, Any], per_row: list[dict[str, Any]]) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    with (out / "rows.jsonl").open("w", encoding="utf-8") as f:
+        for item in per_row:
+            f.write(json.dumps(item) + "\n")
+    print(json.dumps(summary, indent=2))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.split == "test" and not args.sealed_test:
@@ -683,6 +744,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"REFUSED: store {store.snapshot} and router {router.index.snapshot} differ")
         return 1
 
+    prior = load_eval_clarify_prior(
+        args.prior, no_prior=args.no_prior, router_snapshot=router.index.snapshot
+    )
+    print(
+        f"Clarify prior: {'on' if prior is not None else 'off'} "
+        f"({'--no-prior' if args.no_prior else args.prior})"
+    )
+
     (
         dense_retriever,
         colbert_scorer,
@@ -695,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
         args.dense_dir,
         args.models_dir,
         colbert_dir=args.colbert_dir,
+        prior=prior,
     )
 
     rows = [r for r in code.schema.read_concepts(repo / args.battery) if r.split == args.split]
@@ -760,14 +830,10 @@ def main(argv: list[str] | None = None) -> int:
         latencies=latencies,
         colbert_stats=colbert_stats,
     )
-
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    with (out / "rows.jsonl").open("w", encoding="utf-8") as f:
-        for item in per_row:
-            f.write(json.dumps(item) + "\n")
-
-    print(json.dumps(summary, indent=2))
+    summary["clarify_prior"] = clarify_prior_report(
+        prior, prior_path=args.prior, no_prior=args.no_prior
+    )
+    _write_gate_outputs(out, summary, per_row)
 
     if (
         pipeline_dense is not None

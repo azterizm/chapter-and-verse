@@ -29,6 +29,9 @@ from eval.discovery_gate import (
     RouterDiscoveryCode,
     _build_pipelines,
     _prepare_settings,
+    add_prior_args,
+    clarify_prior_report,
+    load_eval_clarify_prior,
     load_router_discovery_code,
 )
 
@@ -168,6 +171,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--battery", type=Path, default=DEFAULT_BATTERY)
     parser.add_argument("--dense-dir", type=Path, default=None)
     parser.add_argument("--models-dir", type=Path, default=Path("artefacts/models"))
+    add_prior_args(parser)
     parser.add_argument("--out", type=Path, default=default_out)
     return parser.parse_args(argv)
 
@@ -188,11 +192,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"REFUSED: store {store.snapshot} and router {router.index.snapshot} differ")
         return 1
 
+    prior = load_eval_clarify_prior(
+        args.prior, no_prior=args.no_prior, router_snapshot=router.index.snapshot
+    )
+    print(
+        f"Clarify prior: {'on' if prior is not None else 'off'} "
+        f"({'--no-prior' if args.no_prior else args.prior})"
+    )
+
     _, _, pipeline_nodense, pipeline_dense, _ = _build_pipelines(
         router,
         store,
         args.dense_dir,
         args.models_dir,
+        prior=prior,
     )
 
     rows = read_everyday(args.battery)
@@ -202,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     summary: dict[str, Any] = {
         "battery": str(args.battery),
         "rows": len(rows),
+        "clarify_prior": clarify_prior_report(prior, prior_path=args.prior, no_prior=args.no_prior),
         "without_dense": metrics_nodense,
     }
     _print_stage("dense off (BM25)", results_nodense, metrics_nodense)

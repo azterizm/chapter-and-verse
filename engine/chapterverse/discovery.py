@@ -530,8 +530,12 @@ class ClarifyPrior:
         return self.instruments.get(instrument_coordinate(coordinate), 0)
 
 
-def load_clarify_prior(path: Path | str | None) -> ClarifyPrior | None:
-    """Load an optional clarify prior JSON artefact, returning None if absent or invalid."""
+def load_clarify_prior(
+    path: Path | str | None,
+    *,
+    router_snapshot: str,
+) -> ClarifyPrior | None:
+    """Load an optional clarify prior JSON artefact, returning None if absent, invalid, or stale."""
     if path is None:
         return None
     p = Path(path)
@@ -544,6 +548,14 @@ def load_clarify_prior(path: Path | str | None) -> ClarifyPrior | None:
         return None
     if not isinstance(raw, dict) or raw.get("format_version", 1) != 1:
         log.warning("clarify prior format invalid, using default order")
+        return None
+    snapshot = str(raw.get("snapshot") or "").strip()
+    if not snapshot or snapshot != router_snapshot:
+        log.warning(
+            "clarify prior snapshot %r does not match router snapshot %r, using default order",
+            snapshot,
+            router_snapshot,
+        )
         return None
     raw_sections = raw.get("sections")
     raw_instruments = raw.get("instruments")
@@ -560,7 +572,7 @@ def load_clarify_prior(path: Path | str | None) -> ClarifyPrior | None:
     return ClarifyPrior(
         sections=sections,
         instruments=instruments,
-        snapshot=str(raw.get("snapshot") or ""),
+        snapshot=snapshot,
     )
 
 
