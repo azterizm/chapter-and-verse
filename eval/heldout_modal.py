@@ -79,6 +79,15 @@ __all__ = [
 ]
 
 DETECTOR: Final = "qwen27-ar4-modal"
+DETECTOR_CITED: Final = "qwen27-ar4-modal-cited"
+"""The detector with the judge on the cited windows only (S5.1b): its own once-per-detector run."""
+
+
+def detector_name(scope: str) -> str:
+    """The detector name a run with ``scope`` reports and marks."""
+    return DETECTOR_CITED if scope == "cited" else DETECTOR
+
+
 DEFAULT_MAX_USD: Final = 3.00
 LATENCY_P50_S: Final = 0.58
 _STANDARD_TURNS: Final = 2
@@ -384,7 +393,7 @@ def _dry_run(
     prompt_chars = sum(len(m["content"]) for msgs in counter.prompts for m in msgs)
     summary = {
         **seal,
-        "detector": DETECTOR,
+        "detector": detector_name(scope),
         "judge_scope": scope,
         "judge_calls": len(calls),
         "rows_with_a_call": len({c["row"] for c in calls}),
@@ -415,11 +424,11 @@ def cmd_heldout(args: argparse.Namespace) -> int:
         raise SystemExit("a live held-out run needs --method-commit (the committed method)")
 
     out.mkdir(parents=True, exist_ok=True)
-    done = out / f"{seal['seal']}-{DETECTOR}.done"
+    done = out / f"{seal['seal']}-{detector_name(scope)}.done"
     if done.exists():
-        raise SystemExit(f"{seal['seal']} has already run with {DETECTOR} ({done})")
+        raise SystemExit(f"{seal['seal']} has already run with {detector_name(scope)} ({done})")
 
-    started = out / f"{seal['seal']}-{DETECTOR}.started"
+    started = out / f"{seal['seal']}-{detector_name(scope)}.started"
     if not started.exists():
         _write_json(
             started,
@@ -481,7 +490,7 @@ def cmd_heldout(args: argparse.Namespace) -> int:
     session_usd = float(ledger.snapshot()["modal"]["usd_session"])
     summary = {
         **seal,
-        "detector": DETECTOR,
+        "detector": detector_name(scope),
         "method_commit": args.method_commit,
         "model_id": provider_obj.model_id,
         "settings_sent": settings,
