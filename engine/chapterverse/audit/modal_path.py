@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -42,11 +43,13 @@ from typing import Any, Final
 from legal_rag_verifier.backends.sglang import SGLangBackend
 from legal_rag_verifier.engine import (
     INJECT_TEMPLATE,
+    Answer,
     Ban,
     Constraint,
     InFlightGenerator,
     Segment,
     Tokens,
+    _Draft,
     _Point,
     _Retry,
     _Stream,
@@ -55,13 +58,16 @@ from legal_rag_verifier.engine import Backend as EngineBackend
 from legal_rag_verifier.judge import PRESETS
 from legal_rag_verifier.premise import Premise
 from legal_rag_verifier.verifier import SentenceVerdict
+from legal_rag_verifier.verifier import Verdict as VerifierVerdict
 
+from chapterverse.audit.narration import is_narration
 from chapterverse.audit.prompt import (
     STEER_NOTE,
     PriorTurn,
     Prompt,
     SessionState,
     build_prompt,
+    is_abstention,
     render_source,
     window_positions,
 )
@@ -81,11 +87,14 @@ from chapterverse.contracts import (
 )
 
 __all__ = [
+    "DEFAULT_ANSWER_BUDGET_S",
     "MODAL_QUANTISATION",
     "BearerPost",
     "ModalPathGenerator",
     "ModalSGLangBackend",
 ]
+
+DEFAULT_ANSWER_BUDGET_S: Final = 25.0
 
 MODAL_QUANTISATION: Final = PRESETS["qwen27-ar4"].quantisation
 """The quantisation of the measured preset the Modal server runs (decision 4)."""
@@ -293,6 +302,40 @@ def _can_ban(backend: EngineBackend) -> bool:
     return True
 
 
+def _synthetic_attempt(
+    draft: _Draft,
+    retry: _Retry,
+    sentence: str,
+    verdict_label: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "verdict": {
+            "text": sentence,
+            "span": [0, len(sentence)],
+            "verdict": verdict_label,
+            "reasons": [reason],
+            "claims": [],
+            "deontics": [],
+            "aligned_windows": [],
+            "nli": None,
+            "repair": None,
+            "claim_latency_ns": 0,
+            "nli_latency_ns": 0,
+            "details": [],
+        },
+        "steering": retry.steering,
+        "constraint": retry.constraint.to_dict() if retry.constraint else None,
+        "injected": retry.injection,
+        "tokens": len(draft.tokens),
+        "tokens_reused": len(retry.seed),
+        "tokens_discarded": 0,
+        "decode_calls": draft.calls,
+        "prefix_cache_hit_tokens": draft.hit_tokens,
+        "decode_latency_ns": draft.latency_ns,
+    }
+
+
 class _Engine(InFlightGenerator):
     """``InFlightGenerator`` with this app's prompt, source rendering and sentence callback."""
 
@@ -305,6 +348,9 @@ class _Engine(InFlightGenerator):
         positions: Mapping[int, Window],
         can_ban: bool,
         on_close: Callable[[dict[str, Any]], None],
+        started: float | None = None,
+        answer_budget_s: float = DEFAULT_ANSWER_BUDGET_S,
+        clock: Callable[[], float] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(backend, verifier, **kwargs)
@@ -313,6 +359,12 @@ class _Engine(InFlightGenerator):
         self.can_ban = can_ban
         self.on_close = on_close
         self.noted = False
+        self._clock = clock if clock is not None else time.perf_counter
+        start = started if started is not None else self._clock()
+        self._deadline = start + answer_budget_s
+
+    def _timed_out(self) -> bool:
+        return self._clock() >= self._deadline
 
     def messages(self, query: str, premise: Premise) -> list[dict[str, str]]:
         del query, premise
@@ -361,6 +413,116 @@ class _Engine(InFlightGenerator):
         self.on_close(closed)
         return closed
 
+    def generate_verified(self, query: str, premise: Premise) -> Answer:  # noqa: PLR0912, PLR0915
+        t0 = time.perf_counter_ns()
+        prompt = self.backend.chat(self.messages(query, premise))
+        stream = _Stream()
+        carry: _Draft | None = None
+        points: list[dict[str, Any]] = []
+        total_rollbacks = 0
+        stop_reason: str | None = None
+        has_refusal = False
+        by_id = {w.passage_id: w for w in self.positions.values()}
+
+        while stop_reason is None:
+            if self._timed_out():
+                stop_reason = "time_budget"
+                break
+            point = _Point(len(stream.answer))
+            retry = _Retry(carry.lookahead if carry else [], None, None)
+            end = carry.end if carry else None
+            carry = None
+            while True:
+                if self._timed_out():
+                    stop_reason = "time_budget"
+                    break
+                draft = self._draft(prompt, stream, retry.seed, end, retry.constraint)
+                sentence = self.backend.decode(draft.tokens).strip()
+                if not sentence and point.rollbacks:
+                    if has_refusal:
+                        stop_reason = "abstained"
+                        break
+                    has_refusal = True
+                    stream.commit(self._refusal(stream.answer))
+                    points.append(self._close(point, "refused", self.refusal))
+                    break
+                if not sentence:
+                    stream.commit(draft.tokens)
+                    carry = draft
+                    break
+                if is_abstention(sentence):
+                    if point.rollbacks == 0:
+                        if has_refusal:
+                            stop_reason = "abstained"
+                            break
+                        has_refusal = True
+                        point.attempts.append(
+                            _synthetic_attempt(draft, retry, sentence, "refused", "ABSTAINED")
+                        )
+                        stream.commit(self._refusal(stream.answer))
+                        points.append(self._close(point, "refused", self.refusal))
+                        stop_reason = "abstained"
+                        break
+                    verdict = SentenceVerdict(
+                        sentence, 0, len(sentence), VerifierVerdict.ROLLBACK, ()
+                    )
+                    attempt = _synthetic_attempt(
+                        draft, retry, sentence, VerifierVerdict.ROLLBACK.value, "ABSTAIN_ON_RETRY"
+                    )
+                else:
+                    text, pids = split_refs(sentence)
+                    cited = tuple(by_id[p].text for p in pids if p in by_id)
+                    if is_narration(text, cited):
+                        if has_refusal:
+                            stop_reason = "abstained"
+                            break
+                        has_refusal = True
+                        point.attempts.append(
+                            _synthetic_attempt(draft, retry, sentence, "refused", "NARRATION")
+                        )
+                        stream.commit(self._refusal(stream.answer))
+                        points.append(self._close(point, "refused", self.refusal))
+                        stop_reason = "abstained"
+                        break
+                    if self._timed_out():
+                        stop_reason = "time_budget"
+                        break
+                    verdict = self.verifier.check_sentence(premise, sentence, query=query)
+                    attempt = self._attempt(draft, verdict, retry)
+                point.attempts.append(attempt)
+                if verdict.emitted:
+                    if point.injected:
+                        stream.answer += self._separator(stream.answer, draft.tokens)
+                    stream.commit(draft.tokens)
+                    carry = draft
+                    points.append(self._close(point, "emitted", sentence))
+                    break
+                point.rollbacks += 1
+                total_rollbacks += 1
+                if self._refuses(point, total_rollbacks):
+                    if has_refusal:
+                        stop_reason = "abstained"
+                        break
+                    has_refusal = True
+                    attempt["tokens_discarded"] = len(draft.tokens) + len(draft.lookahead)
+                    stream.commit(self._refusal(stream.answer))
+                    points.append(self._close(point, "refused", self.refusal))
+                    if total_rollbacks > self.max_total_rollbacks:
+                        stop_reason = "rollback_budget"
+                    break
+                retry = self._steer(point, draft.tokens, verdict, premise, stream, query=query)
+                end = None
+                kept = len(retry.seed)
+                attempt["tokens_discarded"] = len(draft.tokens) + len(draft.lookahead) - kept
+            if stop_reason is None and carry is not None and carry.end and not carry.lookahead:
+                stop_reason = carry.end
+            if stop_reason is None and len(stream.answer) >= self.max_new_tokens:
+                stop_reason = "length"
+        return Answer(
+            self.backend.decode(stream.answer).strip(),
+            self._trace(prompt, stream.answer, points, stop_reason, time.perf_counter_ns() - t0),
+        )
+
 
 class ModalPathGenerator:
     """Iterate to get the audited :class:`SentenceOut`s of one answer generated on ``backend``.
@@ -386,6 +548,9 @@ class ModalPathGenerator:
         quantisation: str | None = MODAL_QUANTISATION,
         max_new_tokens: int | None = None,
         on_sentence: Callable[[SentenceOut], None] | None = None,
+        started: float | None = None,
+        answer_budget_s: float = DEFAULT_ANSWER_BUDGET_S,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.backend = backend
         self.judge_chat = judge_chat
@@ -398,10 +563,14 @@ class ModalPathGenerator:
         self.quantisation = quantisation
         self.max_new_tokens = max_new_tokens or (512 if mode == "short" else 1536)
         self.on_sentence = on_sentence
+        self.started = started
+        self.answer_budget_s = answer_budget_s
+        self.clock = clock if clock is not None else time.perf_counter
         self.calls: list[ProviderCall] = []
         self.sentences: list[SentenceOut] = []
         self.trace: dict[str, Any] | None = None
         self.stop_reason: str | None = None
+        self.has_refusal: bool = False
         self._started = False
 
     def __iter__(self) -> Iterator[SentenceOut]:
@@ -421,6 +590,9 @@ class ModalPathGenerator:
             positions=self.positions,
             can_ban=_can_ban(self.backend),
             on_close=self._closed,
+            started=self.started,
+            answer_budget_s=self.answer_budget_s,
+            clock=self.clock,
             max_rollbacks=self.policy.max_rollbacks_per_sentence,
             max_total_rollbacks=self.policy.max_total_rollbacks,
             steering=self.policy.steering,
@@ -455,6 +627,9 @@ class ModalPathGenerator:
                 rollbacks=int(point["rollbacks"]),
             )
         else:
+            if self.has_refusal:
+                return
+            self.has_refusal = True
             out = SentenceOut(
                 index=len(self.sentences),
                 text=self.policy.refusal_text,

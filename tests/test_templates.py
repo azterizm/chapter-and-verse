@@ -49,6 +49,7 @@ from chapterverse.templates import (
     provider_fallback_notice,
     provider_warming_notice,
     providers_unavailable_notice,
+    quote_truncated_notice,
     refusal,
     route_refusal,
     status_refusal,
@@ -74,6 +75,7 @@ def _all_wording() -> list[str]:
         daily_cap_notice().message,
         global_budget_notice().message,
         providers_unavailable_notice().message,
+        quote_truncated_notice(8, 12).message,
     ]
     out += [out_of_scope_refusal(SNAPSHOT, r).message for r in OUT_OF_SCOPE_REASONS]
     return out
@@ -337,6 +339,10 @@ def test_notices() -> None:
             "It resets at 00:00 UTC."
         )
     )
+    truncated = quote_truncated_notice(8, 12)
+    assert truncated.code == "quote_truncated"
+    assert "8 of 12" in truncated.message
+    assert "legislation.gov.uk" in truncated.message
     codes = {
         provider_fallback_notice().code,
         provider_warming_notice().code,
@@ -344,14 +350,20 @@ def test_notices() -> None:
         event.code,
         daily.code,
         budget.code,
+        truncated.code,
     }
     assert codes == set(NOTICE_CODES)
 
 
 def test_extractive_banners() -> None:
-    assert set(EXTRACTIVE_BANNERS) == {"providers_unavailable", "provider_warming"}
+    assert set(EXTRACTIVE_BANNERS) == {
+        "providers_unavailable",
+        "provider_warming",
+        "quote_requested",
+    }
     assert "no model is available" in extractive_banner("providers_unavailable")
     assert "starting up" in extractive_banner("provider_warming")
+    assert extractive_banner("quote_requested") == "Statutory text, quoted from legislation.gov.uk."
 
 
 def test_out_of_scope_new_reasons() -> None:

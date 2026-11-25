@@ -55,7 +55,8 @@ sentences were yielded; the pipeline then closes the answer (docs/ARCHITECTURE.m
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
@@ -63,6 +64,7 @@ from legal_rag_verifier.premise import Premise
 from legal_rag_verifier.segmenter import find_boundary
 from legal_rag_verifier.verifier import SentenceVerdict
 
+from chapterverse.audit.narration import is_narration
 from chapterverse.audit.prompt import (
     CHARS_PER_TOKEN,
     ELLIPSIS,
@@ -72,11 +74,12 @@ from chapterverse.audit.prompt import (
     Prompt,
     SessionState,
     build_prompt,
+    is_abstention,
     render_source,
     window_positions,
 )
 from chapterverse.audit.refs import REF_CODES, REF_GROUPS, split_refs
-from chapterverse.audit.verify import make_verifier, reason_codes
+from chapterverse.audit.verify import AuditVerifier, make_verifier, reason_codes
 from chapterverse.contracts import (
     ChatMode,
     ChatRequest,
@@ -90,6 +93,7 @@ from chapterverse.contracts import (
 )
 
 __all__ = [
+    "DEFAULT_ANSWER_BUDGET_S",
     "EMPTY_BLOCK",
     "SAMPLING",
     "SENTENCE_TOO_LONG",
@@ -98,6 +102,8 @@ __all__ = [
     "StopReason",
     "split_block",
 ]
+
+DEFAULT_ANSWER_BUDGET_S: Final = 25.0
 
 SAMPLING: Final[Mapping[ChatMode, tuple[float, float]]] = {
     "short": (0.7, 0.8),
@@ -108,7 +114,16 @@ SAMPLING: Final[Mapping[ChatMode, tuple[float, float]]] = {
 SENTENCE_TOO_LONG: Final = "SENTENCE_TOO_LONG"
 EMPTY_BLOCK: Final = "EMPTY_BLOCK"
 
-StopReason = Literal["stop", "length", "rollback_budget", "block_limit", "content_filter", "other"]
+StopReason = Literal[
+    "stop",
+    "length",
+    "rollback_budget",
+    "block_limit",
+    "content_filter",
+    "other",
+    "abstained",
+    "time_budget",
+]
 
 _PARTIAL_REF = re.compile(r"\s*\[[^\]\n]*\Z")
 _TERMINAL = ".;:"
@@ -125,6 +140,7 @@ class GenerationSettings:
     thinking_tokens: int = 2048
     inject_windows: int = 2
     inject_max_chars: int = 3200
+    answer_budget_s: float = DEFAULT_ANSWER_BUDGET_S
 
     def answer_limit(self, mode: ChatMode) -> int:
         if self.max_answer_tokens is not None:
@@ -183,6 +199,9 @@ class _State:
     noted: bool = False
     injected: set[int] = field(default_factory=set)
     last_reasons: tuple[str, ...] = ()
+    refused: bool = False
+    last_rejected: SentenceVerdict | None = None
+    abstain_on_retry: bool = False
 
     def commit(self, text: str) -> None:
         sep = " " if self.context and not self.context[-1].isspace() else ""
@@ -209,6 +228,9 @@ class ChatContinuationGenerator:
         session: SessionState | None = None,
         history: Sequence[PriorTurn] = (),
         settings: GenerationSettings | None = None,
+        started: float | None = None,
+        answer_budget_s: float | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.rotation = rotation
         self.judge_chat = judge_chat
@@ -220,9 +242,17 @@ class ChatContinuationGenerator:
             query, windows, mode=mode, session=session, history=history
         )
         self.positions = window_positions(premise, windows)
+        self.by_id = {w.passage_id: w for w in windows}
         self.calls: list[ProviderCall] = []
         self.stop_reason: StopReason | None = None
         self._started = False
+        self._clock = clock if clock is not None else time.perf_counter
+        budget = answer_budget_s if answer_budget_s is not None else self.settings.answer_budget_s
+        start = started if started is not None else self._clock()
+        self._deadline = start + budget
+
+    def _timed_out(self) -> bool:
+        return self._clock() >= self._deadline
 
     def __iter__(self) -> Iterator[SentenceOut]:
         if self._started:
@@ -235,29 +265,63 @@ class ChatContinuationGenerator:
         verifier = make_verifier(self.judge_chat, self.policy, self.prompt.passage_ids, self.calls)
         state = _State()
         limit = self.settings.answer_limit(self.prompt.mode)
-        while True:
+        while self.stop_reason is None:
+            if self._timed_out():
+                self.stop_reason = "time_budget"
+                break
             if state.blocks >= self.settings.max_blocks:
                 self.stop_reason = "block_limit"
-                return
+                break
             result = self._request(state)
             sentences, _ = split_block(result.text, final=result.finish_reason == "stop")
-            rejected: SentenceVerdict | None = None
-            for raw in sentences:
-                verdict = verifier.check_sentence(self.premise, raw, query=self.query)
-                if not verdict.emitted:
-                    rejected = verdict
-                    break
-                state.commit(raw)
-                state.answer_chars += len(verdict.text) + 1
-                yield self._emitted(state, raw, verdict)
-                if state.answer_chars / CHARS_PER_TOKEN >= limit:
-                    self.stop_reason = "length"
-                    return
-            refusal = self._after_block(state, result, sentences, rejected)
-            if refusal is not None:
-                yield refusal
-            if self.stop_reason is not None:
+            yield from self._audit_sentences(verifier, state, sentences, limit)
+            if self.stop_reason is None:
+                refusal = self._after_block(state, result, sentences, state.last_rejected)
+                if refusal is not None:
+                    yield refusal
+
+    def _audit_sentences(
+        self,
+        verifier: AuditVerifier,
+        state: _State,
+        sentences: Sequence[str],
+        limit: int,
+    ) -> Iterator[SentenceOut]:
+        state.last_rejected = None
+        state.abstain_on_retry = False
+        for raw in sentences:
+            if self._timed_out():
+                self.stop_reason = "time_budget"
                 return
+            if is_abstention(raw):
+                if state.point == 0:
+                    self.stop_reason = "abstained"
+                    if not state.refused:
+                        state.refused = True
+                        yield self._refuse_abstention(state)
+                    return
+                state.abstain_on_retry = True
+                break
+            text, pids = split_refs(raw)
+            cited = tuple(self.by_id[p].text for p in pids if p in self.by_id)
+            if is_narration(text, cited):
+                self.stop_reason = "abstained"
+                if not state.refused:
+                    state.refused = True
+                    yield self._refuse_narration(state)
+                return
+            verdict = verifier.check_sentence(self.premise, raw, query=self.query)
+            if not verdict.emitted:
+                state.last_rejected = verdict
+                break
+            state.commit(raw)
+            state.answer_chars += len(verdict.text) + 1
+            yield self._emitted(state, raw, verdict)
+            if state.answer_chars / CHARS_PER_TOKEN >= limit:
+                self.stop_reason = "length"
+                return
+        if self.stop_reason is None and self._timed_out():
+            self.stop_reason = "time_budget"
 
     def _after_block(
         self,
@@ -269,15 +333,26 @@ class ChatContinuationGenerator:
         """Decide what a block that emitted no further sentence means. Sets ``stop_reason``
         when the answer ends; returns a refusal sentence to stream, if one was committed."""
         if rejected is not None:
-            reasons = reason_codes(rejected.reasons, rejected.details)
-            return self._rollback(state, reasons, rejected.aligned)
-        if not sentences and result.finish_reason == "length":
-            reasons = (EMPTY_BLOCK if not result.text.strip() else SENTENCE_TOO_LONG,)
+            return self._rollback(
+                state, reason_codes(rejected.reasons, rejected.details), rejected.aligned
+            )
+        if state.abstain_on_retry or (not sentences and result.finish_reason == "length"):
+            reasons = (
+                ("ABSTAIN_ON_RETRY",)
+                if state.abstain_on_retry
+                else (EMPTY_BLOCK if not result.text.strip() else SENTENCE_TOO_LONG,)
+            )
             return self._rollback(state, reasons, ())
         if result.finish_reason == "stop":
             self.stop_reason = "stop"
             # A retry that gave nothing: say so (the engine's rule).
-            return self._refuse(state) if not sentences and state.point else None
+            if not sentences and state.point:
+                if state.refused:
+                    self.stop_reason = "abstained"
+                    return None
+                state.refused = True
+                return self._refuse(state)
+            return None
         if result.finish_reason in ("content_filter", "other"):
             self.stop_reason = result.finish_reason
         return None  # cut by the token limit after complete sentences: next block
@@ -333,6 +408,38 @@ class ChatContinuationGenerator:
         state.point = 0
         return out
 
+    def _refuse_abstention(self, state: _State) -> SentenceOut:
+        refusal = self.policy.refusal_text
+        state.commit(refusal)
+        state.answer_chars += len(refusal) + 1
+        out = SentenceOut(
+            index=state.index,
+            text=refusal,
+            verdict="refused",
+            passage_ids=(),
+            reasons=("ABSTAINED",),
+            rollbacks=state.point,
+        )
+        state.index += 1
+        state.point = 0
+        return out
+
+    def _refuse_narration(self, state: _State) -> SentenceOut:
+        refusal = self.policy.refusal_text
+        state.commit(refusal)
+        state.answer_chars += len(refusal) + 1
+        out = SentenceOut(
+            index=state.index,
+            text=refusal,
+            verdict="refused",
+            passage_ids=(),
+            reasons=("NARRATION",),
+            rollbacks=state.point,
+        )
+        state.index += 1
+        state.point = 0
+        return out
+
     def _rollback(
         self, state: _State, reasons: tuple[str, ...], aligned: Sequence[int]
     ) -> SentenceOut | None:
@@ -345,6 +452,10 @@ class ChatContinuationGenerator:
             state.point > policy.max_rollbacks_per_sentence
             or state.total > policy.max_total_rollbacks
         ):
+            if state.refused:
+                self.stop_reason = "abstained"
+                return None
+            state.refused = True
             refusal = self._refuse(state)
             if state.total > policy.max_total_rollbacks:
                 self.stop_reason = "rollback_budget"

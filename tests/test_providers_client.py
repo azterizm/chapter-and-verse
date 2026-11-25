@@ -756,3 +756,65 @@ def test_set_prefill_cannot_enable_what_the_adapter_lacks() -> None:
     c = cloudflare()
     c.set_prefill(enabled=False)
     assert not prefill_on(c)
+
+
+def test_short_mode_gets_short_timeout_and_synthesis_keeps_long_timeout() -> None:
+    g = groq()
+    cf = cloudflare()
+    m = modal()
+
+    short_gen = ChatRequest(
+        MESSAGES, max_tokens=32, temperature=0.7, top_p=0.8, mode="short", purpose="generate"
+    )
+    short_judge = ChatRequest(
+        MESSAGES, max_tokens=32, temperature=0.7, top_p=0.8, mode="short", purpose="judge"
+    )
+    synth_gen = ChatRequest(
+        MESSAGES, max_tokens=32, temperature=1.0, top_p=0.95, mode="synthesis", purpose="generate"
+    )
+
+    # Groq: default 12s for short mode, 60s for synthesis
+    assert g.timeout_for(short_gen).read == 12.0
+    assert g.timeout_for(short_judge).read == 12.0
+    assert g.timeout_for(synth_gen).read == 60.0
+
+    # Cloudflare: default 12s for short mode, 120s for synthesis
+    assert cf.timeout_for(short_gen).read == 12.0
+    assert cf.timeout_for(short_judge).read == 12.0
+    assert cf.timeout_for(synth_gen).read == 120.0
+
+    # Modal keeps its own timeout (120s) in both modes
+    assert m.timeout_for(short_gen).read == 120.0
+    assert m.timeout_for(short_judge).read == 120.0
+    assert m.timeout_for(synth_gen).read == 120.0
+
+
+def test_per_purpose_short_read_timeouts() -> None:
+    g = make_groq(short_read_timeouts={"generate": 14.0, "judge": 9.0}, environ=ENV)
+    short_gen = ChatRequest(
+        MESSAGES, max_tokens=32, temperature=0.7, top_p=0.8, mode="short", purpose="generate"
+    )
+    short_judge = ChatRequest(
+        MESSAGES, max_tokens=32, temperature=0.7, top_p=0.8, mode="short", purpose="judge"
+    )
+    assert g.timeout_for(short_gen).read == 14.0
+    assert g.timeout_for(short_judge).read == 9.0
+
+    cf = make_cloudflare(
+        ACCOUNT, short_read_timeouts={"generate": 15.0, "judge": 11.0}, environ=ENV
+    )
+    assert cf.timeout_for(short_gen).read == 15.0
+    assert cf.timeout_for(short_judge).read == 11.0
+
+
+@respx.mock
+def test_short_call_times_out_and_raises_provider_unavailable() -> None:
+    respx.post(GROQ_URL).mock(side_effect=httpx.ReadTimeout("timed out"))
+    provider = groq()
+    req = ChatRequest(
+        MESSAGES, max_tokens=32, temperature=0.7, top_p=0.8, mode="short", purpose="generate"
+    )
+    with pytest.raises(ProviderUnavailable) as caught:
+        provider.complete(req)
+    assert caught.value.kind == "timeout"
+    assert caught.value.provider == "groq"

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import time
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,8 @@ from legal_rag_router.result import Candidate, NextAction, ParsedCitation, Route
 from chapterverse.audit.policy import build_policy
 from chapterverse.contracts import (
     AllProvidersUnavailable,
+    ChatRequest,
+    ChatResult,
     ClarifyEvent,
     Event,
     ExtractiveEvent,
@@ -29,12 +32,14 @@ from chapterverse.contracts import (
     ReceiptEvent,
     RefusalEvent,
     SentenceEvent,
+    SentenceOut,
     SourcesEvent,
     TemporalStatus,
     TextStore,
     Window,
     validate_order,
 )
+from chapterverse.extractive import MAX_EXTRACTIVE_WINDOWS
 from chapterverse.pipeline import (
     AskRequest,
     ModalKV,
@@ -448,6 +453,58 @@ def test_outage_after_a_sentence_closes_the_answer(
     assert receipt(events).fact.mode == "generated"
 
 
+def test_budget_expiry_before_first_sentence_gives_extractive(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    rotation = FakeRotation([(GOOD1, "stop")])
+    pipeline = make(fixture_router, store, rotation)
+    events, outcome = run(pipeline, S124_QUERY, started=time.perf_counter() - 30.0)
+    assert [e.type for e in events] == ["route", "sources", "extractive", "receipt", "done"]
+    (extractive,) = of(events, ExtractiveEvent)
+    assert extractive.reason == "providers_unavailable"
+    assert outcome.mode == "extractive"
+    assert outcome.stop_reason == "time_budget"
+
+
+def test_budget_expiry_after_one_sentence_gives_incomplete_notice(
+    fixture_router: Router, store: CountingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rotation = FakeRotation([(GOOD1 + " The", "length"), (GOOD2, "stop")])
+    t = [100.0]
+
+    def fake_perf_counter() -> float:
+        return t[0]
+
+    monkeypatch.setattr(time, "perf_counter", fake_perf_counter)
+
+    orig_complete = rotation.complete
+
+    def tracking_complete(req: ChatRequest) -> ChatResult:
+        res = orig_complete(req)
+        # Advance clock past budget (100.0 + 25.0 = 125.0) after sentence 1 is checked
+        if req.purpose == "judge":
+            t[0] = 130.0
+        return res
+
+    rotation.complete = tracking_complete  # type: ignore[method-assign]
+
+    pipeline = make(fixture_router, store, rotation)
+    events, outcome = run(pipeline, S124_QUERY, started=100.0)
+    assert [e.type for e in events] == [
+        "route",
+        "sources",
+        "sentence",
+        "notice",
+        "receipt",
+        "done",
+    ]
+    (notice,) = of(events, NoticeEvent)
+    assert notice.code == "providers_unavailable"
+    assert outcome.mode == "generated"
+    assert outcome.stop_reason == "time_budget"
+    assert len(outcome.sentences) == 1
+
+
 def test_written_citation_is_rolled_back_and_retried(
     fixture_router: Router, store: CountingStore
 ) -> None:
@@ -689,9 +746,9 @@ def test_whole_act_binding_is_capped_by_lexical_overlap(
     )
     (sources,) = of(events, SourcesEvent)
     assert 1 <= len(sources.windows) <= 8
-    assert outcome.selection == "lexical"
+    assert outcome.selection == "ranked"
     assert outcome.windows_total > len(sources.windows)
-    assert all(w.highlight is not None for w in sources.windows)
+    assert any(w.highlight is not None for w in sources.windows)
     prompt = rotation.generate_requests[0].messages[0]["content"]
     assert len(prompt) < 1500 * 4 + 2000
     assert receipt(events).fact.spans
@@ -805,3 +862,148 @@ def test_pipeline_daily_cap_checked_first(fixture_router: Router, store: Countin
     notices = [e for e in events_2 if isinstance(e, NoticeEvent)]
     assert any(n.code == "daily_cap" for n in notices)
     assert not any(n.code == "global_budget" for n in notices)
+
+
+def test_refused_sentence_has_no_citation_chips(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    pipeline = make(fixture_router, store, FakeRotation([]))
+    sentence = SentenceOut(
+        index=0,
+        text="I can't confirm this from the law I found, so I won't guess.",
+        verdict="refused",
+        passage_ids=("P1", "P2"),
+        reasons=(),
+        rollbacks=0,
+    )
+    assert pipeline._cite(sentence, {}, None, {}) == ()  # type: ignore[arg-type]
+
+    narration = "The provided passages do not state the general limitation period [P1]."
+    pipeline_run = make(fixture_router, store, FakeRotation([(narration, "stop")]))
+    events, _ = run(pipeline_run, S124_QUERY)
+    sentence_events = of(events, SentenceEvent)
+    assert len(sentence_events) == 1
+    assert sentence_events[0].sentence.verdict == "refused"
+    assert (
+        sentence_events[0].sentence.text
+        == "I can't confirm this from the law I found, so I won't guess."
+    )
+    assert sentence_events[0].citations == ()
+
+
+class _FailIfCalledRotation:
+    def available(self, purpose: str | None = None) -> list[str]:
+        del purpose
+        return ["groq"]
+
+    def complete(self, req: ChatRequest) -> ChatResult:
+        raise AssertionError(f"rotation must not be called for quote request: {req.purpose}")
+
+
+def test_quote_request_section_is_extractive_without_provider_or_cap(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    caps = InMemoryDailyCap()
+    budget = InMemoryDailyBudget()
+    today = date(2026, 11, 20)
+    # Pre-fill daily cap to verify quote requests bypass and never increment caps/budget.
+    caps.increment("k1", today)
+    assert caps.get("k1", today) == 1
+
+    pipeline = make(
+        fixture_router,
+        store,
+        _FailIfCalledRotation(),
+        daily_caps=caps,
+        daily_ask_cap=1,
+        daily_budget=budget,
+        global_daily_answers=1,
+    )
+    pipeline._clock = lambda: datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+    events, outcome = run(
+        pipeline,
+        "Quote the exact wording of section 124 of the Employment Rights Act 1996.",
+        client_key="k1",
+    )
+
+    assert outcome.mode == "extractive"
+    assert of(events, SentenceEvent) == []
+    assert not any(
+        isinstance(e, NoticeEvent) and e.code in ("daily_cap", "global_budget") for e in events
+    )
+
+    (sources,) = of(events, SourcesEvent)
+    (extractive,) = of(events, ExtractiveEvent)
+    assert extractive.reason == "quote_requested"
+    assert extractive.windows == sources.windows
+    assert len(extractive.windows) > 0
+    assert all(w.highlight is None for w in extractive.windows)
+    assert any("123,543" in w.text for w in extractive.windows)
+
+    rec = receipt(events)
+    assert rec.fact.mode == "extractive"
+    assert rec.fact.calls == ()
+    assert rec.fact.spans == {}
+    assert rec.fact.sentences == ()
+    assert caps.get("k1", today) == 1
+    assert budget.get(today) == DailyBudgetCounts(0, 0)
+
+
+def test_quote_request_truncates_with_notice_when_over_max_windows(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    pipeline = make(fixture_router, store, _FailIfCalledRotation())
+    events, outcome = run(
+        pipeline,
+        "Verbatim text of section 118, section 119, section 120, section 121, "
+        "section 122, section 123, section 124, section 124A, section 125 and "
+        "section 126 of the Employment Rights Act 1996.",
+    )
+
+    assert outcome.mode == "extractive"
+    (extractive,) = of(events, ExtractiveEvent)
+    assert extractive.reason == "quote_requested"
+    assert len(extractive.windows) == MAX_EXTRACTIVE_WINDOWS
+    assert all(w.highlight is None for w in extractive.windows)
+    notices = [e for e in of(events, NoticeEvent) if e.code == "quote_truncated"]
+    assert len(notices) == 1
+    assert f"{MAX_EXTRACTIVE_WINDOWS} of " in notices[0].message
+    assert "legislation.gov.uk" in notices[0].message
+
+
+def test_quote_request_whole_instrument_still_generates(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    rotation = FakeRotation(
+        [("The Act makes provision about employment rights [P1].", "stop")],
+        rules=[("employment rights", "supported", "employment")],
+    )
+    pipeline = make(fixture_router, store, rotation)
+    events, outcome = run(pipeline, "Quote the Employment Rights Act 1996.")
+
+    assert outcome.mode == "generated"
+    assert of(events, ExtractiveEvent) == []
+    assert len(of(events, SentenceEvent)) == 1
+    assert len(rotation.generate_requests) == 1
+
+
+def test_quote_request_respects_repealed_and_prospective_status(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    pipeline = make(fixture_router, store, _FailIfCalledRotation())
+
+    rep_events, rep_out = run(
+        pipeline, "Quote section 4 of the European Union (Amendment) Act 2008."
+    )
+    assert rep_out.mode == "refusal"
+    assert of(rep_events, ExtractiveEvent) == []
+    assert of(rep_events, RefusalEvent)[0].kind == TemporalStatus.REPEALED.value
+
+    pro_events, pro_out = run(
+        pipeline,
+        "Quote section 1 of the Secure Tenancies (Victims of Domestic Abuse) Act 2018.",
+    )
+    assert pro_out.mode == "refusal"
+    assert of(pro_events, ExtractiveEvent) == []
+    assert of(pro_events, RefusalEvent)[0].kind == TemporalStatus.NOT_YET_IN_FORCE.value

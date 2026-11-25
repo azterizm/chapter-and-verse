@@ -31,6 +31,7 @@ export const EXTRACTIVE_REASON: Record<ExtractiveReason, string> = {
   provider_warming:
     "The model server is starting up, so no written answer was made. " +
     "The provision text is shown instead, with the relevant words marked. Ask again in a minute for a written answer.",
+  quote_requested: "Statutory text, quoted from legislation.gov.uk.",
 };
 
 /** A short title shown before each notice's message, by notice code. */
@@ -44,6 +45,7 @@ export const NOTICE_TITLE: Record<string, string> = {
   no_text: "No text to answer from",
   daily_cap: "Daily limit reached",
   global_budget: "Daily limit reached",
+  quote_truncated: "Part shown",
 };
 
 /** Deterministic notice wording by notice code (requirements R4). */

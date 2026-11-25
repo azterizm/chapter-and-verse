@@ -1,0 +1,8 @@
+# S4.7 Legal gate recorder: local answers from the real engine: requirements
+
+`eval/legal_gate.py --record --target local` builds its pipeline with `_build_pipeline` (the no-model rotation used by the retrieval gate), so recorded answers never reach a model and the answer rubric would score extractive output. The answer level needs the real engine.
+
+- R1 `--record --target local` builds the runtime with `chapterverse.app.build_runtime()` (provider keys, rotation, dense, dictionary all from the environment, as the server starts) and runs each row through `runtime.pipeline.run`. Use `AskRequest` with a `client_key` of None (no daily cap) and net class "other". Do not write receipts or quota rows to any database: build the runtime with `DATABASE_URL` removed from the environment mapping you pass (copy `os.environ`, drop `DATABASE_URL`), and say in the module docstring that local recording never writes to Postgres. Before the first row, print which providers are available for generate and judge (names only, never keys).
+- R2 Per row, also write to the record line: `elapsed_ms`, the receipt's provider calls summary (provider, purpose, latency) if a receipt event carries it, else nothing. Keep the existing format otherwise (`{"id", "events"}`), so `--answers` reads it unchanged.
+- R3 `--rows L01,L07` option selects rows by id (works with `--record` and `--answers`).
+- R4 Tests with a fake `build_runtime` (monkeypatch) and a fake pipeline: the local recorder uses `build_runtime`, passes an environ without `DATABASE_URL`, honours `--rows`, writes the format `--answers` reads. Never call a provider in tests. You must NOT run `--record` yourself.

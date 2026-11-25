@@ -2,7 +2,7 @@
 
 :func:`build_policy` fills ``prompt_sha256`` from the generation prompt; the retry limits, the
 refusal sentence, the steering mode and the verifier config keep the contract's defaults (3 retries
-per point, 8 per answer, the verifier's ``DEFAULT_REFUSAL``, ``inject``, ``STRICT_FIGURES``).
+per point, 8 per answer, :data:`ABSTAIN_TEXT`, ``inject``, ``STRICT_FIGURES``).
 :func:`verifier_config` turns the policy's config name back into the verifier's config object.
 """
 
@@ -13,10 +13,10 @@ from typing import Final
 from legal_rag_verifier.judge import STRICT_FIGURES
 from legal_rag_verifier.verifier import VerifierConfig
 
-from chapterverse.audit.prompt import PROMPT_SHA256
+from chapterverse.audit.prompt import ABSTAIN_TEXT, PROMPT_SHA256
 from chapterverse.contracts import Policy
 
-__all__ = ["VERIFIER_CONFIGS", "build_policy", "verifier_config"]
+__all__ = ["ABSTAIN_TEXT", "VERIFIER_CONFIGS", "build_policy", "verifier_config"]
 
 VERIFIER_CONFIGS: Final[dict[str, VerifierConfig]] = {"STRICT_FIGURES": STRICT_FIGURES}
 """Verifier configs a policy may name. Only the measured one."""
@@ -30,7 +30,12 @@ def build_policy(judge_preset: str) -> Policy:
     """
     if not judge_preset.strip():
         raise ValueError("judge_preset must name a judge preset")
-    return Policy(judge_preset=judge_preset, prompt_sha256=PROMPT_SHA256)
+
+    return Policy(
+        judge_preset=judge_preset,
+        prompt_sha256=PROMPT_SHA256,
+        refusal_text=ABSTAIN_TEXT,
+    )
 
 
 def verifier_config(policy: Policy) -> VerifierConfig:

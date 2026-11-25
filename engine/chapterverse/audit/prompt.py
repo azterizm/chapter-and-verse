@@ -9,7 +9,8 @@ coordinates (Slice 7 fills them); they resolve references and are never evidence
 The instructions say: answer only from the passages; cite by passage id as ``[P1]`` before the
 full stop; name a section, subsection or paragraph only when the passage it cites names it, and
 must still cite with ``[P#]``; never write an SI number (citations are rendered by the system
-from the ids); say plainly when the passages do not answer the question.
+from the ids); state what the law settles and write the abstention once when it does not settle
+the question.
 
 Every fixed string that shapes what the model reads (the templates, the mode rules, the margin,
 the inject and steer texts the audit loop writes into the context) is part of
@@ -34,6 +35,7 @@ from typing import Final
 from legal_rag_verifier.engine import INJECT_TEMPLATE
 from legal_rag_verifier.premise import Premise
 
+from chapterverse.audit.refs import split_refs
 from chapterverse.contracts import (
     ChatMessage,
     ChatMode,
@@ -44,6 +46,7 @@ from chapterverse.contracts import (
 )
 
 __all__ = [
+    "ABSTAIN_TEXT",
     "CHARS_PER_TOKEN",
     "CONTEXT_MARGIN_CHARS",
     "ELLIPSIS",
@@ -59,11 +62,14 @@ __all__ = [
     "SessionState",
     "build_prompt",
     "estimate_tokens",
+    "is_abstention",
     "render_passage",
     "render_source",
     "trim_window_text",
     "window_positions",
 ]
+
+ABSTAIN_TEXT: Final = "I can't confirm this from the law I found, so I won't guess."
 
 CONTEXT_MARGIN_CHARS: Final = 300
 """Characters kept on each side of a window's highlight span."""
@@ -74,15 +80,20 @@ CHARS_PER_TOKEN: Final = 4.0
 ELLIPSIS: Final = "…"
 
 SYSTEM_TEMPLATE: Final = (
-    "You answer questions about UK legislation using only the numbered passages below.\n"
+    "You answer questions about UK legislation directly, as a careful lawyer or librarian "
+    "using only the numbered passages below.\n"
+    '- Lead with the answer, in plain words, using "you" where natural.\n'
     "- Use only the passages, never your own knowledge.\n"
     "- End each sentence that states something from a passage with the ids of the passages it "
     'comes from, before the full stop: "... four weeks [P1]." or "... [P1, P3]."\n'
+    '- You may refer to "the Act", "section N", or "this section", never to "passages" '
+    'or "the text provided" in your sentences (the [P#] ids are citation marks only).\n'
     "- You may name a section, subsection or paragraph only when the passage it cites names it, "
     "and must still cite with [P#]. Never write an SI number or any other citation.\n"
     "- State figures, dates and conditions exactly as the passages give them.\n"
     "- Placeholders like [PERSON 1] stand for people the user named and must be kept as written.\n"
-    "- If the passages do not answer the question, say so plainly in one sentence.\n"
+    "- When the law shown does not settle the question, say what it does settle (cited) and "
+    f'then write exactly "{ABSTAIN_TEXT}", once, as the last sentence.\n'
     "- {mode_rule}\n\n"
     "{context}"
     "Passages ({ellipsis} marks text left out):\n\n"
@@ -90,10 +101,10 @@ SYSTEM_TEMPLATE: Final = (
 )
 
 MODE_RULES: Final[Mapping[ChatMode, str]] = {
-    "short": "Answer in a few plain sentences, without headings or lists.",
+    "short": "Answer directly in a few plain sentences, without headings or lists.",
     "synthesis": (
-        "Answer in one or two plain paragraphs that bring the relevant passages together, "
-        "without headings or lists."
+        "Answer directly in one or two plain paragraphs that bring the relevant provisions "
+        "together, without headings or lists."
     ),
 }
 
@@ -133,6 +144,21 @@ PROMPT_SHA256: Final = sha256_hex(canonical_json(_TEMPLATE_PARTS))
 """sha256 hex of the canonical JSON of every fixed prompt string. Goes in ``Policy``."""
 
 _PASSAGE_ID = re.compile(r"P[1-9]\d*")
+
+
+def _fold_abstention(s: str) -> str:
+    cleaned, _ = split_refs(s)
+    cleaned = re.sub(r"\[\s*[Pp]\d+\s*\]", "", cleaned).strip()
+    if cleaned.startswith(('"', "“")) and cleaned.endswith(('"', "”")):
+        cleaned = cleaned[1:-1].strip()
+    if cleaned.endswith("."):
+        cleaned = cleaned[:-1].strip()
+    return " ".join(cleaned.replace("\u2019", "'").casefold().split())
+
+
+def is_abstention(text: str, abstain_text: str = ABSTAIN_TEXT) -> bool:
+    """True when text folded equals abstain_text folded (ignoring [P#] and final full stop)."""
+    return _fold_abstention(text) == _fold_abstention(abstain_text)
 
 
 @dataclass(frozen=True, slots=True)

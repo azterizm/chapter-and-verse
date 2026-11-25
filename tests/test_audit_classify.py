@@ -18,7 +18,7 @@ from chapterverse.audit.classify import (
     classification_failure,
 )
 from chapterverse.audit.continuation import ChatContinuationGenerator
-from chapterverse.audit.policy import build_policy
+from chapterverse.audit.policy import ABSTAIN_TEXT, build_policy
 from chapterverse.contracts import (
     ChatRequest,
     ChatResult,
@@ -67,7 +67,7 @@ HSWA_OFFENCE_SENTENCE = (
 
 S124 = "uk/ukpga/1996/18/s124"
 QUERY = "What is the maximum compensatory award for unfair dismissal?"
-REFUSAL = "I cannot state this point reliably from the provisions provided."
+REFUSAL = ABSTAIN_TEXT
 
 GOOD1 = (
     "The compensatory award cannot exceed the lower of £123,543 and 52 multiplied by a "

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { NOTICE_MESSAGE, NOTICE_TITLE, noticeTitle } from "../src/text";
+import { EXTRACTIVE_REASON, NOTICE_MESSAGE, NOTICE_TITLE, noticeTitle } from "../src/text";
 
 describe("notice titles", () => {
   const REQUIRED_CODES = [
@@ -13,6 +13,7 @@ describe("notice titles", () => {
     "no_text",
     "daily_cap",
     "global_budget",
+    "quote_truncated",
   ] as const;
 
   it("has a plain title for every notice code the engine sends", () => {
@@ -36,5 +37,9 @@ describe("notice titles", () => {
     expect(NOTICE_MESSAGE.providers_unavailable).toBe(
       "The model became unavailable while writing. Every sentence shown was checked; there may have been more to say.",
     );
+  });
+
+  it("has wording for quote_requested extractive reason", () => {
+    expect(EXTRACTIVE_REASON.quote_requested).toBe("Statutory text, quoted from legislation.gov.uk.");
   });
 });

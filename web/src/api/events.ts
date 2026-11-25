@@ -120,7 +120,12 @@ export const REFUSAL_KINDS: ReadonlySet<string> = new Set([
   "out_of_scope",
 ]);
 
-export type ExtractiveReason = "providers_unavailable" | "provider_warming";
+export const EXTRACTIVE_REASONS = [
+  "providers_unavailable",
+  "provider_warming",
+  "quote_requested",
+] as const;
+export type ExtractiveReason = (typeof EXTRACTIVE_REASONS)[number];
 
 export interface LabelledCoordinate {
   coordinate: Coordinate;
@@ -348,7 +353,8 @@ export function parseEventData(eventName: string, data: string): CvEvent {
       break;
     case "extractive":
       need(
-        (o.reason === "providers_unavailable" || o.reason === "provider_warming") &&
+        isStr(o.reason) &&
+          (EXTRACTIVE_REASONS as readonly string[]).includes(o.reason) &&
           Array.isArray(o.windows),
         "extractive: bad payload",
       );

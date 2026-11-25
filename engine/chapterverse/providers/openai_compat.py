@@ -32,6 +32,7 @@ import json
 import re
 import threading
 import time
+import types
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
@@ -47,6 +48,7 @@ from chapterverse.contracts import (
     ChatResult,
     FinishReason,
     ProviderUnavailable,
+    Purpose,
     UnavailableKind,
     fold_prefill,
 )
@@ -69,6 +71,8 @@ from chapterverse.providers.presets import (
 
 __all__ = [
     "CLOUDFLARE_MODEL",
+    "DEFAULT_SHORT_READ_TIMEOUTS",
+    "DEFAULT_SHORT_READ_TIMEOUT_S",
     "GROQ_BASE_URL",
     "GROQ_MODEL",
     "Adapter",
@@ -88,6 +92,23 @@ GROQ_BASE_URL: Final = "https://api.groq.com/openai/v1"
 GROQ_MODEL: Final = "qwen/qwen3.8-27b"
 CLOUDFLARE_API: Final = "https://api.cloudflare.com/client/v4/accounts"
 CLOUDFLARE_MODEL: Final = "@cf/qwen/qwen3.8-27b"
+
+DEFAULT_SHORT_READ_TIMEOUT_S: Final = 12.0
+DEFAULT_SHORT_READ_TIMEOUTS: Final[Mapping[Purpose, float]] = types.MappingProxyType(
+    {"generate": DEFAULT_SHORT_READ_TIMEOUT_S, "judge": DEFAULT_SHORT_READ_TIMEOUT_S}
+)
+
+
+def _normalize_short_timeouts(
+    timeouts: Mapping[Purpose, float] | float | None,
+) -> Mapping[Purpose, float] | None:
+    if timeouts is None:
+        return None
+    if isinstance(timeouts, (int, float)):
+        val = float(timeouts)
+        return {"generate": val, "judge": val}
+    return dict(timeouts)
+
 
 _MINUTE_S: Final = 60.0
 ErrorOutcome = tuple[UnavailableKind, float | None, float | None]
@@ -212,7 +233,21 @@ class Adapter:
     native_prefill: bool = False
     """Native prefill is on before any canary has passed."""
     timeout: httpx.Timeout = httpx.Timeout(60.0, connect=5.0)
+    short_read_timeouts: Mapping[Purpose, float] | None = None
     health_path: str | None = None
+
+    def timeout_for(self, req: ChatRequest) -> httpx.Timeout:
+        """The HTTP timeout for one request: short calls get short read timeouts."""
+        if req.mode == "short" and self.short_read_timeouts is not None:
+            read = self.short_read_timeouts.get(req.purpose)
+            if read is not None:
+                return httpx.Timeout(
+                    connect=self.timeout.connect,
+                    read=read,
+                    write=self.timeout.write,
+                    pool=self.timeout.pool,
+                )
+        return self.timeout
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(model={self.request_model!r})"
@@ -282,10 +317,22 @@ class GroqAdapter(Adapter):
     # each prompt cost +20 tokens over the plain one (a closed turn); decision 0001 amendment.
     native_prefill = False
     timeout = httpx.Timeout(60.0, connect=5.0)
+    short_read_timeouts: Mapping[Purpose, float] | None = DEFAULT_SHORT_READ_TIMEOUTS
 
-    def __init__(self, *, key_env: str = "GROQ_API_KEY", base_url: str = GROQ_BASE_URL) -> None:
+    def __init__(
+        self,
+        *,
+        key_env: str = "GROQ_API_KEY",
+        base_url: str = GROQ_BASE_URL,
+        short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+    ) -> None:
         self.key_env = key_env
         self._base = base_url.rstrip("/")
+        self.short_read_timeouts = (
+            DEFAULT_SHORT_READ_TIMEOUTS
+            if short_read_timeouts is DEFAULT_SHORT_READ_TIMEOUTS
+            else _normalize_short_timeouts(short_read_timeouts)
+        )
 
     def base_url(self) -> str:
         return self._base
@@ -328,15 +375,26 @@ class CloudflareAdapter(Adapter):
     prefill_capable = True
     native_prefill = True
     timeout = httpx.Timeout(120.0, connect=5.0)
+    short_read_timeouts: Mapping[Purpose, float] | None = DEFAULT_SHORT_READ_TIMEOUTS
 
     def __init__(
-        self, account_id: str, *, key_env: str = "CLOUDFLARE_AI_WORKER_TOKEN", api: str = ""
+        self,
+        account_id: str,
+        *,
+        key_env: str = "CLOUDFLARE_AI_WORKER_TOKEN",
+        api: str = "",
+        short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
     ) -> None:
         if not account_id.strip():
             raise ConfigError("CLOUDFLARE_ACCOUNT_ID is not set")
         self._account = account_id.strip()
         self.key_env = key_env
         self._api = (api or CLOUDFLARE_API).rstrip("/")
+        self.short_read_timeouts = (
+            DEFAULT_SHORT_READ_TIMEOUTS
+            if short_read_timeouts is DEFAULT_SHORT_READ_TIMEOUTS
+            else _normalize_short_timeouts(short_read_timeouts)
+        )
 
     def __repr__(self) -> str:
         return "CloudflareAdapter(account=<redacted>)"
@@ -446,6 +504,7 @@ class OpenAICompatProvider:
         backoff_s: float = 0.5,
         warm_window_s: float = 120.0,
         probe_timeout_s: float = 3.0,
+        short_read_timeouts: Mapping[Purpose, float] | float | None = None,
         environ: Mapping[str, str] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -459,6 +518,7 @@ class OpenAICompatProvider:
         self.backoff_s = backoff_s
         self.warm_window_s = warm_window_s
         self.probe_timeout_s = probe_timeout_s
+        self._short_read_timeouts = _normalize_short_timeouts(short_read_timeouts)
         self._environ = environ
         self._sleep = sleep
         self._clock = clock
@@ -511,6 +571,21 @@ class OpenAICompatProvider:
         if self._owns_client:
             self._client.close()
 
+    def timeout_for(self, req: ChatRequest) -> httpx.Timeout:
+        """The HTTP timeout for one request: short calls get short read timeouts."""
+        if self._short_read_timeouts is not None:
+            if req.mode == "short":
+                read = self._short_read_timeouts.get(req.purpose)
+                if read is not None:
+                    return httpx.Timeout(
+                        connect=self.adapter.timeout.connect,
+                        read=read,
+                        write=self.adapter.timeout.write,
+                        pool=self.adapter.timeout.pool,
+                    )
+            return self.adapter.timeout
+        return self.adapter.timeout_for(req)
+
     def complete(self, req: ChatRequest) -> ChatResult:
         result, _ = self.complete_raw(req)
         return result
@@ -531,10 +606,11 @@ class OpenAICompatProvider:
             self._probe_or_raise(key)
         body, prefill = self.build_body(req, native_prefill=native_prefill)
         est = estimate_tokens(req.messages, req.prefill)
+        timeout = self.timeout_for(req)
         attempt = 0
         while True:
             try:
-                return self._attempt(body, key, est, req.max_tokens, prefill)
+                return self._attempt(body, key, est, req.max_tokens, prefill, timeout=timeout)
             except _Attempt as failed:
                 if not failed.retryable or attempt >= self.retries:
                     raise failed.error from None
@@ -701,14 +777,23 @@ class OpenAICompatProvider:
             raise ProviderUnavailable(self.name, "server", detail="malformed models list") from None
 
     def _attempt(
-        self, body: dict[str, Any], key: str, est: int, max_out: int, prefill: str | None
+        self,
+        body: dict[str, Any],
+        key: str,
+        est: int,
+        max_out: int,
+        prefill: str | None,
+        *,
+        timeout: httpx.Timeout | None = None,
     ) -> tuple[ChatResult, dict[str, Any]]:
         a = self.adapter
         self._reserve(est, max_out)
         usage = CallUsage(provider=self.name, est_tokens=est, max_output_tokens=max_out)
         t0 = time.perf_counter()
         try:
-            response = self._client.post(a.chat_url(), json=body, headers=self._headers(key))
+            response = self._client.post(
+                a.chat_url(), json=body, headers=self._headers(key), timeout=timeout
+            )
         except httpx.TimeoutException as exc:
             latency = time.perf_counter() - t0
             connect = isinstance(exc, httpx.ConnectTimeout | httpx.PoolTimeout)
@@ -868,9 +953,17 @@ def _usage_tokens(out: Any) -> tuple[int | None, int | None]:
 
 
 def make_groq(
-    *, key_env: str = "GROQ_API_KEY", ledger: QuotaLedger | None = None, **kwargs: Any
+    *,
+    key_env: str = "GROQ_API_KEY",
+    ledger: QuotaLedger | None = None,
+    short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+    **kwargs: Any,
 ) -> OpenAICompatProvider:
-    return OpenAICompatProvider(GroqAdapter(key_env=key_env), ledger=ledger, **kwargs)
+    return OpenAICompatProvider(
+        GroqAdapter(key_env=key_env, short_read_timeouts=short_read_timeouts),
+        ledger=ledger,
+        **kwargs,
+    )
 
 
 def make_cloudflare(
@@ -878,11 +971,14 @@ def make_cloudflare(
     *,
     key_env: str = "CLOUDFLARE_AI_WORKER_TOKEN",
     ledger: QuotaLedger | None = None,
+    short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
     **kwargs: Any,
 ) -> OpenAICompatProvider:
     """Raises: ConfigError: ``account_id`` is empty."""
     return OpenAICompatProvider(
-        CloudflareAdapter(account_id, key_env=key_env), ledger=ledger, **kwargs
+        CloudflareAdapter(account_id, key_env=key_env, short_read_timeouts=short_read_timeouts),
+        ledger=ledger,
+        **kwargs,
     )
 
 

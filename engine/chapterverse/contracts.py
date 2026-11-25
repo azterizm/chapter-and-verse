@@ -671,7 +671,9 @@ REFUSAL_KINDS: Final[frozenset[str]] = frozenset(
 """Allowed :attr:`RefusalEvent.kind` values: a non-answering router status, a temporal status
 other than ``IN_FORCE``, or ``out_of_scope``."""
 
-ExtractiveReason: TypeAlias = Literal["providers_unavailable", "provider_warming"]
+ExtractiveReason: TypeAlias = Literal[
+    "providers_unavailable", "provider_warming", "quote_requested"
+]
 
 
 @dataclass(frozen=True, slots=True)

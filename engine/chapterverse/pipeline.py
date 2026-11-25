@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from legal_rag_router import RouteContext, Router, RouteResult, RouteStatus, partition_filter
+from legal_rag_router.coordinate import Coordinate as RouterCoordinate
 from legal_rag_verifier.corpus import instrument_coordinate
 from legal_rag_verifier.premise import Passage, Premise
 from symspellpy import SymSpell  # type: ignore[import-untyped]
@@ -75,6 +76,7 @@ from chapterverse.audit.prompt import (
     estimate_tokens,
     render_passage,
 )
+from chapterverse.bound_rank import InstrumentRanges, expand_siblings, rank_sections
 from chapterverse.citations import instrument_name, provision_label, render_citation
 from chapterverse.contracts import (
     AllProvidersUnavailable,
@@ -88,6 +90,7 @@ from chapterverse.contracts import (
     DoneEvent,
     ErrorEvent,
     Event,
+    ExtractiveEvent,
     ExtractiveReason,
     NoticeEvent,
     Policy,
@@ -116,7 +119,13 @@ from chapterverse.discovery import (
     is_named_private_document,
     remove_bare_section,
 )
-from chapterverse.extractive import extractive_answer, highlight_span, query_terms
+from chapterverse.extractive import (
+    MAX_EXTRACTIVE_WINDOWS,
+    extractive_answer,
+    highlight_span,
+    query_terms,
+)
+from chapterverse.intent import is_quote_request
 from chapterverse.nlp import analyse
 from chapterverse.normalise import Normalised, find_protected_spans, load_dictionary, normalise
 from chapterverse.pii import Masked, mask_pii
@@ -143,6 +152,7 @@ from chapterverse.templates import (
     provider_fallback_notice,
     provider_warming_notice,
     providers_unavailable_notice,
+    quote_truncated_notice,
     route_refusal,
     status_refusal,
 )
@@ -152,6 +162,7 @@ __all__ = [
     "MAX_CONTEXT_COORDINATES",
     "MAX_PROMPT_WINDOWS",
     "PREMISE_BUDGET_TOKENS",
+    "TOP_SECTION_WINDOWS",
     "AskRequest",
     "ModalKV",
     "Outcome",
@@ -170,6 +181,8 @@ PREMISE_BUDGET_TOKENS: Final = 1500
 """Estimated tokens of rendered passages sent to the model (module docstring)."""
 MAX_PROMPT_WINDOWS: Final = 8
 """At most this many windows go to the model (the extractive cap too)."""
+TOP_SECTION_WINDOWS: Final = 3
+"""Maximum windows allocated to the top-ranked section in round 1 (requirement R8)."""
 MAX_CONTEXT_COORDINATES: Final = 10
 """Previous-turn coordinates accepted as routing context."""
 
@@ -256,6 +269,7 @@ class Outcome:
     selection: str = ""
     failures: list[str] = field(default_factory=list)
     error: str | None = None
+    stop_reason: str | None = None
 
     @property
     def sentences(self) -> tuple[SentenceOut, ...]:
@@ -283,6 +297,7 @@ class Outcome:
             "first_supported_ms": _round(self.first_supported_ms),
             "total_ms": _round(self.total_ms),
             "error": self.error,
+            "stop_reason": self.stop_reason,
         }
 
 
@@ -298,7 +313,7 @@ class Selection:
     """The windows sent to the model, renumbered ``P1..Pk`` in document order."""
 
     windows: tuple[Window, ...]
-    strategy: Literal["all", "lexical", "leading", "none"]
+    strategy: Literal["all", "lexical", "leading", "none", "ranked"]
     total: int
     estimated_tokens: int
 
@@ -309,6 +324,135 @@ def _cost(window: Window) -> int:
 
 def _renumber(windows: Iterable[Window]) -> tuple[Window, ...]:
     return tuple(dataclasses.replace(w, passage_id=f"P{i}") for i, w in enumerate(windows, start=1))
+
+
+def _order_section_windows(
+    sec_windows: list[tuple[int, Window]],
+    terms: frozenset[str],
+) -> list[tuple[int, Window, tuple[int, int] | None]]:
+    scored = []
+    best_candidate = None
+    best_tuple = (-1, -1, -1)
+    for idx, w in sec_windows:
+        span, distinct, matches = highlight_span(w.text, terms)
+        item = (idx, w, span)
+        scored.append(item)
+        if distinct > 0:
+            tup = (w.status is TemporalStatus.IN_FORCE, distinct, matches)
+            if tup > best_tuple:
+                best_tuple = tup
+                best_candidate = item
+
+    if best_candidate is not None:
+        return [best_candidate, *(item for item in scored if item[0] != best_candidate[0])]
+    return scored
+
+
+def _group_section_windows(
+    windows: Sequence[Window],
+    ranked_sections: Sequence[tuple[Coordinate, float]],
+    terms: frozenset[str],
+) -> list[list[tuple[int, Window, tuple[int, int] | None]]]:
+    window_index_map = {id(w): i for i, w in enumerate(windows)}
+    section_lists: list[list[tuple[int, Window, tuple[int, int] | None]]] = []
+    seen_sections: set[Coordinate] = set()
+    for sec_coord, _ in ranked_sections:
+        if sec_coord in seen_sections:
+            continue
+        seen_sections.add(sec_coord)
+        sec_windows = [
+            (window_index_map[id(w)], w)
+            for w in windows
+            if w.coordinate == sec_coord or w.coordinate.startswith(f"{sec_coord}/")
+        ]
+        if sec_windows:
+            section_lists.append(_order_section_windows(sec_windows, terms))
+    return section_lists
+
+
+def _allocate_ranked_windows(
+    section_lists: list[list[tuple[int, Window, tuple[int, int] | None]]],
+    max_windows: int,
+    budget_tokens: int,
+) -> tuple[dict[int, Window], int]:
+    chosen: dict[int, Window] = {}
+    used = 0
+
+    def try_add(idx: int, w: Window, span: tuple[int, int] | None) -> bool:
+        nonlocal used
+        if idx in chosen or len(chosen) >= max_windows:
+            return False
+        trimmed = dataclasses.replace(w, highlight=span) if span is not None else w
+        cost = _cost(trimmed)
+        if used + cost > budget_tokens:
+            if chosen:
+                return False
+            frame = len(render_passage(dataclasses.replace(w, text="", highlight=None)))
+            room = int(budget_tokens * CHARS_PER_TOKEN) - frame - CONTEXT_MARGIN_CHARS - 8
+            trimmed = dataclasses.replace(w, highlight=(0, max(1, min(len(w.text), room))))
+            cost = _cost(trimmed)
+        chosen[idx] = trimmed
+        used += cost
+        return True
+
+    # Round 1: top section gets up to TOP_SECTION_WINDOWS windows
+    for item in section_lists[0][:TOP_SECTION_WINDOWS]:
+        if not try_add(*item) and len(chosen) >= max_windows:
+            break
+
+    # Round 2: every next section gets its single best window
+    for next_section in section_lists[1:]:
+        if len(chosen) >= max_windows:
+            break
+        try_add(*next_section[0])
+
+    # Round 3: any slots left go to further windows of the ranked sections in rank order
+    for sec in section_lists:
+        if len(chosen) >= max_windows:
+            break
+        for item in sec:
+            if not try_add(*item) and len(chosen) >= max_windows:
+                break
+
+    return chosen, used
+
+
+def select_ranked_windows(
+    windows: Sequence[Window],
+    ranked_sections: Sequence[tuple[Coordinate, float]],
+    query: str,
+    *,
+    budget_tokens: int = PREMISE_BUDGET_TOKENS,
+    max_windows: int = MAX_PROMPT_WINDOWS,
+) -> Selection:
+    """Cap ``windows`` using section rank order spread across rounds (requirements R3, R8).
+
+    Allocation over ranked sections runs in three rounds, each round in section rank order
+    and respecting the token budget and window cap:
+    (1) the top section gets up to ``TOP_SECTION_WINDOWS`` = 3 windows (its best-highlight
+        window first, then its others in store order);
+    (2) every next section gets its single best window (best highlight, else its first window);
+    (3) any slots left go to further windows of the ranked sections in rank order.
+    Final windows are returned in store order.
+    """
+    if budget_tokens < 1 or max_windows < 1:
+        raise ValueError("budget_tokens and max_windows must be positive")
+    if not windows:
+        return Selection((), "none", 0, 0)
+    full = sum(_cost(w) for w in windows)
+    if full <= budget_tokens and len(windows) <= max_windows:
+        return Selection(_renumber(windows), "all", len(windows), full)
+
+    terms = query_terms(query)
+    section_lists = _group_section_windows(windows, ranked_sections, terms)
+    if not section_lists:
+        return select_windows(windows, query, budget_tokens=budget_tokens, max_windows=max_windows)
+
+    chosen, used = _allocate_ranked_windows(section_lists, max_windows, budget_tokens)
+    if not chosen:
+        return select_windows(windows, query, budget_tokens=budget_tokens, max_windows=max_windows)
+
+    return Selection(_renumber(chosen[i] for i in sorted(chosen)), "ranked", len(windows), used)
 
 
 def select_windows(
@@ -572,6 +716,7 @@ class Pipeline:
         dictionary: SymSpell | None = None,
         dense: DenseRetriever | None = None,
         colbert: ColbertScorer | None = None,
+        bound_ranker: InstrumentRanges | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -581,6 +726,13 @@ class Pipeline:
         self.modal_kv = modal_kv
         self.dense = dense
         self.colbert = colbert
+        if bound_ranker is None:
+            concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
+            if concepts is not None:
+                bound_ranker = InstrumentRanges()
+                bound_ranker.start_background_build(concepts)
+        self.bound_ranker = bound_ranker
+        self._logged_bound_rank_fallback = False
         if primary_provider is None and isinstance(rotation, ProviderRotation):
             order = rotation.order("generate")
             primary_provider = order[0] if order else None
@@ -625,6 +777,22 @@ class Pipeline:
         if self._clock is not None:
             return self._clock().astimezone(UTC).date()
         return datetime.now(UTC).date()
+
+    def _log_bound_rank_fallback(self) -> None:
+        if not self._logged_bound_rank_fallback:
+            self._logged_bound_rank_fallback = True
+            log.info("bound ranking not ready or unavailable; falling back to lexical selection")
+
+    def _expand_bound_result(self, result: RouteResult, query: str) -> RouteResult:
+        if not result.coordinates:
+            return result
+        expanded: list[str] = []
+        for c in result.coordinates:
+            expanded.extend(expand_siblings(query, str(c), self.store))
+        if expanded and expanded != [str(c) for c in result.coordinates]:
+            new_coords = tuple(RouterCoordinate.parse(s) for s in expanded)
+            return dataclasses.replace(result, coordinates=new_coords)
+        return result
 
     def __repr__(self) -> str:
         return f"Pipeline(rotation={self.rotation!r}, modal_kv={self.modal_kv is not None})"
@@ -858,6 +1026,7 @@ class Pipeline:
         # If the raw result is ROUTE_BOUNDED, use it and the raw text;
         # spelling correction is not applied and no corrections notice is sent.
         if raw_result.status is RouteStatus.BOUNDED:
+            raw_result = self._expand_bound_result(raw_result, raw)
             stream.outcome.route_status = raw_result.status.value
             stream(RouteEvent.from_route_result(raw_result))
             self._bounded(request, raw_result, stream, cancelled, norm_text=raw)
@@ -869,6 +1038,7 @@ class Pipeline:
         # or if the raw result was ROUTE_UNRESOLVED (then discovery runs on the normalised text);
         # in every other case keep the raw result (raw abstentions and clarifications stand).
         if norm_result.status is RouteStatus.BOUNDED:
+            norm_result = self._expand_bound_result(norm_result, raw)
             self._emit_route_with_corrections(stream, norm_result, norm.corrections)
             self._bounded(
                 request, norm_result, stream, cancelled, masked=masked, norm_text=norm.text
@@ -885,7 +1055,10 @@ class Pipeline:
 
     def _read(self, request: AskRequest, result: RouteResult) -> _Read:
         partition_filter(result)  # validates every coordinate; raises FilterError
-        bound = _minimal([str(c) for c in result.coordinates])
+        expanded: list[str] = []
+        for c in result.coordinates:
+            expanded.extend(expand_siblings(request.query, str(c), self.store))
+        bound = _minimal([str(c) for c in (expanded or result.coordinates)])
         excluded = [str(c) for c in result.excluded]
         read = _Read()
         for coordinate in bound:
@@ -914,10 +1087,10 @@ class Pipeline:
             for row in rows:
                 if row.get("record_type") == "instrument":
                     continue
-                c = str(row.get("coordinate"))
-                if c in seen or _excluded(c, excluded):
+                row_coord = str(row.get("coordinate"))
+                if row_coord in seen or _excluded(row_coord, excluded):
                     continue
-                seen.add(c)
+                seen.add(row_coord)
                 kept.append(row)
         return read
 
@@ -941,7 +1114,7 @@ class Pipeline:
 
         return None
 
-    def _bounded(
+    def _bounded(  # noqa: PLR0912, PLR0915
         self,
         request: AskRequest,
         result: RouteResult,
@@ -985,12 +1158,33 @@ class Pipeline:
             stream(NoticeEvent(code="status_excluded", message=message))
 
         windows, passages, titles, citations, provisions = self._windows(request, result, read)
-        selection = select_windows(
-            windows,
-            norm_text,
-            budget_tokens=self.config.premise_budget_tokens,
-            max_windows=self.config.max_prompt_windows,
-        )
+        bound = _minimal([str(c) for c in result.coordinates])
+        if (
+            windows
+            and is_quote_request(norm_text)
+            and bound
+            and all(c != instrument_coordinate(c) for c in bound)
+        ):
+            shown = _renumber(
+                dataclasses.replace(w, highlight=None) for w in windows[:MAX_EXTRACTIVE_WINDOWS]
+            )
+            stream.outcome.windows_total = len(windows)
+            stream.outcome.windows_sent = len(shown)
+            stream.outcome.selection = "quote"
+            stream(SourcesEvent(windows=shown))
+            stream(ExtractiveEvent(reason="quote_requested", windows=shown))
+            if len(windows) > MAX_EXTRACTIVE_WINDOWS:
+                stream(quote_truncated_notice(len(shown), len(windows)))
+            self._receipt(
+                stream,
+                result,
+                mode="extractive",
+                version_dates=version_dates,
+                passages={w.passage_id: w.coordinate for w in shown},
+                spans={},
+            )
+            return
+        selection = self._select_windows_for_bound(windows, norm_text, bound)
         stream.outcome.windows_total = selection.total
         stream.outcome.windows_sent = len(selection.windows)
         stream.outcome.selection = selection.strategy
@@ -1064,6 +1258,56 @@ class Pipeline:
             calls=calls,
         )
 
+    def _select_windows_for_bound(
+        self,
+        windows: Sequence[Window],
+        norm_text: str,
+        bound: list[str],
+    ) -> Selection:
+        is_whole_instrument = len(bound) == 1 and len(bound[0].split("/")) in (4, 5)
+        full_cost = sum(_cost(w) for w in windows)
+        windows_fit = (
+            full_cost <= self.config.premise_budget_tokens
+            and len(windows) <= self.config.max_prompt_windows
+        )
+        if not is_whole_instrument or windows_fit:
+            return select_windows(
+                windows,
+                norm_text,
+                budget_tokens=self.config.premise_budget_tokens,
+                max_windows=self.config.max_prompt_windows,
+            )
+
+        ranked_sections: list[tuple[Coordinate, float]] = []
+        if self.bound_ranker is not None and self.bound_ranker.ready:
+            concepts = getattr(self.router, "concepts", None) or getattr(
+                self.router, "_concepts", None
+            )
+            if concepts is not None:
+                ranked_sections = rank_sections(
+                    norm_text,
+                    bound[0],
+                    concepts=concepts,
+                    ranges=self.bound_ranker,
+                    dense=self.dense,
+                )
+        if ranked_sections:
+            return select_ranked_windows(
+                windows,
+                ranked_sections,
+                norm_text,
+                budget_tokens=self.config.premise_budget_tokens,
+                max_windows=self.config.max_prompt_windows,
+            )
+
+        self._log_bound_rank_fallback()
+        return select_windows(
+            windows,
+            norm_text,
+            budget_tokens=self.config.premise_budget_tokens,
+            max_windows=self.config.max_prompt_windows,
+        )
+
     def _windows(
         self, request: AskRequest, result: RouteResult, read: _Read
     ) -> tuple[
@@ -1115,9 +1359,9 @@ class Pipeline:
         """Generate and audit; returns the mode, sentences, calls and extractive spans."""
         masked_query = _mask_query(norm_text, masked)
 
-        gen_ready = _available(self.rotation, "generate")
-        judge_ready = _available(self.rotation, "judge")
-        if not gen_ready or not judge_ready:
+        if not (gen_ready := _available(self.rotation, "generate")) or not _available(
+            self.rotation, "judge"
+        ):
             reason: ExtractiveReason = (
                 "provider_warming" if _warming(self.rotation) else "providers_unavailable"
             )
@@ -1149,12 +1393,8 @@ class Pipeline:
                 ):
                     stream(provider_fallback_notice())
             sentences.append(sentence)
-            unmasked_text = masked.unmask(sentence.text)
-            user_sentence = dataclasses.replace(sentence, text=unmasked_text)
-            stream(
-                SentenceEvent(
-                    sentence=user_sentence, citations=self._cite(sentence, by_id, read, provisions)
-                )
+            self._deliver_sentence(
+                stream, sentence, by_id=by_id, read=read, provisions=provisions, masked=masked
             )
 
         use_modal = self.modal_kv is not None and gen_ready[0] == self.modal_kv.provider
@@ -1179,6 +1419,8 @@ class Pipeline:
                     windows=windows,
                     mode=self.config.mode,
                     on_sentence=lambda s: deliver(s, modal_gen.calls),
+                    started=request.started,
+                    answer_budget_s=self.config.generation.answer_budget_s,
                 )
                 generator = modal_gen
                 for _ in modal_gen:  # sentences were delivered by on_sentence as decided
@@ -1193,28 +1435,90 @@ class Pipeline:
                     windows=windows,
                     mode=self.config.mode,
                     settings=self.config.generation,
+                    started=request.started,
+                    answer_budget_s=self.config.generation.answer_budget_s,
                 )
                 generator = chat_gen
                 for sentence in chat_gen:
                     deliver(sentence, chat_gen.calls)
         except AllProvidersUnavailable as exc:
             stream.outcome.failures.extend(f"{f.provider}:{f.kind}" for f in exc.failures)
-            done_calls = merge_calls(
-                generator.calls if generator is not None else (), judge_chat.calls
+            if generator is not None and generator.stop_reason is not None:
+                stream.outcome.stop_reason = generator.stop_reason
+            warming = any(isinstance(f, ProviderWarming) for f in exc.failures)
+            reason = "provider_warming" if warming else "providers_unavailable"
+            return self._incomplete_answer(
+                stream,
+                request,
+                windows=windows,
+                norm_text=norm_text,
+                sentences=sentences,
+                generator=generator,
+                judge_chat=judge_chat,
+                reason=reason,
             )
-            if not sentences:
-                warming = any(isinstance(f, ProviderWarming) for f in exc.failures)
-                reason = "provider_warming" if warming else "providers_unavailable"
-                return (
-                    "extractive",
-                    (),
-                    done_calls,
-                    self._extractive(stream, request, windows, reason, query=norm_text),
-                )
-            stream(INCOMPLETE_NOTICE)
-            return "generated", tuple(sentences), done_calls, {}
         assert generator is not None  # noqa: S101 - set before iterating
+        stream.outcome.stop_reason = generator.stop_reason
+        if generator.stop_reason == "time_budget":
+            if not sentences:
+                stream.outcome.failures.append("time_budget")
+            return self._incomplete_answer(
+                stream,
+                request,
+                windows=windows,
+                norm_text=norm_text,
+                sentences=sentences,
+                generator=generator,
+                judge_chat=judge_chat,
+                reason="providers_unavailable",
+            )
         return "generated", tuple(sentences), merge_calls(generator.calls, judge_chat.calls), {}
+
+    def _deliver_sentence(
+        self,
+        stream: _Stream,
+        sentence: SentenceOut,
+        *,
+        by_id: Mapping[str, Window],
+        read: _Read,
+        provisions: Mapping[Coordinate, Mapping[str, Any]],
+        masked: Masked,
+    ) -> None:
+        unmasked_text = masked.unmask(sentence.text)
+        user_sentence = dataclasses.replace(sentence, text=unmasked_text)
+        stream(
+            SentenceEvent(
+                sentence=user_sentence, citations=self._cite(sentence, by_id, read, provisions)
+            )
+        )
+
+    def _incomplete_answer(
+        self,
+        stream: _Stream,
+        request: AskRequest,
+        *,
+        windows: Sequence[Window],
+        norm_text: str,
+        sentences: Sequence[SentenceOut],
+        generator: ChatContinuationGenerator | ModalPathGenerator | None,
+        judge_chat: RotationJudgeChat,
+        reason: ExtractiveReason,
+    ) -> tuple[
+        AnswerMode,
+        tuple[SentenceOut, ...],
+        tuple[ProviderCall, ...],
+        dict[Coordinate, tuple[int, int]],
+    ]:
+        done_calls = merge_calls(generator.calls if generator is not None else (), judge_chat.calls)
+        if not sentences:
+            return (
+                "extractive",
+                (),
+                done_calls,
+                self._extractive(stream, request, windows, reason, query=norm_text),
+            )
+        stream(INCOMPLETE_NOTICE)
+        return "generated", tuple(sentences), done_calls, {}
 
     def _extractive(
         self,
@@ -1238,6 +1542,8 @@ class Pipeline:
         read: _Read,
         provisions: Mapping[Coordinate, Mapping[str, Any]],
     ) -> tuple[RenderedCitation, ...]:
+        if sentence.verdict == "refused":
+            return ()
         out: list[RenderedCitation] = []
         for pid in sentence.passage_ids:
             window = by_id.get(pid)
