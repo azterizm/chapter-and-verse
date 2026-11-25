@@ -1,11 +1,12 @@
-// Mock API for `npm run dev` and `npm run preview`. Replays the recorded streams in
-// mock/streams/ (written by mock/record.py from the engine's contract) with realistic delays.
+// Mock API for `npm run dev` and `npm run preview`. Replays recorded engine streams in
+// mock/streams/engine/ (written by mock/record_engine.py) when index.json is present, falling
+// back to the synthetic streams in mock/streams/ for error paths or unrecorded queries.
 //
 // Each event is written in two or three pieces cut at arbitrary byte offsets, including inside
 // a UTF-8 sequence such as "£", and ": keep-alive" comment lines are sent between some events,
 // so the browser parser sees the same awkward input the real network can produce.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +15,7 @@ import type { Connect, Plugin } from "vite";
 const STREAMS = join(dirname(fileURLToPath(import.meta.url)), "streams");
 const MAX_QUERY_BYTES = 4096;
 
-export type Scenario =
+export type SyntheticScenario =
   | "answer"
   | "refused"
   | "text-not-held"
@@ -26,18 +27,108 @@ export type Scenario =
   | "too-long"
   | "broken";
 
-/** Pick a recorded stream by keyword. Anything unmatched gets the s.124 answer. */
-export function pickScenario(query: string): Scenario {
-  const q = query.toLowerCase();
+export type Scenario = SyntheticScenario | `engine/${string}`;
+
+interface EngineIndexEntry {
+  question: string;
+  keywords?: string[];
+  recorded_at?: string;
+  policy_hash?: string;
+}
+
+const DEFAULT_ENGINE_KEYWORDS: Record<string, readonly string[]> = {
+  "tort-chosen": ["s.2 limitation act 1980"],
+  "tort-clarify": ["sue in tort"],
+  tort: ["limitation period", "limitation act 1980"],
+  "quote-172": ["172(1)", "s.172", "companies act 2006"],
+  "reject-30": ["short-term right to reject", "consumer rights act 2015"],
+  "not-in-act": ["national minimum wage"],
+  "era-124": ["compensatory award"],
+  "out-of-coverage": ["code civil"],
+};
+
+const ENGINE_KEYWORD_ORDER = [
+  "tort-chosen",
+  "tort-clarify",
+  "tort",
+  "quote-172",
+  "reject-30",
+  "not-in-act",
+  "era-124",
+  "out-of-coverage",
+] as const;
+
+function loadEngineEntries(streamsDir: string): Map<string, EngineIndexEntry> {
+  const indexPath = join(streamsDir, "engine", "index.json");
+  if (!existsSync(indexPath)) return new Map();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(indexPath, "utf8"));
+  } catch {
+    return new Map();
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return new Map();
+
+  const entries = new Map<string, EngineIndexEntry>();
+  for (const [name, raw] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const item = raw as Record<string, unknown>;
+    if (typeof item.question !== "string") continue;
+    if (!existsSync(join(streamsDir, "engine", `${name}.sse`))) continue;
+    const keywords = Array.isArray(item.keywords)
+      ? item.keywords.filter((k): k is string => typeof k === "string" && k.trim().length > 0)
+      : undefined;
+    entries.set(name, keywords ? { question: item.question, keywords } : { question: item.question });
+  }
+  return entries;
+}
+
+function matchesEngineKeywords(name: string, entry: EngineIndexEntry, lowerQuery: string): boolean {
+  if (name === "tort-clarify" && lowerQuery.includes("(")) return false;
+  if (name === "tort-chosen" && lowerQuery.includes("sue in tort") && lowerQuery.includes("(")) return true;
+  const keywords = entry.keywords ?? DEFAULT_ENGINE_KEYWORDS[name] ?? [];
+  return keywords.some((kw) => lowerQuery.includes(kw.toLowerCase()));
+}
+
+/** Pick a recorded stream by exact question, keyword, or synthetic scenario fallback. */
+export function pickScenario(query: string, streamsDir = STREAMS): Scenario {
   if (Buffer.byteLength(query, "utf8") > MAX_QUERY_BYTES) return "too-long";
+  const trimmedLower = query.trim().toLowerCase();
+  const q = query.toLowerCase();
+
+  const engineEntries = loadEngineEntries(streamsDir);
+  for (const [name, entry] of engineEntries) {
+    if (entry.question.trim().toLowerCase() === trimmedLower) {
+      return `engine/${name}`;
+    }
+  }
+
+  // Synthetic scenarios for error/edge paths the engine cannot be made to produce.
   if (q.includes("marchwood")) return "refused";
-  if (q.includes("quote")) return "quote";
   if (q.includes("429") || q.includes("extractive")) return "extractive";
   if (q.includes("invalid direction") || q.includes("1980/15") || q.includes("title only")) return "text-not-held";
   if (q.includes("violation")) return "broken";
   if (q.startsWith("uk/") && !q.startsWith("uk/ukpga/")) return "out-of-coverage";
-  if (q.includes("sue in tort") && !q.includes("(")) return "clarify-tort";
   if (q.includes("124") && !q.includes("1996")) return "clarify";
+
+  if (engineEntries.size > 0) {
+    const orderedNames = [
+      ...ENGINE_KEYWORD_ORDER.filter((n) => engineEntries.has(n)),
+      ...[...engineEntries.keys()].filter(
+        (n) => !(ENGINE_KEYWORD_ORDER as readonly string[]).includes(n),
+      ),
+    ];
+    for (const name of orderedNames) {
+      const entry = engineEntries.get(name);
+      if (entry && matchesEngineKeywords(name, entry, q)) {
+        return `engine/${name}`;
+      }
+    }
+  }
+
+  if (q.includes("quote")) return "quote";
+  if (q.includes("sue in tort") && !q.includes("(")) return "clarify-tort";
+  if (engineEntries.has("era-124")) return "engine/era-124";
   return "answer";
 }
 

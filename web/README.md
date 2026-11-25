@@ -8,12 +8,19 @@ Needs Node 22.12 or later.
 
 ```
 npm ci
-npm run dev        # http://localhost:5173, answers come from the mock
-npm run build      # typecheck, then dist/
-npm run preview    # serve dist/ with the production CSP and the mock
+npm run dev          # http://localhost:5173, answers come from the mock
+npm run dev:engine   # http://localhost:5173, /api proxied to CV_ENGINE (default http://127.0.0.1:8000), mock and Turnstile off
+npm run build        # typecheck, then dist/
+npm run preview      # serve dist/ with the production CSP and the mock
 npm run typecheck
 npm run test
 npm run lint
+```
+
+To run the local engine for `npm run dev:engine` (bound to `127.0.0.1` only, with `DATABASE_URL` and Modal settings removed):
+
+```
+uv run python scripts/dev_engine.py
 ```
 
 ## Environment
@@ -23,6 +30,7 @@ npm run lint
 | `VITE_API_BASE` | API origin, such as `https://api.example.org`. Setting it turns the mock off | Same origin |
 | `VITE_TURNSTILE_SITE_KEY` | Cloudflare Turnstile site key. Unset: no widget, no token | Unset |
 | `CV_MOCK` | `0` turns the mock off without setting an API origin | On |
+| `CV_ENGINE` | Upstream engine URL for Vite `/api` proxy when `CV_MOCK=0` | `http://127.0.0.1:8000` |
 
 A backend on another origin must allow this origin in `CORS_ORIGINS`.
 
@@ -62,7 +70,10 @@ The streams are written by `mock/record.py` with the engine's own dataclasses an
 
 ```
 npm run mock:record
+npm run mock:record:engine
 ```
+
+`mock:record:engine` (`mock/record_engine.py`) records real-engine SSE streams into `mock/streams/engine/` (using Groq and Cloudflare only, with `DATABASE_URL` and Modal settings removed). When `mock/streams/engine/index.json` exists, `mock/plugin.ts` replays those recorded streams for matching questions and keywords, falling back to `era-124` for unmatched questions and keeping the synthetic error streams unchanged.
 
 `record.py` also writes `order-cases.json`: 400 event sequences with the Python validator's verdict on each. The TypeScript validator is tested against them.
 

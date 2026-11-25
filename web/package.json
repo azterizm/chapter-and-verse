@@ -9,12 +9,14 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:engine": "CV_MOCK=0 VITE_TURNSTILE_SITE_KEY= vite",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
     "test": "vitest run",
     "lint": "eslint .",
-    "mock:record": "../.venv/bin/python mock/record.py"
+    "mock:record": "../.venv/bin/python mock/record.py",
+    "mock:record:engine": "../.venv/bin/python mock/record_engine.py"
   },
   "dependencies": {
     "@radix-ui/react-collapsible": "1.2.1",
