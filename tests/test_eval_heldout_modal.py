@@ -22,8 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from chapterverse.contracts import ProviderCall  # noqa: E402
+from chapterverse.contracts import AllProvidersUnavailable, ProviderCall  # noqa: E402
 from chapterverse.providers import InMemoryLedger, ModalLimits  # noqa: E402
+from chapterverse.providers.openai_compat import ProviderWarming  # noqa: E402
 from eval import heldout_modal as hm  # noqa: E402
 from eval import judge_gate as jg  # noqa: E402
 
@@ -333,3 +334,25 @@ def test_dry_run_reports_costs_and_chars_per_scope_and_separates_out_dir(
         hm.main(["--out", str(tmp_path), "--method-commit", "abc", "--judge-scope", "cited"]) == 0
     )
     assert seen_out == [tmp_path, tmp_path / "cited"]
+
+
+def test_warming_server_is_waited_for_not_a_failed_attempt(tmp_path: Path) -> None:
+    warming = AllProvidersUnavailable(
+        [ProviderWarming("modal", "warming: health probe did not answer")]
+    )
+    inner = FakeInner([warming, warming, SUPPORTED])
+    chat = _gate_chat(tmp_path, inner)
+    reply = chat(MSGS)
+    assert reply["content"] == SUPPORTED
+    assert inner.sent == 3
+    assert chat.slept == [hm.WARM_POLL_S, hm.WARM_POLL_S]  # type: ignore[attr-defined]
+
+
+def test_warming_past_max_wait_halts_the_run(tmp_path: Path) -> None:
+    warming = AllProvidersUnavailable(
+        [ProviderWarming("modal", "warming: health probe did not answer")]
+    )
+    inner = FakeInner([warming] * 5)
+    chat = _gate_chat(tmp_path, inner, max_wait_s=2 * hm.WARM_POLL_S)
+    with pytest.raises(jg.RunHalted):
+        chat(MSGS)

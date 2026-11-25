@@ -79,6 +79,8 @@ __all__ = [
 ]
 
 DETECTOR: Final = "qwen27-ar4-modal"
+WARM_POLL_S: Final = 10.0
+"""Seconds between resends while the Modal server warms (cold start measured at 406 s)."""
 DETECTOR_CITED: Final = "qwen27-ar4-modal-cited"
 """The detector with the judge on the cited windows only (S5.1b): its own once-per-detector run."""
 
@@ -327,6 +329,10 @@ class ModalGateChat:
             raise RunHalted(f"{self.provider}: dollar cap ${self.max_usd:.2f} reached")
         if detail == "circuit open" or kind in {"quota", "rate_limit"}:
             return max(POLL_S, float(retry or 0.0))
+        if detail.startswith("warming"):
+            # A cold Modal server is not a judge attempt: wait and resend the same call
+            # (bounded by max_wait_s), so no row is ever scored on a cold-start error.
+            return WARM_POLL_S
         raise AttemptFailed(f"{self.provider} {kind}")
 
 
