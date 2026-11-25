@@ -109,6 +109,7 @@ from chapterverse.dense.colbert import ColbertScorer
 from chapterverse.dense.embed import load_model
 from chapterverse.dense.retriever import DenseRetriever
 from chapterverse.dense.store import BinaryInt8Store
+from chapterverse.discovery import ClarifyPrior, load_clarify_prior
 from chapterverse.nlp import get_nlp
 from chapterverse.normalise import load_dictionary
 from chapterverse.persistence import ReceiptStore, open_persistence
@@ -711,6 +712,21 @@ def _init_dense_retriever(
     return retriever
 
 
+def _load_clarify_prior(env: Mapping[str, str]) -> ClarifyPrior | None:
+    raw = _env(env, "CLARIFY_PRIOR_PATH")
+    path = Path(raw) if raw is not None else Path("artefacts/clarify_prior.json")
+    prior = load_clarify_prior(path)
+    if prior is not None:
+        log.info(
+            "clarify prior loaded: %d sections, %d instruments",
+            len(prior.sections),
+            len(prior.instruments),
+        )
+    else:
+        log.info("clarify prior off: %s absent or invalid", path)
+    return prior
+
+
 def _init_colbert_scorer(
     env: Mapping[str, str],
 ) -> ColbertScorer | None:
@@ -791,6 +807,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
 
     dense_retriever = _init_dense_retriever(env, store, router, preloaded=dense_preload)
     colbert_scorer = _init_colbert_scorer(env)
+    clarify_prior = _load_clarify_prior(env)
 
     pipeline = Pipeline(
         router=router,
@@ -807,6 +824,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         dense=dense_retriever,
         colbert=colbert_scorer,
         bound_ranker=bound_ranker,
+        clarify_prior=clarify_prior,
     )
     limiter = TokenBucket(
         per_minute=_env_number(env, "RATE_LIMIT_PER_MINUTE", 10.0),

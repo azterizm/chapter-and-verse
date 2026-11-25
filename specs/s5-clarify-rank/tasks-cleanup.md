@@ -1,0 +1,14 @@
+# S5.3 Clarify ranking: cleanup before the sealed run (tasks)
+
+The ranking change is measured; before the sealed concept test run the wiring must be explicit and safe. Do NOT change any ranking constant or the scoring logic in `discover_step` / `_rrf_fuse_candidates`: the dev numbers must stay exactly as measured (everyday dense on hit@1 0.700, MRR 0.758; concept dev dense on hit@10 0.946, MRR 0.758).
+
+Files you own: `engine/chapterverse/discovery.py`, `engine/chapterverse/pipeline.py`, `engine/chapterverse/app.py`, `eval/discovery_gate.py`, `eval/clarify_rank.py`, `scripts/build_clarify_prior.py`, `tests/test_clarify_rank.py`, `tests/test_discovery.py`, `docs/ARCHITECTURE.md`. Edit nothing else.
+
+Allowed shell commands, exactly: `uv run ruff check`, `uv run ruff format <your files>`, `uv run ruff format --check`, `uv run mypy`, `uv run pytest -q` (optionally with paths or `-k`), `uv run python -m eval.clarify_rank ...`, `uv run python -m eval.discovery_gate --split dev ...` (never the test split), `grep`, `ls`, `cat`, `mkdir`. Nothing else: no cd, no pipes, no redirection, no git. Run every command in the foreground and wait for it.
+
+- [ ] 1. `Pipeline`: remove the `_UNSET` sentinel and the constructor's file and environment reading. `clarify_prior: ClarifyPrior | None = None`; None means today's order exactly. Nothing in `pipeline.py` reads `CLARIFY_PRIOR_PATH` or any file for the prior.
+- [ ] 2. `load_clarify_prior(path, *, router_snapshot: str)`: returns None with one warning when the prior's `snapshot` is empty or differs from the router index snapshot (the prior was built from that snapshot's harvest). `app.py` passes the live router's snapshot. `scripts/build_clarify_prior.py` must write the snapshot (check it does).
+- [ ] 3. `app.py`: `CLARIFY_PRIOR_PATH` env var; when unset, the prior is off (no default relative path; production enables it explicitly when the file is shipped). Log one line on or off with the reason.
+- [ ] 4. Eval builders (`eval/discovery_gate.py`, `eval/clarify_rank.py`): `--prior PATH` (default `artefacts/clarify_prior.json`) and `--no-prior`; they load it with `load_clarify_prior` against their router's snapshot and pass it to `Pipeline` explicitly; the report states whether the prior was on. The no-dense side-by-side pipeline in `discovery_gate` gets the same prior setting.
+- [ ] 5. Tests: no prior gives today's order (unchanged test); snapshot mismatch gives None; `Pipeline()` with default args does not read the filesystem for a prior; eval flags.
+- [ ] 6. Rerun `uv run python -m eval.clarify_rank --dense-dir artefacts/dense/index` and `uv run python -m eval.discovery_gate --split dev --dense-dir artefacts/dense/index --models-dir artefacts/models` (prior on) and confirm the numbers equal the ones above; then all steering checks. Print a short summary with the numbers.

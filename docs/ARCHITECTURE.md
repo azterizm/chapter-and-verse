@@ -422,7 +422,9 @@ Access headers are present, else by the socket peer; the Worker sets the header 
 413 `body_too_large` / `query_too_long` (`MAX_QUERY_BYTES` on the UTF-8 query), 400 `bad_request`.
 
 Startup opens the store, router and concepts once and refuses to start when the store and router
-snapshots differ. The rotation comes from `GEN_PROVIDERS` / `JUDGE_PROVIDERS` over the quota
+snapshots differ. Startup also optionally loads `artefacts/clarify_prior.json` (`CLARIFY_PRIOR_PATH`)
+to reorder citation-less clarify candidates within the top-50 pool; when absent, default order applies.
+The rotation comes from `GEN_PROVIDERS` / `JUDGE_PROVIDERS` over the quota
 ledger. The pin check (`check_provider` plus `apply_checks`) runs at startup and every
 `PIN_CHECK_INTERVAL_S`, skipping Modal (it serves its own pinned revision, and any request to a
 cold Modal starts a billed container). An inconclusive check (`pinning.is_conclusive`: a 429, a
