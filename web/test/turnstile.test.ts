@@ -141,10 +141,11 @@ describe("Turnstile on every question", () => {
     expect(TURNSTILE_ACTION).toBe("ask");
     const onToken = vi.fn();
     const onError = vi.fn();
-    const opts = turnstileOptions(onToken, onError);
+    const opts = turnstileOptions(onToken, onError, undefined, 680, "light");
     expect(opts.action).toBe("ask");
     expect(opts.appearance).toBe("always");
-    expect(opts.size).toBe("compact");
+    expect(opts.size).toBe("flexible");
+    expect(opts.theme).toBe("light");
 
     const renderMock = vi.fn();
     const mockTs = { render: renderMock, reset: vi.fn(), remove: vi.fn() };
@@ -153,6 +154,40 @@ describe("Turnstile on every question", () => {
       expect.anything(),
       expect.objectContaining({ action: "ask", appearance: "always" }),
     );
+  });
+
+  it("uses flexible size when container width is at least 300 px (680) and compact below 300 px (288)", () => {
+    const onToken = vi.fn();
+    const onError = vi.fn();
+
+    const desktopOpts = turnstileOptions(onToken, onError, undefined, 680, "light");
+    expect(desktopOpts.size).toBe("flexible");
+    expect(desktopOpts.appearance).toBe("always");
+    expect(desktopOpts.action).toBe("ask");
+
+    const boundaryOpts = turnstileOptions(onToken, onError, undefined, 300, "light");
+    expect(boundaryOpts.size).toBe("flexible");
+
+    const narrowOpts = turnstileOptions(onToken, onError, undefined, 288, "light");
+    expect(narrowOpts.size).toBe("compact");
+    expect(narrowOpts.appearance).toBe("always");
+    expect(narrowOpts.action).toBe("ask");
+  });
+
+  it("passes resolved theme through to render options without altering appearance or action", () => {
+    const onToken = vi.fn();
+    const onError = vi.fn();
+
+    const lightOpts = turnstileOptions(onToken, onError, undefined, 680, "light");
+    expect(lightOpts.theme).toBe("light");
+    expect(lightOpts.appearance).toBe("always");
+    expect(lightOpts.action).toBe("ask");
+
+    const darkOpts = turnstileOptions(onToken, onError, undefined, 288, "dark");
+    expect(darkOpts.theme).toBe("dark");
+    expect(darkOpts.size).toBe("compact");
+    expect(darkOpts.appearance).toBe("always");
+    expect(darkOpts.action).toBe("ask");
   });
 
   it("a question asked before the token arrives is sent once the token arrives, with that token", async () => {

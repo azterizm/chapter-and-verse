@@ -1,0 +1,15 @@
+# Visual review 1 (orchestrator, screenshots of 6acba6f at 390 and 1440 px, light and dark)
+
+Works: two-column layout with sticky sources, chip jumps to and highlights the source, action row, empty state, dark theme.
+
+Fix:
+1. Font: everything renders in a serif. `styles.css` (Iowan Old Style, Palatino) still overrides Satoshi; it also styles `mark` yellow-olive in dark. Remove `styles.css` entirely (and its import), move anything still needed (print rules, `.sr-only`) into `index.css` with tokens. Satoshi must apply everywhere.
+2. Width: the conversation column is about 960 css px on desktop; design.md says 680 px (sources column 360 px, gap 32 px, whole layout centred). The composer must be exactly the conversation column's width in every state (empty state too).
+3. Composer dock: the page is a flex column `min-height: 100dvh`; main grows; the composer sits at the bottom of the viewport in every state (empty state, short answer), sticky over long content; the footer comes after the conversation in normal flow (visible when scrolled to the end, and directly under the composer when the content is short).
+4. Focus: one focus ring only, on the composer pill (`:focus-within`), none on the inner textarea.
+5. Source card title: show the provision first and never truncate it: line 1 the short provision label (for example "s.124(1)") in ui 700, plus the provision heading in ui 500 muted if present, truncated with ellipsis only at the end; line 2 the instrument name in caption muted.
+6. Citation chips: short label (the provision part, for example "s.124(1)") when every citation in the answer is from one instrument; otherwise the short instrument form the engine label already ends with is too long, so use provision plus the instrument's short title words up to 3 (for example "s.2 Limitation Act")? No: keep it simple: provision label plus year ("s.2 (1980)") only when two or more instruments appear in the same answer. The full engine label stays in `aria-label` and `title`, and in the source card.
+7. Technical lines out of the answer: the `provider_fallback` notice and the meta line (answer id, timings) move behind an Info icon button in the action row (lucide Info, aria-label "Details"), which toggles a small caption block: "Answer id …", "First sentence 1.69 s, total 3.92 s", and "Backup model used" when that notice arrived. Other notices stay inline.
+8. Theme control: compact icon segmented control (lucide Monitor, Sun, Moon), 32 px high, aria-labels "System", "Light", "Dark", in the footer line.
+9. Highlight: cited span uses `--primary-soft` background and a 2 px `--primary` underline in both themes (no other colour).
+10. Mock: add `web/mock/streams/quote.sse` (a recorded-shape stream with an extractive event, reason `quote_requested`, 4 windows for s.172(1)(a) to (d) with real text, a receipt and done; copy the event shapes from `extractive.sse`) and route queries containing "quote" to it in `web/mock/plugin.ts`; update the mock keyword test if one covers routing.

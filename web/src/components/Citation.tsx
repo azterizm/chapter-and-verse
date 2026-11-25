@@ -1,36 +1,28 @@
-import type { MouseEvent } from "react";
 import type { RenderedCitation } from "../api/events";
-import { windowAnchor } from "../state/reducer";
-import { ExternalIcon } from "./ExternalIcon";
+import { citationChipLabel } from "../text";
+import { Chip } from "./ui/chip";
 
 interface Props {
   citation: RenderedCitation;
   turnId: number;
   onShow(turnId: number, passageId: string): void;
+  selected?: boolean | undefined;
+  showYear?: boolean | undefined;
 }
 
-/** A system-rendered citation: jumps to its window in the source panel, with a second link to legislation.gov.uk. */
-export function Citation({ citation, turnId, onShow }: Props) {
-  const anchor = windowAnchor(turnId, citation.passage_id);
-  const show = (e: MouseEvent<HTMLAnchorElement>) => {
-    e.preventDefault();
-    onShow(turnId, citation.passage_id);
-  };
+/** A system-rendered citation chip that jumps to its window in the sources. */
+export function Citation({ citation, turnId, onShow, selected, showYear = false }: Props) {
+  const shortLabel = citationChipLabel(citation.coordinate, citation.label, showYear);
   return (
-    <span className="cite">
-      <a className="cite-chip" href={`#${anchor}`} onClick={show} title={`Show ${citation.passage_id} in the sources`}>
-        {citation.label}
-      </a>
-      <a
-        className="cite-ext"
-        href={citation.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={`${citation.label} on legislation.gov.uk (opens in a new tab)`}
-        title="legislation.gov.uk"
-      >
-        <ExternalIcon />
-      </a>
-    </span>
+    <Chip
+      variant="citation"
+      selected={selected}
+      className="mx-1 align-baseline"
+      onClick={() => onShow(turnId, citation.passage_id)}
+      aria-label={citation.label}
+      title={citation.label}
+    >
+      {shortLabel}
+    </Chip>
   );
 }

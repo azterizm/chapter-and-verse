@@ -19,7 +19,9 @@ export type Scenario =
   | "refused"
   | "text-not-held"
   | "extractive"
+  | "quote"
   | "clarify"
+  | "clarify-tort"
   | "out-of-coverage"
   | "too-long"
   | "broken";
@@ -29,10 +31,12 @@ export function pickScenario(query: string): Scenario {
   const q = query.toLowerCase();
   if (Buffer.byteLength(query, "utf8") > MAX_QUERY_BYTES) return "too-long";
   if (q.includes("marchwood")) return "refused";
+  if (q.includes("quote")) return "quote";
   if (q.includes("429") || q.includes("extractive")) return "extractive";
   if (q.includes("invalid direction") || q.includes("1980/15") || q.includes("title only")) return "text-not-held";
   if (q.includes("violation")) return "broken";
   if (q.startsWith("uk/") && !q.startsWith("uk/ukpga/")) return "out-of-coverage";
+  if (q.includes("sue in tort") && !q.includes("(")) return "clarify-tort";
   if (q.includes("124") && !q.includes("1996")) return "clarify";
   return "answer";
 }

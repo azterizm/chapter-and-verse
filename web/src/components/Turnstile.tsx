@@ -1,4 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { getResolvedTheme, type ResolvedTheme } from "../lib/theme";
+import { cn } from "../lib/utils";
 
 // Cloudflare Turnstile, loaded only when VITE_TURNSTILE_SITE_KEY is set. The script comes from
 // challenges.cloudflare.com, which the CSP allows; nothing else is loaded from outside.
@@ -42,11 +44,24 @@ function loadTurnstile(): Promise<TurnstileApi> {
   return loading;
 }
 
+export const TURNSTILE_FLEXIBLE_MIN_WIDTH = 300;
+
+export type TurnstileSize = "compact" | "flexible";
+
+export function turnstileSize(containerWidth: number): TurnstileSize {
+  return containerWidth >= TURNSTILE_FLEXIBLE_MIN_WIDTH ? "flexible" : "compact";
+}
+
+function measureWidth(el: HTMLElement): number {
+  return el.getBoundingClientRect().width || el.clientWidth;
+}
+
 export interface TurnstileRenderOptions {
   sitekey: string;
   action: string;
   appearance: "always";
-  size?: "compact" | "flexible";
+  size: TurnstileSize;
+  theme: ResolvedTheme;
   callback: (token: string) => void;
   "expired-callback": () => void;
   "timeout-callback": () => void;
@@ -59,12 +74,15 @@ export function turnstileOptions(
   onToken: (token: string | null) => void,
   onError: (message: string) => void,
   onTimeout?: () => void,
+  containerWidth = 0,
+  theme: ResolvedTheme = getResolvedTheme(),
 ): TurnstileRenderOptions {
   return {
     sitekey: TURNSTILE_SITE_KEY,
     action: TURNSTILE_ACTION,
     appearance: "always",
-    size: "compact",
+    size: turnstileSize(containerWidth),
+    theme,
     callback: (token: string) => onToken(token),
     "expired-callback": () => onToken(null),
     "timeout-callback": () => {
@@ -207,6 +225,7 @@ interface Props {
 export function Turnstile({ resetKey, onToken, onError, onTimeout }: Props) {
   const el = useRef<HTMLDivElement>(null);
   const widget = useRef<string | null>(null);
+  const [size, setSize] = useState<TurnstileSize>("flexible");
   const handlers = useRef({ onToken, onError, onTimeout });
   useEffect(() => {
     handlers.current = { onToken, onError, onTimeout };
@@ -217,14 +236,15 @@ export function Turnstile({ resetKey, onToken, onError, onTimeout }: Props) {
     loadTurnstile().then(
       (ts) => {
         if (!live || !el.current) return;
-        widget.current = ts.render(
-          el.current,
-          turnstileOptions(
-            (token) => handlers.current.onToken(token),
-            (message) => handlers.current.onError(message),
-            () => handlers.current.onTimeout?.(),
-          ),
+        const opts = turnstileOptions(
+          (token) => handlers.current.onToken(token),
+          (message) => handlers.current.onError(message),
+          () => handlers.current.onTimeout?.(),
+          measureWidth(el.current),
+          getResolvedTheme(),
         );
+        setSize(opts.size);
+        widget.current = ts.render(el.current, opts);
       },
       () => live && handlers.current.onError("The bot check could not load. Reload the page."),
     );
@@ -244,5 +264,10 @@ export function Turnstile({ resetKey, onToken, onError, onTimeout }: Props) {
     }
   }, [resetKey]);
 
-  return <div className="turnstile" ref={el} />;
+  return (
+    <div
+      className={cn("mb-2 w-full", size === "compact" ? "min-h-[140px]" : "min-h-[65px]")}
+      ref={el}
+    />
+  );
 }
