@@ -22,8 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from chapterverse.contracts import ProviderCall  # noqa: E402
+from chapterverse.contracts import AllProvidersUnavailable, ProviderCall  # noqa: E402
 from chapterverse.providers import InMemoryLedger, ModalLimits  # noqa: E402
+from chapterverse.providers.openai_compat import ProviderWarming  # noqa: E402
 from eval import heldout_modal as hm  # noqa: E402
 from eval import judge_gate as jg  # noqa: E402
 
@@ -218,3 +219,236 @@ def test_dynamic_modal_adapter_reads_env_at_call_time(monkeypatch: pytest.Monkey
     monkeypatch.setenv("MODAL_URL", "https://modal.example.com/endpoint")
     assert adapter.base_url() == "https://modal.example.com/endpoint/v1"
     assert adapter.health_url() == "https://modal.example.com/endpoint/health"
+
+
+# ---------------------------------------------------------------------- R3: judge scope & dry run
+
+
+def test_dry_run_reports_costs_and_chars_per_scope_and_separates_out_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from legal_rag_verifier import judge as jm  # noqa: PLC0415
+    from legal_rag_verifier.premise import Passage, PassageKind, Premise  # noqa: PLC0415
+
+    p1 = Passage(
+        "Alpha 10.",
+        coordinate="uk/ukpga/2000/1/s1/1",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(1)",
+    )
+    p2 = Passage(
+        "Beta 20.",
+        coordinate="uk/ukpga/2000/1/s1/2",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(2)",
+    )
+    premise = Premise(passages=(p1, p2), enrichment=jg.HELDOUT_ENRICHMENT_ID)
+    rows = [
+        {
+            "id": "r1",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "Q?",
+            "sentence": "The figure is 10.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s1/1",
+            "premise": ["uk/ukpga/2000/1/s1"],
+        },
+        {
+            "id": "r2",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "Q?",
+            "sentence": "The figure is 20.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s99/1",
+            "premise": ["uk/ukpga/2000/1/s1"],
+        },
+    ]
+
+    class FakeOutcome:
+        def __init__(
+            self, row_id: str, cls: str, expected: str, verdict: str, reasons: Any
+        ) -> None:
+            self.row_id = row_id
+            self.cls = cls
+            self.expected = expected
+            self.verdict = verdict
+            self.reasons = reasons
+
+    fake_rb = SimpleNamespace(
+        load_rows=lambda _p: rows,
+        premises=SimpleNamespace(premise_key=lambda r: r["id"]),
+        premises_for=lambda rs, _d, _e: {r["id"]: premise for r in rs},
+        Outcome=FakeOutcome,
+    )
+    fake_v = SimpleNamespace(root=tmp_path, judge_mod=jm)
+    monkeypatch.setattr(hm, "load_verifier", lambda _root: fake_v)
+    monkeypatch.setattr(hm, "load_run_battery", lambda _root: fake_rb)
+    monkeypatch.setattr(hm, "check_seal", lambda _root: {"seal": "s", "sha256": "h", "rows": 2})
+
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "all"]) == 0
+    all_summary = json.loads(capsys.readouterr().out)
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "cited"]) == 0
+    cited_summary = json.loads(capsys.readouterr().out)
+
+    assert all_summary["judge_scope"] == "all"
+    assert cited_summary["judge_scope"] == "cited"
+    assert all_summary["judge_calls"] == cited_summary["judge_calls"] == 2
+    assert all_summary["estimated_usd"] == cited_summary["estimated_usd"]
+    assert cited_summary["judge_prompt_chars"] < all_summary["judge_prompt_chars"]
+    assert all_summary["cited_fallback"] == 0
+    assert cited_summary["cited_fallback"] == 1
+
+    # Scope 'cited' writes under out/cited/, while default 'all' keeps out/ unchanged.
+    seen_out: list[Path] = []
+    monkeypatch.setattr(
+        hm, "run_heldout", lambda *_a, **_kw: ([], [], [], {jg.HELDOUT_ENRICHMENT_ID}, [])
+    )
+    monkeypatch.setattr(
+        hm,
+        "DynamicModalAdapter",
+        lambda: SimpleNamespace(base_url=lambda: "", health_url=lambda: ""),
+    )
+    monkeypatch.setattr(
+        hm,
+        "OpenAICompatProvider",
+        lambda _a, ledger=None: SimpleNamespace(
+            model_id="m",
+            build_body=lambda _r: ({}, None),
+        ),
+    )
+    monkeypatch.setattr(hm, "ProviderRotation", lambda *_a, **_kw: SimpleNamespace())
+    monkeypatch.setattr(hm, "RotationJudgeChat", lambda *_a, **_kw: SimpleNamespace(model="m"))
+    monkeypatch.setattr(hm, "settings_sent", lambda _p: {})
+    monkeypatch.setattr(hm, "heldout_counts", lambda _rb, _o: {"summarise": {"headline": {}}})
+    monkeypatch.setattr(hm, "recorded_outcomes", lambda *_a: [])
+
+    def spy_gate_chat(**kw: Any) -> Any:
+        seen_out.append(kw["out"])
+        return SimpleNamespace(cache={}, waits=[])
+
+    monkeypatch.setattr(hm, "ModalGateChat", spy_gate_chat)
+    assert hm.main(["--out", str(tmp_path), "--method-commit", "abc"]) == 0
+    assert (
+        hm.main(["--out", str(tmp_path), "--method-commit", "abc", "--judge-scope", "cited"]) == 0
+    )
+    assert (
+        hm.main(["--out", str(tmp_path), "--method-commit", "abc", "--judge-scope", "section"]) == 0
+    )
+    assert seen_out == [tmp_path, tmp_path / "cited", tmp_path / "section"]
+
+
+def test_dry_run_section_scope_counts_differs_from_all_and_detector_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from legal_rag_verifier import judge as jm  # noqa: PLC0415
+    from legal_rag_verifier.premise import Passage, PassageKind, Premise  # noqa: PLC0415
+
+    assert hm.detector_name("all") == "qwen27-ar4-modal"
+    assert hm.detector_name("cited") == "qwen27-ar4-modal-cited"
+    assert hm.detector_name("section") == "qwen27-ar4-modal-section"
+
+    p1 = Passage(
+        "Alpha 10.",
+        coordinate="uk/ukpga/2000/1/s1/1",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(1)",
+    )
+    p2 = Passage(
+        "Sibling 15.",
+        coordinate="uk/ukpga/2000/1/s1/2",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(2)",
+    )
+    p3 = Passage(
+        "Other section 20.",
+        coordinate="uk/ukpga/2000/1/s2/1",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.2(1)",
+    )
+    premise = Premise(passages=(p1, p2, p3), enrichment=jg.HELDOUT_ENRICHMENT_ID)
+    rows = [
+        {
+            "id": "r1",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "Q?",
+            "sentence": "The figure is 10.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s1/1",
+            "premise": ["uk/ukpga/2000/1"],
+        },
+        {
+            "id": "r2",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "Q?",
+            "sentence": "The figure is 20.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s99/1",
+            "premise": ["uk/ukpga/2000/1"],
+        },
+    ]
+
+    class FakeOutcome:
+        def __init__(
+            self, row_id: str, cls: str, expected: str, verdict: str, reasons: Any
+        ) -> None:
+            self.row_id = row_id
+            self.cls = cls
+            self.expected = expected
+            self.verdict = verdict
+            self.reasons = reasons
+
+    fake_rb = SimpleNamespace(
+        load_rows=lambda _p: rows,
+        premises=SimpleNamespace(premise_key=lambda r: r["id"]),
+        premises_for=lambda rs, _d, _e: {r["id"]: premise for r in rs},
+        Outcome=FakeOutcome,
+    )
+    fake_v = SimpleNamespace(root=tmp_path, judge_mod=jm)
+    monkeypatch.setattr(hm, "load_verifier", lambda _root: fake_v)
+    monkeypatch.setattr(hm, "load_run_battery", lambda _root: fake_rb)
+    monkeypatch.setattr(hm, "check_seal", lambda _root: {"seal": "s", "sha256": "h", "rows": 2})
+
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "all"]) == 0
+    all_summary = json.loads(capsys.readouterr().out)
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "cited"]) == 0
+    cited_summary = json.loads(capsys.readouterr().out)
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "section"]) == 0
+    sec_summary = json.loads(capsys.readouterr().out)
+
+    assert sec_summary["detector"] == "qwen27-ar4-modal-section"
+    assert sec_summary["judge_scope"] == "section"
+    assert sec_summary["judge_calls"] == 2
+    assert sec_summary["cited_fallback"] == 1
+    assert sec_summary["rows_prompt_differs_from_all"] == 1
+    assert all_summary["rows_prompt_differs_from_all"] == 0
+    assert (
+        cited_summary["judge_prompt_chars"]
+        < sec_summary["judge_prompt_chars"]
+        < all_summary["judge_prompt_chars"]
+    )
+
+
+def test_warming_server_is_waited_for_not_a_failed_attempt(tmp_path: Path) -> None:
+    warming = AllProvidersUnavailable(
+        [ProviderWarming("modal", "warming: health probe did not answer")]
+    )
+    inner = FakeInner([warming, warming, SUPPORTED])
+    chat = _gate_chat(tmp_path, inner)
+    reply = chat(MSGS)
+    assert reply["content"] == SUPPORTED
+    assert inner.sent == 3
+    assert chat.slept == [hm.WARM_POLL_S, hm.WARM_POLL_S]  # type: ignore[attr-defined]
+
+
+def test_warming_past_max_wait_halts_the_run(tmp_path: Path) -> None:
+    warming = AllProvidersUnavailable(
+        [ProviderWarming("modal", "warming: health probe did not answer")]
+    )
+    inner = FakeInner([warming] * 5)
+    chat = _gate_chat(tmp_path, inner, max_wait_s=2 * hm.WARM_POLL_S)
+    with pytest.raises(jg.RunHalted):
+        chat(MSGS)

@@ -79,6 +79,23 @@ __all__ = [
 ]
 
 DETECTOR: Final = "qwen27-ar4-modal"
+WARM_POLL_S: Final = 10.0
+"""Seconds between resends while the Modal server warms (cold start measured at 406 s)."""
+DETECTOR_CITED: Final = "qwen27-ar4-modal-cited"
+"""The detector with the judge on the cited windows only (S5.1b): its own once-per-detector run."""
+DETECTOR_SECTION: Final = "qwen27-ar4-modal-section"
+"""The detector with the judge on the cited sections (S5.1b2): its own once-per-detector run."""
+
+
+def detector_name(scope: str) -> str:
+    """The detector name a run with ``scope`` reports and marks."""
+    if scope == "cited":
+        return DETECTOR_CITED
+    if scope == "section":
+        return DETECTOR_SECTION
+    return DETECTOR
+
+
 DEFAULT_MAX_USD: Final = 3.00
 LATENCY_P50_S: Final = 0.58
 _STANDARD_TURNS: Final = 2
@@ -318,6 +335,10 @@ class ModalGateChat:
             raise RunHalted(f"{self.provider}: dollar cap ${self.max_usd:.2f} reached")
         if detail == "circuit open" or kind in {"quota", "rate_limit"}:
             return max(POLL_S, float(retry or 0.0))
+        if detail.startswith("warming"):
+            # A cold Modal server is not a judge attempt: wait and resend the same call
+            # (bounded by max_wait_s), so no row is ever scored on a cold-start error.
+            return WARM_POLL_S
         raise AttemptFailed(f"{self.provider} {kind}")
 
 
@@ -367,39 +388,80 @@ def _resolve_layer_root(args: argparse.Namespace) -> Path:
     return Path(SEALED_LAYER)
 
 
+def _row_prompt_shas(calls: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
+    by_row: dict[str, list[str]] = {}
+    for c in calls:
+        by_row.setdefault(str(c["row"]), []).append(str(c["sha"]))
+    return by_row
+
+
+def _dry_run(
+    v: Any,
+    rb: Any,
+    seal: Mapping[str, Any],
+    *,
+    layer_root: Path,
+    max_usd: float,
+    scope: str,
+) -> int:
+    counter = _CountingChat()
+    stats: dict[str, int] = {}
+    _, _, calls, enrichment, _ = run_heldout(
+        v, rb, counter, layer_root=layer_root, judge_scope=scope, stats=stats
+    )
+    prompt_chars = sum(len(m["content"]) for msgs in counter.prompts for m in msgs)
+    differs_from_all = 0
+    if scope != "all":
+        all_counter = _CountingChat()
+        _, _, all_calls, _, _ = run_heldout(
+            v, rb, all_counter, layer_root=layer_root, judge_scope="all"
+        )
+        all_shas = _row_prompt_shas(all_calls)
+        scope_shas = _row_prompt_shas(calls)
+        differs_from_all = sum(
+            1
+            for row_id in set(all_shas) | set(scope_shas)
+            if all_shas.get(row_id) != scope_shas.get(row_id)
+        )
+    summary = {
+        **seal,
+        "detector": detector_name(scope),
+        "judge_scope": scope,
+        "judge_calls": len(calls),
+        "rows_with_a_call": len({c["row"] for c in calls}),
+        "to_modal": len(calls),
+        "enrichment": sorted(str(e) for e in enrichment),
+        "estimated_usd": estimate_modal_cost(len(calls)),
+        "max_usd": max_usd,
+        "judge_prompt_chars": prompt_chars,
+        "cited_fallback": stats.get("cited_fallback", 0),
+        "rows_prompt_differs_from_all": differs_from_all,
+    }
+    print(json.dumps(summary))
+    return 0
+
+
 def cmd_heldout(args: argparse.Namespace) -> int:
     v = load_verifier(args.verifier)
     rb = load_run_battery(args.verifier)
     seal = check_seal(args.verifier)
-    out: Path = args.out
+    scope = getattr(args, "judge_scope", "all")
     layer_root = _resolve_layer_root(args)
-
     if args.dry:
-        counter = _CountingChat()
-        _, _, calls, enrichment, _ = run_heldout(v, rb, counter, layer_root=layer_root)
-        est_usd = estimate_modal_cost(len(calls))
-        summary = {
-            **seal,
-            "detector": DETECTOR,
-            "judge_calls": len(calls),
-            "rows_with_a_call": len({c["row"] for c in calls}),
-            "to_modal": len(calls),
-            "enrichment": sorted(str(e) for e in enrichment),
-            "estimated_usd": est_usd,
-            "max_usd": args.max_usd,
-        }
-        print(json.dumps(summary))
-        return 0
+        return _dry_run(v, rb, seal, layer_root=layer_root, max_usd=args.max_usd, scope=scope)
+
+    out: Path = args.out if scope == "all" else args.out / scope
+    stats: dict[str, int] = {}
 
     if not args.method_commit:
         raise SystemExit("a live held-out run needs --method-commit (the committed method)")
 
     out.mkdir(parents=True, exist_ok=True)
-    done = out / f"{seal['seal']}-{DETECTOR}.done"
+    done = out / f"{seal['seal']}-{detector_name(scope)}.done"
     if done.exists():
-        raise SystemExit(f"{seal['seal']} has already run with {DETECTOR} ({done})")
+        raise SystemExit(f"{seal['seal']} has already run with {detector_name(scope)} ({done})")
 
-    started = out / f"{seal['seal']}-{DETECTOR}.started"
+    started = out / f"{seal['seal']}-{detector_name(scope)}.started"
     if not started.exists():
         _write_json(
             started,
@@ -439,7 +501,9 @@ def cmd_heldout(args: argparse.Namespace) -> int:
     day = _utc_day()
 
     try:
-        outcomes, raw, calls, enrichment, _ = run_heldout(v, rb, chat, layer_root=layer_root)
+        outcomes, raw, calls, enrichment, _ = run_heldout(
+            v, rb, chat, layer_root=layer_root, judge_scope=scope, stats=stats
+        )
     except RunHalted as exc:
         state = {
             "complete": False,
@@ -459,7 +523,7 @@ def cmd_heldout(args: argparse.Namespace) -> int:
     session_usd = float(ledger.snapshot()["modal"]["usd_session"])
     summary = {
         **seal,
-        "detector": DETECTOR,
+        "detector": detector_name(scope),
         "method_commit": args.method_commit,
         "model_id": provider_obj.model_id,
         "settings_sent": settings,
@@ -480,6 +544,11 @@ def cmd_heldout(args: argparse.Namespace) -> int:
             "estimated_usd": round(session_usd, 4),
             "max_usd": args.max_usd,
         },
+        **(
+            {"judge_scope": scope, "cited_fallback": stats.get("cited_fallback", 0)}
+            if scope != "all"
+            else {}
+        ),
     }
     with (out / "raw.jsonl").open("w", encoding="utf-8") as f:
         for r in raw:
@@ -504,6 +573,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--max-usd", type=float, default=DEFAULT_MAX_USD, help="Modal cost ceiling in USD"
     )
+    parser.add_argument("--judge-scope", choices=["all", "cited", "section"], default="all")
     parser.add_argument("cmd", nargs="?", default=None, help="optional subcommand")
     args = parser.parse_args(argv)
     return cmd_heldout(args)

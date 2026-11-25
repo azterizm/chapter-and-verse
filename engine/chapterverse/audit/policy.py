@@ -16,25 +16,49 @@ from legal_rag_verifier.verifier import VerifierConfig
 from chapterverse.audit.prompt import ABSTAIN_TEXT, PROMPT_SHA256
 from chapterverse.contracts import Policy
 
-__all__ = ["ABSTAIN_TEXT", "VERIFIER_CONFIGS", "build_policy", "verifier_config"]
+__all__ = [
+    "ABSTAIN_TEXT",
+    "ALL_PASSAGES_CONFIG",
+    "CITED_PASSAGES_CONFIG",
+    "SECTION_PASSAGES_CONFIG",
+    "VERIFIER_CONFIGS",
+    "build_policy",
+    "verifier_config",
+]
 
-VERIFIER_CONFIGS: Final[dict[str, VerifierConfig]] = {"STRICT_FIGURES": STRICT_FIGURES}
-"""Verifier configs a policy may name. Only the measured one."""
+ALL_PASSAGES_CONFIG: Final = "STRICT_FIGURES"
+CITED_PASSAGES_CONFIG: Final = "STRICT_FIGURES+CITED_JUDGE"
+SECTION_PASSAGES_CONFIG: Final = "STRICT_FIGURES+SECTION_JUDGE"
+
+VERIFIER_CONFIGS: Final[dict[str, VerifierConfig]] = {
+    ALL_PASSAGES_CONFIG: STRICT_FIGURES,
+    CITED_PASSAGES_CONFIG: STRICT_FIGURES,
+    SECTION_PASSAGES_CONFIG: STRICT_FIGURES,
+}
+"""Verifier configs a policy may name. All use ``STRICT_FIGURES``; the second restricts the judge
+to cited passages and the third to all passages of the cited sections."""
 
 
-def build_policy(judge_preset: str) -> Policy:
+def build_policy(
+    judge_preset: str,
+    *,
+    verifier_config_name: str = ALL_PASSAGES_CONFIG,
+) -> Policy:
     """The policy for an answer judged with ``judge_preset`` under the current prompt.
 
     Raises:
-        ValueError: ``judge_preset`` is empty.
+        ValueError: ``judge_preset`` is empty or ``verifier_config_name`` is unknown.
     """
     if not judge_preset.strip():
         raise ValueError("judge_preset must name a judge preset")
+    if verifier_config_name not in VERIFIER_CONFIGS:
+        raise ValueError(f"unknown verifier config {verifier_config_name!r}")
 
     return Policy(
         judge_preset=judge_preset,
         prompt_sha256=PROMPT_SHA256,
         refusal_text=ABSTAIN_TEXT,
+        verifier_config_name=verifier_config_name,
     )
 
 

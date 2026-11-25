@@ -395,3 +395,158 @@ def test_prefetch_pass_skips_rows_for_the_other_provider() -> None:
     judge = Judge(router, reply="short")
     with pytest.raises(jg.SkipRow):
         judge.score(["p"], "x" * 30_000)
+
+
+# ---------------------------------------------------------------------------- R3: judge scope
+
+
+def test_fresh2_run_and_replay_reject_cited_and_section_scopes(tmp_path: Path) -> None:
+    for scope in ("cited", "section"):
+        with pytest.raises(SystemExit, match="fresh2"):
+            jg.main(["--out", str(tmp_path), "run", "--provider", "groq", "--judge-scope", scope])
+        with pytest.raises(SystemExit, match="fresh2"):
+            jg.main(["--out", str(tmp_path), "--judge-scope", scope, "replay"])
+
+
+def test_cited_windows_rule_matches_equal_ancestor_and_descendant_only() -> None:
+    from legal_rag_verifier.premise import Passage, PassageKind, Premise  # noqa: PLC0415
+
+    premise = Premise(
+        passages=(
+            Passage("Section stem", coordinate="uk/ukpga/2006/46/s465", kind=PassageKind.PROVISION),
+            Passage("Sub 3", coordinate="uk/ukpga/2006/46/s465/3", kind=PassageKind.PROVISION),
+            Passage("Sub 3a", coordinate="uk/ukpga/2006/46/s465/3/a", kind=PassageKind.PROVISION),
+            Passage("Sub 30", coordinate="uk/ukpga/2006/46/s465/30", kind=PassageKind.PROVISION),
+            Passage("Other s46", coordinate="uk/ukpga/2006/46/s46", kind=PassageKind.PROVISION),
+            Passage("Fact", coordinate=None, kind=PassageKind.FACT),
+        )
+    )
+    assert jg.cited_windows_for_coordinate(premise, "uk/ukpga/2006/46/s465/3") == (0, 1, 2)
+    assert jg.cited_windows_for_coordinate(premise, "uk/ukpga/2006/46/s999") == ()
+    assert jg.cited_windows_for_coordinate(premise, None) == ()
+
+
+def test_section_windows_rule_matches_entire_section_only() -> None:
+    from legal_rag_verifier.premise import Passage, PassageKind, Premise  # noqa: PLC0415
+
+    premise = Premise(
+        passages=(
+            Passage("Section stem", coordinate="uk/ukpga/2006/46/s465", kind=PassageKind.PROVISION),
+            Passage("Sub 3", coordinate="uk/ukpga/2006/46/s465/3", kind=PassageKind.PROVISION),
+            Passage("Sub 30", coordinate="uk/ukpga/2006/46/s465/30", kind=PassageKind.PROVISION),
+            Passage("Other s46", coordinate="uk/ukpga/2006/46/s46", kind=PassageKind.PROVISION),
+            Passage("Fact", coordinate=None, kind=PassageKind.FACT),
+        )
+    )
+    assert jg.section_windows_for_coordinate(premise, "uk/ukpga/2006/46/s465/3") == (0, 1, 2)
+    assert jg.section_windows_for_coordinate(premise, "uk/ukpga/2006/46/s999") == ()
+    assert jg.section_windows_for_coordinate(premise, None) == ()
+
+
+def test_run_heldout_cited_scope_and_fallback(tmp_path: Path) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from legal_rag_verifier import judge as jm  # noqa: PLC0415
+    from legal_rag_verifier.premise import Passage, PassageKind, Premise  # noqa: PLC0415
+
+    p_anc = Passage(
+        "Section 1", coordinate="uk/ukpga/2000/1/s1", kind=PassageKind.PROVISION, heading="Act, s.1"
+    )
+    p_sub = Passage(
+        "Subsection (2) limit is 5.",
+        coordinate="uk/ukpga/2000/1/s1/2",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(2)",
+    )
+    p_desc = Passage(
+        "Paragraph (a) extra.",
+        coordinate="uk/ukpga/2000/1/s1/2/a",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(2)(a)",
+    )
+    p_other = Passage(
+        "Subsection (3) unrelated.",
+        coordinate="uk/ukpga/2000/1/s1/3",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(3)",
+    )
+    premise = Premise(
+        passages=(p_anc, p_sub, p_desc, p_other),
+        enrichment=jg.HELDOUT_ENRICHMENT_ID,
+    )
+    rows = [
+        {
+            "id": "r-match",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "What is the limit?",
+            "sentence": "The limit is five.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s1/2",
+            "premise": ["uk/ukpga/2000/1/s1"],
+        },
+        {
+            "id": "r-miss",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "What is the limit?",
+            "sentence": "The limit is five.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s99/1",
+            "premise": ["uk/ukpga/2000/1/s1"],
+        },
+    ]
+
+    class FakeOutcome:
+        def __init__(
+            self, row_id: str, cls: str, expected: str, verdict: str, reasons: Any
+        ) -> None:
+            self.row_id = row_id
+            self.cls = cls
+            self.expected = expected
+            self.verdict = verdict
+            self.reasons = reasons
+
+    fake_rb = SimpleNamespace(
+        load_rows=lambda _p: rows,
+        premises=SimpleNamespace(premise_key=lambda r: r["id"]),
+        premises_for=lambda rs, _d, _e: {r["id"]: premise for r in rs},
+        Outcome=FakeOutcome,
+    )
+    fake_v = SimpleNamespace(root=tmp_path, judge_mod=jm)
+
+    class SpyChat:
+        model = "spy"
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def __call__(self, messages: list[dict[str, str]], /) -> dict[str, Any]:
+            self.prompts.append(messages[1]["content"])
+            return {"content": SUPPORTED, "ms": 1.0, "tokens": 1, "finish": "stop"}
+
+    spy_all = SpyChat()
+    stats_all: dict[str, int] = {}
+    jg.run_heldout(fake_v, fake_rb, spy_all, judge_scope="all", stats=stats_all)
+    assert stats_all["cited_fallback"] == 0
+    assert "[4]" in spy_all.prompts[0]
+
+    spy_cited = SpyChat()
+    stats_cited: dict[str, int] = {}
+    jg.run_heldout(fake_v, fake_rb, spy_cited, judge_scope="cited", stats=stats_cited)
+    assert stats_cited["cited_fallback"] == 1
+    # First row matched ancestor (0), equal (1), descendant (2) -> 3 passages, no [4] / s.1(3)
+    assert "[3]" in spy_cited.prompts[0]
+    assert "[4]" not in spy_cited.prompts[0]
+    assert "unrelated" not in spy_cited.prompts[0]
+    # Second row matched nothing -> fallback to all 4 passages
+    assert "[4]" in spy_cited.prompts[1]
+    assert "unrelated" in spy_cited.prompts[1]
+
+    spy_section = SpyChat()
+    stats_section: dict[str, int] = {}
+    jg.run_heldout(fake_v, fake_rb, spy_section, judge_scope="section", stats=stats_section)
+    assert stats_section["cited_fallback"] == 1
+    # First row matches the whole s1 section (all 4 passages, including sibling s.1(3))
+    assert "[4]" in spy_section.prompts[0]
+    assert "unrelated" in spy_section.prompts[0]
+    # Second row matched nothing -> fallback to all 4 passages
+    assert "[4]" in spy_section.prompts[1]

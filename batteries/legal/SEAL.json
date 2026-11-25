@@ -1,11 +1,26 @@
 {
-  "sha256": "0bfaa91bed26ba487541106db92f527e6999855add826b2ffef96f723c81049f",
+  "sha256": "44e0707636c68d2e238e49d7807b30c7bd9a9db5a377f2dca2528d2f145fec6d",
+  "runs": 1,
   "row_counts": {
-    "dev": 20,
-    "test": 20
+    "dev": 40,
+    "test": 40
   },
   "splits": {
-    "dev": 20,
-    "test": 20
+    "dev": 40,
+    "test": 40
+  },
+  "history": [
+    {
+      "sha256": "0bfaa91bed26ba487541106db92f527e6999855add826b2ffef96f723c81049f",
+      "rows": "L02..L40 even",
+      "sealed": "2026-11-24",
+      "runs": 1
+    }
+  ],
+  "last_run": {
+    "date": "2026-11-25",
+    "commit": "0f0522d",
+    "rows_passed": "38/40",
+    "must_reach_recall": "0.947 (36/38)"
   }
 }

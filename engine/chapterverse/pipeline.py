@@ -112,6 +112,7 @@ from chapterverse.contracts import (
 from chapterverse.dense.colbert import ColbertScorer
 from chapterverse.dense.retriever import DenseRetriever
 from chapterverse.discovery import (
+    ClarifyPrior,
     NoEvidence,
     Suggest,
     check_out_of_scope,
@@ -717,6 +718,7 @@ class Pipeline:
         dense: DenseRetriever | None = None,
         colbert: ColbertScorer | None = None,
         bound_ranker: InstrumentRanges | None = None,
+        clarify_prior: ClarifyPrior | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -726,6 +728,7 @@ class Pipeline:
         self.modal_kv = modal_kv
         self.dense = dense
         self.colbert = colbert
+        self.clarify_prior = clarify_prior
         if bound_ranker is None:
             concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
             if concepts is not None:
@@ -891,7 +894,12 @@ class Pipeline:
             return
 
         outcome = discover_step(
-            self.router, cleaned, dense=self.dense, colbert=self.colbert, store=self.store
+            self.router,
+            cleaned,
+            dense=self.dense,
+            colbert=self.colbert,
+            store=self.store,
+            prior=self.clarify_prior,
         )
         if isinstance(outcome, RefusalEvent):  # out_of_scope
             stream(outcome)
@@ -934,7 +942,12 @@ class Pipeline:
             return
 
         outcome = discover_step(
-            self.router, norm_text, dense=self.dense, colbert=self.colbert, store=self.store
+            self.router,
+            norm_text,
+            dense=self.dense,
+            colbert=self.colbert,
+            store=self.store,
+            prior=self.clarify_prior,
         )
         if isinstance(outcome, RefusalEvent):  # out_of_scope
             stream(outcome)

@@ -22,6 +22,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   // The mock answers /api/* unless CV_MOCK=0 or the app points at another API origin.
   const useMock = env.CV_MOCK !== "0" && !env.VITE_API_BASE;
+  const engineTarget = env.CV_ENGINE?.trim() || "http://127.0.0.1:8000";
   return {
     plugins: [tailwindcss(), react(), ...(useMock ? [mockApi()] : [])],
     resolve: {
@@ -29,6 +30,18 @@ export default defineConfig(({ mode }) => {
         "@": fileURLToPath(new URL("./src", import.meta.url)),
       },
     },
+    ...(!useMock && !env.VITE_API_BASE
+      ? {
+          server: {
+            proxy: {
+              "/api": {
+                target: engineTarget,
+                changeOrigin: true,
+              },
+            },
+          },
+        }
+      : {}),
     build: {
       target: "es2022",
       modulePreload: { polyfill: false },

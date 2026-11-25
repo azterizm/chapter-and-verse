@@ -60,6 +60,7 @@ Extra environment variables (``config.Settings`` holds the shared ones):
 ``MODAL_MASK_PROCESSOR``    Path of ``mask_processor.txt`` (deploy/README.md 3.5)       unset
 ``MODAL_TOKENIZER_JSON``    Path of the pinned revision's ``tokenizer.json``;            unset
                             unset: downloaded once from Hugging Face at the revision
+``CLARIFY_PRIOR_PATH``      Path of ``clarify_prior.json`` (off when unset)            unset
 ``LOG_LEVEL``               Python log level for ``chapterverse``                       INFO
 ==========================  ========================================================  =======
 """
@@ -109,6 +110,7 @@ from chapterverse.dense.colbert import ColbertScorer
 from chapterverse.dense.embed import load_model
 from chapterverse.dense.retriever import DenseRetriever
 from chapterverse.dense.store import BinaryInt8Store
+from chapterverse.discovery import ClarifyPrior, load_clarify_prior
 from chapterverse.nlp import get_nlp
 from chapterverse.normalise import load_dictionary
 from chapterverse.persistence import ReceiptStore, open_persistence
@@ -711,6 +713,29 @@ def _init_dense_retriever(
     return retriever
 
 
+def _load_clarify_prior(env: Mapping[str, str], *, router_snapshot: str) -> ClarifyPrior | None:
+    raw = _env(env, "CLARIFY_PRIOR_PATH")
+    if raw is None:
+        log.info("clarify prior off: CLARIFY_PRIOR_PATH unset")
+        return None
+    path = Path(raw)
+    if not path.is_file():
+        log.info("clarify prior off: %s absent", path)
+        return None
+    prior = load_clarify_prior(path, router_snapshot=router_snapshot)
+    if prior is None:
+        log.info("clarify prior off: %s invalid or snapshot mismatch", path)
+        return None
+    log.info(
+        "clarify prior on: %s (%d sections, %d instruments, snapshot %s)",
+        path,
+        len(prior.sections),
+        len(prior.instruments),
+        prior.snapshot,
+    )
+    return prior
+
+
 def _init_colbert_scorer(
     env: Mapping[str, str],
 ) -> ColbertScorer | None:
@@ -791,6 +816,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
 
     dense_retriever = _init_dense_retriever(env, store, router, preloaded=dense_preload)
     colbert_scorer = _init_colbert_scorer(env)
+    clarify_prior = _load_clarify_prior(env, router_snapshot=router.index.snapshot)
 
     pipeline = Pipeline(
         router=router,
@@ -807,6 +833,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         dense=dense_retriever,
         colbert=colbert_scorer,
         bound_ranker=bound_ranker,
+        clarify_prior=clarify_prior,
     )
     limiter = TokenBucket(
         per_minute=_env_number(env, "RATE_LIMIT_PER_MINUTE", 10.0),

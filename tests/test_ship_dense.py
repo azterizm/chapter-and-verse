@@ -153,6 +153,28 @@ def _prepare_test_data_dir(
     files_manifest = {"files": dict(sorted(files_dict.items()))}
     (models_dir / "models-files-manifest.json").write_bytes(canonical_json(files_manifest))
 
+    clarify_dir = data_dir / "clarify"
+    clarify_dir.mkdir()
+    prior_bytes = canonical_json(
+        {
+            "format_version": 1,
+            "snapshot": store.snapshot,
+            "sections": {},
+            "instruments": {},
+        }
+    )
+    (clarify_dir / "clarify_prior.json").write_bytes(prior_bytes)
+    clarify_manifest = {
+        "snapshot": store.snapshot,
+        "files": {
+            "clarify_prior.json": {
+                "sha256": hashlib.sha256(prior_bytes).hexdigest(),
+                "size": len(prior_bytes),
+            }
+        },
+    }
+    (clarify_dir / "clarify-manifest.json").write_bytes(canonical_json(clarify_manifest))
+
     return doc_count, dense_dir, models_dir, vecs_file
 
 

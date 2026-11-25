@@ -755,6 +755,13 @@ def _summary(  # noqa: PLR0917 - one internal call site
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    scope = getattr(args, "judge_scope", "all")
+    if scope != "all":
+        raise SystemExit(
+            f"judge_gate run --judge-scope {scope} is not supported: fresh2 units carry no "
+            "excerpt coordinate (unit fields: domain, id, key, mode, parts, prefix, query, "
+            f"sentence). Use heldout --judge-scope {scope}."
+        )
     provider: str = args.provider
     out: Path = args.out / provider
     out.mkdir(parents=True, exist_ok=True)
@@ -849,6 +856,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_replay(args: argparse.Namespace) -> int:
     """Stop 78's labels through the same runner and counting: must give stop 78's cells."""
+    scope = getattr(args, "judge_scope", "all")
+    if scope != "all":
+        raise SystemExit(
+            f"judge_gate replay --judge-scope {scope} is not supported: fresh2 units carry no "
+            "excerpt coordinate (unit fields: domain, id, key, mode, parts, prefix, query, "
+            f"sentence). Use heldout --judge-scope {scope}."
+        )
     v = load_verifier(args.verifier)
     calls78 = _read_jsonl(v.root / REFERENCE_CALLS)
     chat = ReplayChat(calls78, v.judge_mod.prompt_key)
@@ -920,6 +934,16 @@ class SkipRow(Exception):  # noqa: N818 - control flow, not caught by Judge
     """A prefetch pass for one provider met a call routed to the other: skip this row."""
 
 
+def _method_estimate(messages: Sequence[Mapping[str, str]]) -> int:
+    """The prompt estimate option 2 fixed (method a491e8d): ceil(chars * 1.5 / 4) + 4 a message.
+
+    Frozen here so the method's routing does not move with the ledger's margin (1.2 from
+    25 Nov 2026).
+    """
+    chars = sum(len(m["content"]) for m in messages)
+    return math.ceil(chars * 1.5 / 4) + 4 * len(messages)
+
+
 def heldout_route(messages: Sequence[Mapping[str, str]]) -> str:
     """Option 2's fixed rule: Cloudflare when the ledger's estimate of the call's first prompt
     (system and user turn) plus ``max_tokens`` exceeds Groq's 8,000 tokens a minute, else Groq.
@@ -927,12 +951,9 @@ def heldout_route(messages: Sequence[Mapping[str, str]]) -> str:
     Decided from the prompt alone, before any call; a retry of a call (its first two messages
     unchanged) goes where the call went. Never from live outcomes.
     """
-    from chapterverse.contracts import ChatMessage  # noqa: PLC0415
-    from chapterverse.providers import estimate_tokens  # noqa: PLC0415
     from chapterverse.providers.presets import JUDGE_PRESET  # noqa: PLC0415
 
-    first = [ChatMessage(role=m["role"], content=m["content"]) for m in messages[:2]]  # type: ignore[typeddict-item]
-    need = estimate_tokens(first) + int(JUDGE_PRESET.sampling["max_tokens"])
+    need = _method_estimate(messages[:2]) + int(JUDGE_PRESET.sampling["max_tokens"])
     return "cloudflare" if need > GROQ_TPM else "groq"
 
 
@@ -961,6 +982,36 @@ class SizeRouter:
         return self.chats[provider](messages)
 
 
+def cited_windows_for_coordinate(premise: Any, excerpt_coordinate: str | None) -> tuple[int, ...]:
+    """Passage positions matching ``excerpt_coordinate`` (equal, ancestor, or descendant)."""
+    if not excerpt_coordinate:
+        return ()
+    return tuple(
+        i
+        for i, p in enumerate(premise.passages)
+        if p.coordinate is not None
+        and (
+            p.coordinate == excerpt_coordinate
+            or p.coordinate.startswith(excerpt_coordinate + "/")
+            or excerpt_coordinate.startswith(p.coordinate + "/")
+        )
+    )
+
+
+def section_windows_for_coordinate(premise: Any, excerpt_coordinate: str | None) -> tuple[int, ...]:
+    """Passage positions whose section equals the section of ``excerpt_coordinate``."""
+    if not excerpt_coordinate:
+        return ()
+    from chapterverse.sections import section_coordinate  # noqa: PLC0415
+
+    target = section_coordinate(excerpt_coordinate)
+    return tuple(
+        i
+        for i, p in enumerate(premise.passages)
+        if p.coordinate is not None and section_coordinate(p.coordinate) == target
+    )
+
+
 def run_heldout(
     v: Verifier78,
     rb: ModuleType,
@@ -968,12 +1019,19 @@ def run_heldout(
     layer_root: Path = SEALED_LAYER,
     *,
     skip_ok: bool = False,
+    judge_scope: str = "all",
+    stats: dict[str, int] | None = None,
 ) -> tuple[list[Any], list[dict[str, Any]], list[dict[str, Any]], set[str | None], list[str]]:
     """``run_battery.run`` with ``JudgedVerifier`` as the verifier, reset before every row.
 
     Each row is one sentence with no answer before it, so the judge's prefix is empty.
     ``skip_ok``: a row whose call raises :class:`SkipRow` is listed and skipped.
     """
+    if judge_scope not in {"all", "cited", "section"}:
+        raise ValueError(f"unknown judge scope {judge_scope!r}")
+    if judge_scope != "all":
+        from chapterverse.audit.verify import cited_nli_scorer  # noqa: PLC0415
+
     jm = v.judge_mod
     rows = rb.load_rows(v.root / HELDOUT_BATTERY)
     built = rb.premises_for(rows, v.root / "data", layer_root / HELDOUT_ENRICHMENT)
@@ -989,17 +1047,32 @@ def run_heldout(
     raw: list[dict[str, Any]] = []
     calls: list[dict[str, Any]] = []
     skipped: list[str] = []
+    fallback_count = 0
     for row in rows:
         verifier.reset()
-        try:
-            verdict = verifier.check_sentence(
-                built[rb.premises.premise_key(row)], row["sentence"], query=row["query"]
+        premise = built[rb.premises.premise_key(row)]
+        if judge_scope != "all":
+            selector = (
+                cited_windows_for_coordinate
+                if judge_scope == "cited"
+                else section_windows_for_coordinate
             )
+            kept = selector(premise, row.get("excerpt_coordinate"))
+            if not kept:
+                fallback_count += 1
+            else:
+                verifier.nli = cited_nli_scorer(
+                    judge, premise, row["sentence"], kept, query=row["query"]
+                )
+        try:
+            verdict = verifier.check_sentence(premise, row["sentence"], query=row["query"])
         except SkipRow:
             if not skip_ok:
                 raise
             skipped.append(row["id"])
             continue
+        finally:
+            verifier.nli = judge
         outcomes.append(
             rb.Outcome(
                 row["id"],
@@ -1011,6 +1084,8 @@ def run_heldout(
         )
         raw.append({"id": row["id"], **verdict.to_dict()})
         calls.extend({**c, "row": row["id"]} for c in verifier.calls)
+    if stats is not None:
+        stats["cited_fallback"] = fallback_count
     return outcomes, raw, calls, enrichment, skipped
 
 
@@ -1112,11 +1187,13 @@ def cmd_heldout(args: argparse.Namespace) -> int:  # noqa: PLR0915 - one linear 
     v = load_verifier(args.verifier)
     rb = load_run_battery(args.verifier)
     seal = check_seal(args.verifier)
-    out: Path = args.out / "heldout"
+    scope = getattr(args, "judge_scope", "all")
+    out: Path = args.out / "heldout" if scope == "all" else args.out / "heldout" / scope
+    stats: dict[str, int] = {}
     if args.dry:
         counter = _CountingChat()
         router = SizeRouter({"groq": counter, "cloudflare": counter}, v.judge_mod.prompt_key)
-        _, _, calls, enrichment, _ = run_heldout(v, rb, router)
+        _, _, calls, enrichment, _ = run_heldout(v, rb, router, judge_scope=scope, stats=stats)
         oversized = [
             {"row": c["row"], "call_sha": c["sha"]}
             for c in calls
@@ -1124,19 +1201,19 @@ def cmd_heldout(args: argparse.Namespace) -> int:  # noqa: PLR0915 - one linear 
         ]
         if args.list_oversized is not None:
             _write_json(args.list_oversized, oversized)
-        print(
-            json.dumps(
-                {
-                    **seal,
-                    "judge_calls": len(calls),
-                    "rows_with_a_call": len({c["row"] for c in calls}),
-                    "to_groq": sum(1 for c in calls if router.used[c["sha"]] == "groq"),
-                    "to_cloudflare": len(oversized),
-                    "rows_with_a_cloudflare_call": len({o["row"] for o in oversized}),
-                    "enrichment": sorted(str(e) for e in enrichment),
-                }
-            )
-        )
+        dry_out: dict[str, Any] = {
+            **seal,
+            "judge_calls": len(calls),
+            "rows_with_a_call": len({c["row"] for c in calls}),
+            "to_groq": sum(1 for c in calls if router.used[c["sha"]] == "groq"),
+            "to_cloudflare": len(oversized),
+            "rows_with_a_cloudflare_call": len({o["row"] for o in oversized}),
+            "enrichment": sorted(str(e) for e in enrichment),
+        }
+        if scope != "all":
+            dry_out["judge_scope"] = scope
+            dry_out["cited_fallback"] = stats.get("cited_fallback", 0)
+        print(json.dumps(dry_out))
         return 0
     if not args.method_commit:
         raise SystemExit("a live held-out run needs --method-commit (the committed method)")
@@ -1184,7 +1261,7 @@ def cmd_heldout(args: argparse.Namespace) -> int:  # noqa: PLR0915 - one linear 
     settings = {"groq": settings_sent(g_obj), "cloudflare": settings_sent(c_obj)}
     try:
         outcomes, raw, calls, enrichment, skipped = run_heldout(
-            v, rb, router, skip_ok=args.only is not None
+            v, rb, router, skip_ok=args.only is not None, judge_scope=scope, stats=stats
         )
     except RunHalted as exc:
         state = {
@@ -1243,6 +1320,11 @@ def cmd_heldout(args: argparse.Namespace) -> int:  # noqa: PLR0915 - one linear 
             "groq": _request_stats(out / "groq", "groq"),
             "cloudflare": _request_stats(out / "cloudflare", "cloudflare"),
         },
+        **(
+            {"judge_scope": scope, "cited_fallback": stats.get("cited_fallback", 0)}
+            if scope != "all"
+            else {}
+        ),
     }
     with (out / "raw.jsonl").open("w", encoding="utf-8") as f:
         for r in raw:
@@ -1260,17 +1342,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--verifier", type=Path, default=VERIFIER_ROOT)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--judge-scope", choices=["all", "cited", "section"], default="all")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("replay")
+    rep = sub.add_parser("replay")
+    rep.add_argument(
+        "--judge-scope", choices=["all", "cited", "section"], default=argparse.SUPPRESS
+    )
     run = sub.add_parser("run")
     run.add_argument("--provider", choices=["groq", "cloudflare"], required=True)
     run.add_argument("--max-requests", type=int, default=GROQ_REQUEST_CAP)
     run.add_argument("--budget", type=float, default=CLOUDFLARE_NEURONS)
+    run.add_argument(
+        "--judge-scope", choices=["all", "cited", "section"], default=argparse.SUPPRESS
+    )
     held = sub.add_parser("heldout")
     held.add_argument("--dry", action="store_true", help="count calls offline; send nothing")
     held.add_argument("--method-commit", default="", help="commit of the pre-registered method")
     held.add_argument("--only", choices=["groq", "cloudflare"], default=None)
     held.add_argument("--list-oversized", type=Path, default=None, help="--dry: write the list")
+    held.add_argument(
+        "--judge-scope", choices=["all", "cited", "section"], default=argparse.SUPPRESS
+    )
     args = parser.parse_args(argv)
     if args.cmd == "replay":
         return cmd_replay(args)

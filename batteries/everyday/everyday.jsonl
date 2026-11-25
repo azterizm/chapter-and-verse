@@ -1,0 +1,20 @@
+{"id": "E01", "question": "How long do I have to sue in tort?", "gold": ["uk/ukpga/1980/58/s2"], "split": "dev"}
+{"id": "E02", "question": "How long do I have to sue for breach of contract?", "gold": ["uk/ukpga/1980/58/s5"], "split": "dev"}
+{"id": "E03", "question": "What is the time limit for a personal injury claim?", "gold": ["uk/ukpga/1980/58/s11"], "split": "dev"}
+{"id": "E04", "question": "How much paid holiday am I entitled to?", "gold": ["uk/uksi/1998/1833/reg13", "uk/uksi/1998/1833/reg13A"], "split": "dev"}
+{"id": "E05", "question": "How long do I need to work before I can claim unfair dismissal?", "gold": ["uk/ukpga/1996/18/s108"], "split": "dev"}
+{"id": "E06", "question": "How much notice must my employer give me?", "gold": ["uk/ukpga/1996/18/s86"], "split": "dev"}
+{"id": "E07", "question": "Can I reject faulty goods and get my money back?", "gold": ["uk/ukpga/2015/15/s20", "uk/ukpga/2015/15/s22"], "split": "dev"}
+{"id": "E08", "question": "How long do I have to cancel an online order?", "gold": ["uk/uksi/2013/3134/reg29", "uk/uksi/2013/3134/reg30"], "split": "dev"}
+{"id": "E09", "question": "Does my landlord have to protect my deposit?", "gold": ["uk/ukpga/2004/34/s213"], "split": "dev"}
+{"id": "E10", "question": "What repairs is my landlord responsible for?", "gold": ["uk/ukpga/1985/70/s11"], "split": "dev"}
+{"id": "E11", "question": "What is the legal definition of theft?", "gold": ["uk/ukpga/1968/60/s1"], "split": "dev"}
+{"id": "E12", "question": "What duty of care does an occupier owe to visitors?", "gold": ["uk/ukpga/Eliz2/5-6/31/s2"], "split": "dev"}
+{"id": "E13", "question": "What is a director's duty to promote the success of the company?", "gold": ["uk/ukpga/2006/46/s172"], "split": "dev"}
+{"id": "E14", "question": "Can a business exclude liability for negligence?", "gold": ["uk/ukpga/1977/50/s2", "uk/ukpga/2015/15/s65"], "split": "dev"}
+{"id": "E15", "question": "What is the time limit for an unfair dismissal claim?", "gold": ["uk/ukpga/1996/18/s111"], "split": "dev"}
+{"id": "E16", "question": "How long does copyright last in a book?", "gold": ["uk/ukpga/1988/48/s12"], "split": "dev"}
+{"id": "E17", "question": "What is the offence of dangerous driving?", "gold": ["uk/ukpga/1988/52/s2"], "split": "dev"}
+{"id": "E18", "question": "When is a company unable to pay its debts?", "gold": ["uk/ukpga/1986/45/s123"], "split": "dev"}
+{"id": "E19", "question": "What is the offence of harassment?", "gold": ["uk/ukpga/1997/40/s1", "uk/ukpga/1997/40/s2"], "split": "dev"}
+{"id": "E20", "question": "What is direct discrimination?", "gold": ["uk/ukpga/2010/15/s13"], "split": "dev"}
