@@ -1,0 +1,9 @@
+# S5.3b Ship the clarify prior through the dataset: requirements
+
+The clarify prior passed its sealed gate (`reports/sprint5-clarify-sealed.md`). Production gets artefacts only from the pinned Hugging Face dataset, verified by SHA-256 (`deploy/fetch_artefacts.py`). Ship it the way `symspell/` and `dense/` were shipped.
+
+- R1 `scripts/build_clarify_prior.py` writes `artefacts/clarify/clarify_prior.json` (default `--out`) and `artefacts/clarify/clarify-manifest.json`: `{"snapshot": <router snapshot>, "files": {"clarify_prior.json": {"sha256": ..., "size": ...}}}` in the format `fetch_artefacts.py` reads. Do not change the prior's content or format (`format_version` 1). Copy the existing `artefacts/clarify_prior.json` into the new place with a scratch script and write the manifest; do not rebuild from the router data (the sealed sha256 is 81c1ccabf4197e7b2300a024a9e4cc9e181eb58c6bff06e8790e25afef804758 and must stay). Update the eval defaults (`eval/discovery_gate.py`, `eval/clarify_rank.py` `--prior`) to the new path.
+- R2 `build/publish_dataset.py`: `--clarify` (default `artefacts/clarify`) uploaded as `clarify/clarify-manifest.json` plus its file, checked like the symspell directory (hash per manifest; manifest snapshot equals the store's snapshot). Update its docstring and `build/README.md`.
+- R3 `deploy/fetch_artefacts.py`: add `clarify/clarify-manifest.json` to the default `EXTRA_MANIFESTS` (docstring too).
+- R4 `deploy/entrypoint.sh`: when `$STORE_DIR/clarify/clarify_prior.json` exists, export `CLARIFY_PRIOR_PATH` to it; otherwise print one warning line and leave it unset (prior off), as for symspell. `deploy/README.md` and `deploy/engine.env.example`: one line each.
+- R5 Tests: publish (clarify directory checked, a hash mismatch refused), fetch defaults include the clarify manifest, any existing entrypoint test. No network, no upload.
