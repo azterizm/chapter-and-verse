@@ -934,6 +934,16 @@ class SkipRow(Exception):  # noqa: N818 - control flow, not caught by Judge
     """A prefetch pass for one provider met a call routed to the other: skip this row."""
 
 
+def _method_estimate(messages: Sequence[Mapping[str, str]]) -> int:
+    """The prompt estimate option 2 fixed (method a491e8d): ceil(chars * 1.5 / 4) + 4 a message.
+
+    Frozen here so the method's routing does not move with the ledger's margin (1.2 from
+    25 Nov 2026).
+    """
+    chars = sum(len(m["content"]) for m in messages)
+    return math.ceil(chars * 1.5 / 4) + 4 * len(messages)
+
+
 def heldout_route(messages: Sequence[Mapping[str, str]]) -> str:
     """Option 2's fixed rule: Cloudflare when the ledger's estimate of the call's first prompt
     (system and user turn) plus ``max_tokens`` exceeds Groq's 8,000 tokens a minute, else Groq.
@@ -941,12 +951,9 @@ def heldout_route(messages: Sequence[Mapping[str, str]]) -> str:
     Decided from the prompt alone, before any call; a retry of a call (its first two messages
     unchanged) goes where the call went. Never from live outcomes.
     """
-    from chapterverse.contracts import ChatMessage  # noqa: PLC0415
-    from chapterverse.providers import estimate_tokens  # noqa: PLC0415
     from chapterverse.providers.presets import JUDGE_PRESET  # noqa: PLC0415
 
-    first = [ChatMessage(role=m["role"], content=m["content"]) for m in messages[:2]]  # type: ignore[typeddict-item]
-    need = estimate_tokens(first) + int(JUDGE_PRESET.sampling["max_tokens"])
+    need = _method_estimate(messages[:2]) + int(JUDGE_PRESET.sampling["max_tokens"])
     return "cloudflare" if need > GROQ_TPM else "groq"
 
 

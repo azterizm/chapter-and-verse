@@ -13,9 +13,13 @@ Limits (decision 0001, item 9):
   Modal bills container time, not tokens, so the cost is modelled from a measured cold start,
   the scaledown window and call wall time (:class:`ModalLimits`).
 
-Token estimate: :data:`TOKENS_PER_CHAR` = 1.5 / 4, i.e. 4 characters per token with a 1.5x
-safety margin (the rule of ``product-answer-checks/scripts/router.py``). A reservation also
-counts the request's ``max_tokens`` as worst-case output.
+Token estimate: :data:`TOKENS_PER_CHAR` = 1.2 / 4, i.e. 4 characters per token with a 1.2x
+safety margin, calibrated against measured Groq usage on 2026-11-25 (n = 16 first generate calls
+on legal battery dev: median ratio 1.04, max 1.105 vs characters / 4; source
+``reports/legal-answers/2026-11-25-base-506ece9-dev.json`` and ``eval/token_budget.py``). A
+reservation also counts the request's ``max_tokens`` as worst-case output. Cloudflare's neuron
+estimate uses the same :func:`estimate_tokens` function, so its daily budget check becomes 20%
+less conservative (from 1.5x to 1.2x); the 9,500 of 10,000 budget keeps a 5% reserve.
 """
 
 from __future__ import annotations
@@ -70,8 +74,8 @@ def purpose_context(purpose: Purpose) -> Iterator[None]:
         _current_purpose.reset(token)
 
 
-TOKENS_PER_CHAR: Final = 1.5 / 4
-"""Estimated tokens per character of message text: 4 characters a token, x1.5 margin."""
+TOKENS_PER_CHAR: Final = 1.2 / 4
+"""Estimated tokens per character of message text: 4 characters a token, 1.2x margin."""
 
 
 def estimate_tokens(messages: Sequence[ChatMessage], prefill: str | None = None) -> int:

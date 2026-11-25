@@ -58,10 +58,21 @@ def call(ledger: InMemoryLedger, provider: str, est: int = 10, **kw: object) -> 
 
 
 def test_token_estimate_ratio() -> None:
-    assert TOKENS_PER_CHAR == 0.375
+    assert TOKENS_PER_CHAR == 0.3
     messages = (ChatMessage(role="user", content="x" * 400),)
-    assert estimate_tokens(messages) == 150 + 4
-    assert estimate_tokens(messages, "y" * 40) == 165 + 8
+    assert estimate_tokens(messages) == 120 + 4
+    assert estimate_tokens(messages, "y" * 40) == 132 + 8
+
+
+def test_estimate_tokens_known_message_list() -> None:
+    messages = (
+        ChatMessage(role="system", content="a" * 10),
+        ChatMessage(role="user", content="b" * 21),
+    )
+    # 31 chars * 0.3 = 9.3 -> ceil 10, plus 4 per message (2 messages) = 18
+    assert estimate_tokens(messages) == 18
+    # + 5 prefill chars: 36 * 0.3 = 10.8 -> ceil 11, plus 4 * 3 = 23
+    assert estimate_tokens(messages, "c" * 5) == 23
 
 
 def test_durations_and_retry_after() -> None:
