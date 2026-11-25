@@ -367,29 +367,49 @@ def _resolve_layer_root(args: argparse.Namespace) -> Path:
     return Path(SEALED_LAYER)
 
 
+def _dry_run(
+    v: Any,
+    rb: Any,
+    seal: Mapping[str, Any],
+    *,
+    layer_root: Path,
+    max_usd: float,
+    scope: str,
+) -> int:
+    counter = _CountingChat()
+    stats: dict[str, int] = {}
+    _, _, calls, enrichment, _ = run_heldout(
+        v, rb, counter, layer_root=layer_root, judge_scope=scope, stats=stats
+    )
+    prompt_chars = sum(len(m["content"]) for msgs in counter.prompts for m in msgs)
+    summary = {
+        **seal,
+        "detector": DETECTOR,
+        "judge_scope": scope,
+        "judge_calls": len(calls),
+        "rows_with_a_call": len({c["row"] for c in calls}),
+        "to_modal": len(calls),
+        "enrichment": sorted(str(e) for e in enrichment),
+        "estimated_usd": estimate_modal_cost(len(calls)),
+        "max_usd": max_usd,
+        "judge_prompt_chars": prompt_chars,
+        "cited_fallback": stats.get("cited_fallback", 0),
+    }
+    print(json.dumps(summary))
+    return 0
+
+
 def cmd_heldout(args: argparse.Namespace) -> int:
     v = load_verifier(args.verifier)
     rb = load_run_battery(args.verifier)
     seal = check_seal(args.verifier)
-    out: Path = args.out
+    scope = getattr(args, "judge_scope", "all")
     layer_root = _resolve_layer_root(args)
-
     if args.dry:
-        counter = _CountingChat()
-        _, _, calls, enrichment, _ = run_heldout(v, rb, counter, layer_root=layer_root)
-        est_usd = estimate_modal_cost(len(calls))
-        summary = {
-            **seal,
-            "detector": DETECTOR,
-            "judge_calls": len(calls),
-            "rows_with_a_call": len({c["row"] for c in calls}),
-            "to_modal": len(calls),
-            "enrichment": sorted(str(e) for e in enrichment),
-            "estimated_usd": est_usd,
-            "max_usd": args.max_usd,
-        }
-        print(json.dumps(summary))
-        return 0
+        return _dry_run(v, rb, seal, layer_root=layer_root, max_usd=args.max_usd, scope=scope)
+
+    out: Path = args.out / "cited" if scope == "cited" else args.out
+    stats: dict[str, int] = {}
 
     if not args.method_commit:
         raise SystemExit("a live held-out run needs --method-commit (the committed method)")
@@ -439,7 +459,9 @@ def cmd_heldout(args: argparse.Namespace) -> int:
     day = _utc_day()
 
     try:
-        outcomes, raw, calls, enrichment, _ = run_heldout(v, rb, chat, layer_root=layer_root)
+        outcomes, raw, calls, enrichment, _ = run_heldout(
+            v, rb, chat, layer_root=layer_root, judge_scope=scope, stats=stats
+        )
     except RunHalted as exc:
         state = {
             "complete": False,
@@ -480,6 +502,11 @@ def cmd_heldout(args: argparse.Namespace) -> int:
             "estimated_usd": round(session_usd, 4),
             "max_usd": args.max_usd,
         },
+        **(
+            {"judge_scope": scope, "cited_fallback": stats.get("cited_fallback", 0)}
+            if scope == "cited"
+            else {}
+        ),
     }
     with (out / "raw.jsonl").open("w", encoding="utf-8") as f:
         for r in raw:
@@ -504,6 +531,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--max-usd", type=float, default=DEFAULT_MAX_USD, help="Modal cost ceiling in USD"
     )
+    parser.add_argument("--judge-scope", choices=["all", "cited"], default="all")
     parser.add_argument("cmd", nargs="?", default=None, help="optional subcommand")
     args = parser.parse_args(argv)
     return cmd_heldout(args)

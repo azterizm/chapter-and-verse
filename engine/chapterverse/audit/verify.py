@@ -16,21 +16,28 @@ knows them from its ``ChatResult``); missing keys are recorded as ``"unknown"``,
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
+import logging
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any, Final
 
+from legal_rag_verifier.claims import extract_claims
+from legal_rag_verifier.index import build_index
 from legal_rag_verifier.judge import Judge, JudgedVerifier
 from legal_rag_verifier.premise import Premise
 from legal_rag_verifier.verifier import (
+    NLIProbs,
+    NLIScorer,
     Reason,
     Repair,
     SentenceVerdict,
     Verdict,
     VerifierConfig,
+    _in_force_on,
+    _nli_candidates,
 )
 
 from chapterverse.audit.classify import CLASSIFICATION_SHIFT, classification_failure
-from chapterverse.audit.policy import verifier_config
+from chapterverse.audit.policy import CITED_PASSAGES_CONFIG, verifier_config
 from chapterverse.audit.refs import REF_CODES, check_refs
 from chapterverse.contracts import JudgeChat, JudgeReply, Policy, ProviderCall
 from chapterverse.windows import passages_by_id
@@ -39,11 +46,15 @@ __all__ = [
     "CLASSIFICATION_SHIFT",
     "AuditVerifier",
     "RecordingJudgeChat",
+    "cited_nli_scorer",
     "make_verifier",
     "reason_codes",
 ]
 
+log = logging.getLogger(__name__)
+
 AUDIT_CODES: Final = REF_CODES | {CLASSIFICATION_SHIFT}
+_UNKEPT_PROBS: Final = NLIProbs(entailment=-1.0, neutral=2.0, contradiction=0.0)
 
 
 class RecordingJudgeChat:
@@ -86,12 +97,76 @@ def _judge_call(reply: Mapping[str, Any], model: str) -> ProviderCall:
     )
 
 
+class _CitedScorer:
+    """Restricts ``Verifier._run_nli`` scoring to kept candidates and maps results back."""
+
+    def __init__(
+        self,
+        inner: NLIScorer,
+        expected_texts: tuple[str, ...],
+        kept_indices: tuple[int, ...],
+        *,
+        had_cited: bool,
+    ) -> None:
+        self._inner = inner
+        self.model_id: str = inner.model_id
+        self._expected_texts = expected_texts
+        self._kept_indices = kept_indices
+        self._had_cited = had_cited
+        self._warned = False
+
+    def score(self, premises: Sequence[str], hypothesis: str) -> list[NLIProbs]:
+        if not self._kept_indices or tuple(premises) != self._expected_texts:
+            if not self._warned:
+                if not self._had_cited:
+                    log.warning("cited judge reached with no cited passage; judging all candidates")
+                elif tuple(premises) != self._expected_texts:
+                    log.warning("cited judge fell back to all candidates due to candidate mismatch")
+                self._warned = True
+            return self._inner.score(premises, hypothesis)
+        kept_premises = [premises[i] for i in self._kept_indices]
+        kept_probs = self._inner.score(kept_premises, hypothesis)
+        out = [_UNKEPT_PROBS] * len(premises)
+        for orig_idx, prob in zip(self._kept_indices, kept_probs, strict=True):
+            out[orig_idx] = prob
+        return out
+
+
+def cited_nli_scorer(
+    scorer: NLIScorer,
+    premise: Premise,
+    sentence: str,
+    cited_positions: Collection[int],
+    *,
+    query: str | None = None,
+) -> NLIScorer:
+    """Wrap ``scorer`` to score only candidates whose first window is in ``cited_positions``."""
+    positions = frozenset(cited_positions)
+    if not positions:
+        return _CitedScorer(scorer, (), (), had_cited=False)
+    index = build_index(premise)
+    query_claims = extract_claims(query) if query else []
+    when = _in_force_on(index, sentence, query_claims)
+    candidates = _nli_candidates(index, when)
+    kept = tuple(i for i, (_, win_pos, _) in enumerate(candidates) if win_pos[0] in positions)
+    expected = tuple(text for text, _, _ in candidates)
+    return _CitedScorer(scorer, expected, kept, had_cited=True)
+
+
 class AuditVerifier(JudgedVerifier):
     """``JudgedVerifier`` with the passage-reference rules checked first (module docstring)."""
 
-    def __init__(self, judge: Judge, passage_ids: Collection[str], config: VerifierConfig) -> None:
+    def __init__(
+        self,
+        judge: Judge,
+        passage_ids: Collection[str],
+        config: VerifierConfig,
+        *,
+        cited_only: bool = False,
+    ) -> None:
         super().__init__(judge, config)
         self.passage_ids = frozenset(passage_ids)
+        self._cited_only = cited_only
 
     def check_sentence(
         self, premise: Premise, sentence: str, *, query: str | None = None
@@ -111,15 +186,16 @@ class AuditVerifier(JudgedVerifier):
                 repair=Repair("ban", 0),
                 details=tuple(str(f) for f in refs.failures),
             )
-        passage_to_pos = {p: i for i, p in enumerate(premise.passages)}
+        passage_to_pos = {id(p): i for i, p in enumerate(premise.passages)}
         cited_texts: list[str] = []
         aligned: list[int] = []
         for pid in refs.passage_ids:
             if pid in by_id:
                 p = by_id[pid]
                 cited_texts.append(p.text)
-                if p in passage_to_pos:
-                    aligned.append(passage_to_pos[p])
+                pos = passage_to_pos.get(id(p))
+                if pos is not None:
+                    aligned.append(pos)
         detail = classification_failure(refs.text, cited_texts)
         if detail is not None:
             return SentenceVerdict(
@@ -132,7 +208,12 @@ class AuditVerifier(JudgedVerifier):
                 repair=Repair("ban", 0),
                 details=(f"{CLASSIFICATION_SHIFT}: {detail}",),
             )
-        return super().check_sentence(premise, refs.text, query=query)
+        if self._cited_only:
+            self.nli = cited_nli_scorer(self.judge, premise, refs.text, aligned, query=query)
+        try:
+            return super().check_sentence(premise, refs.text, query=query)
+        finally:
+            self.nli = self.judge
 
 
 def make_verifier(
@@ -144,7 +225,9 @@ def make_verifier(
     """A fresh per-answer verifier whose judge calls are logged into ``calls``."""
     judge = Judge(RecordingJudgeChat(judge_chat, calls))
     judge.preset = policy.judge_preset
-    return AuditVerifier(judge, passage_ids, verifier_config(policy))
+    config = verifier_config(policy)
+    cited_only = policy.verifier_config_name == CITED_PASSAGES_CONFIG
+    return AuditVerifier(judge, passage_ids, config, cited_only=cited_only)
 
 
 def reason_codes(reasons: Iterable[str], details: Iterable[str]) -> tuple[str, ...]:

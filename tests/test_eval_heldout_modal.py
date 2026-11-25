@@ -218,3 +218,118 @@ def test_dynamic_modal_adapter_reads_env_at_call_time(monkeypatch: pytest.Monkey
     monkeypatch.setenv("MODAL_URL", "https://modal.example.com/endpoint")
     assert adapter.base_url() == "https://modal.example.com/endpoint/v1"
     assert adapter.health_url() == "https://modal.example.com/endpoint/health"
+
+
+# ---------------------------------------------------------------------- R3: judge scope & dry run
+
+
+def test_dry_run_reports_costs_and_chars_per_scope_and_separates_out_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from legal_rag_verifier import judge as jm  # noqa: PLC0415
+    from legal_rag_verifier.premise import Passage, PassageKind, Premise  # noqa: PLC0415
+
+    p1 = Passage(
+        "Alpha 10.",
+        coordinate="uk/ukpga/2000/1/s1/1",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(1)",
+    )
+    p2 = Passage(
+        "Beta 20.",
+        coordinate="uk/ukpga/2000/1/s1/2",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(2)",
+    )
+    premise = Premise(passages=(p1, p2), enrichment=jg.HELDOUT_ENRICHMENT_ID)
+    rows = [
+        {
+            "id": "r1",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "Q?",
+            "sentence": "The figure is 10.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s1/1",
+            "premise": ["uk/ukpga/2000/1/s1"],
+        },
+        {
+            "id": "r2",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "Q?",
+            "sentence": "The figure is 20.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s99/1",
+            "premise": ["uk/ukpga/2000/1/s1"],
+        },
+    ]
+
+    class FakeOutcome:
+        def __init__(
+            self, row_id: str, cls: str, expected: str, verdict: str, reasons: Any
+        ) -> None:
+            self.row_id = row_id
+            self.cls = cls
+            self.expected = expected
+            self.verdict = verdict
+            self.reasons = reasons
+
+    fake_rb = SimpleNamespace(
+        load_rows=lambda _p: rows,
+        premises=SimpleNamespace(premise_key=lambda r: r["id"]),
+        premises_for=lambda rs, _d, _e: {r["id"]: premise for r in rs},
+        Outcome=FakeOutcome,
+    )
+    fake_v = SimpleNamespace(root=tmp_path, judge_mod=jm)
+    monkeypatch.setattr(hm, "load_verifier", lambda _root: fake_v)
+    monkeypatch.setattr(hm, "load_run_battery", lambda _root: fake_rb)
+    monkeypatch.setattr(hm, "check_seal", lambda _root: {"seal": "s", "sha256": "h", "rows": 2})
+
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "all"]) == 0
+    all_summary = json.loads(capsys.readouterr().out)
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "cited"]) == 0
+    cited_summary = json.loads(capsys.readouterr().out)
+
+    assert all_summary["judge_scope"] == "all"
+    assert cited_summary["judge_scope"] == "cited"
+    assert all_summary["judge_calls"] == cited_summary["judge_calls"] == 2
+    assert all_summary["estimated_usd"] == cited_summary["estimated_usd"]
+    assert cited_summary["judge_prompt_chars"] < all_summary["judge_prompt_chars"]
+    assert all_summary["cited_fallback"] == 0
+    assert cited_summary["cited_fallback"] == 1
+
+    # Scope 'cited' writes under out/cited/, while default 'all' keeps out/ unchanged.
+    seen_out: list[Path] = []
+    monkeypatch.setattr(
+        hm, "run_heldout", lambda *_a, **_kw: ([], [], [], {jg.HELDOUT_ENRICHMENT_ID}, [])
+    )
+    monkeypatch.setattr(
+        hm,
+        "DynamicModalAdapter",
+        lambda: SimpleNamespace(base_url=lambda: "", health_url=lambda: ""),
+    )
+    monkeypatch.setattr(
+        hm,
+        "OpenAICompatProvider",
+        lambda _a, ledger=None: SimpleNamespace(
+            model_id="m",
+            build_body=lambda _r: ({}, None),
+        ),
+    )
+    monkeypatch.setattr(hm, "ProviderRotation", lambda *_a, **_kw: SimpleNamespace())
+    monkeypatch.setattr(hm, "RotationJudgeChat", lambda *_a, **_kw: SimpleNamespace(model="m"))
+    monkeypatch.setattr(hm, "settings_sent", lambda _p: {})
+    monkeypatch.setattr(hm, "heldout_counts", lambda _rb, _o: {"summarise": {"headline": {}}})
+    monkeypatch.setattr(hm, "recorded_outcomes", lambda *_a: [])
+
+    def spy_gate_chat(**kw: Any) -> Any:
+        seen_out.append(kw["out"])
+        return SimpleNamespace(cache={}, waits=[])
+
+    monkeypatch.setattr(hm, "ModalGateChat", spy_gate_chat)
+    assert hm.main(["--out", str(tmp_path), "--method-commit", "abc"]) == 0
+    assert (
+        hm.main(["--out", str(tmp_path), "--method-commit", "abc", "--judge-scope", "cited"]) == 0
+    )
+    assert seen_out == [tmp_path, tmp_path / "cited"]
