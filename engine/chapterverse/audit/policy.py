@@ -20,6 +20,7 @@ __all__ = [
     "ABSTAIN_TEXT",
     "ALL_PASSAGES_CONFIG",
     "CITED_PASSAGES_CONFIG",
+    "SECTION_PASSAGES_CONFIG",
     "VERIFIER_CONFIGS",
     "build_policy",
     "verifier_config",
@@ -27,13 +28,15 @@ __all__ = [
 
 ALL_PASSAGES_CONFIG: Final = "STRICT_FIGURES"
 CITED_PASSAGES_CONFIG: Final = "STRICT_FIGURES+CITED_JUDGE"
+SECTION_PASSAGES_CONFIG: Final = "STRICT_FIGURES+SECTION_JUDGE"
 
 VERIFIER_CONFIGS: Final[dict[str, VerifierConfig]] = {
     ALL_PASSAGES_CONFIG: STRICT_FIGURES,
     CITED_PASSAGES_CONFIG: STRICT_FIGURES,
+    SECTION_PASSAGES_CONFIG: STRICT_FIGURES,
 }
-"""Verifier configs a policy may name. Both use ``STRICT_FIGURES``; the second restricts the judge
-to cited passages."""
+"""Verifier configs a policy may name. All use ``STRICT_FIGURES``; the second restricts the judge
+to cited passages and the third to all passages of the cited sections."""
 
 
 def build_policy(

@@ -333,7 +333,103 @@ def test_dry_run_reports_costs_and_chars_per_scope_and_separates_out_dir(
     assert (
         hm.main(["--out", str(tmp_path), "--method-commit", "abc", "--judge-scope", "cited"]) == 0
     )
-    assert seen_out == [tmp_path, tmp_path / "cited"]
+    assert (
+        hm.main(["--out", str(tmp_path), "--method-commit", "abc", "--judge-scope", "section"]) == 0
+    )
+    assert seen_out == [tmp_path, tmp_path / "cited", tmp_path / "section"]
+
+
+def test_dry_run_section_scope_counts_differs_from_all_and_detector_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from legal_rag_verifier import judge as jm  # noqa: PLC0415
+    from legal_rag_verifier.premise import Passage, PassageKind, Premise  # noqa: PLC0415
+
+    assert hm.detector_name("all") == "qwen27-ar4-modal"
+    assert hm.detector_name("cited") == "qwen27-ar4-modal-cited"
+    assert hm.detector_name("section") == "qwen27-ar4-modal-section"
+
+    p1 = Passage(
+        "Alpha 10.",
+        coordinate="uk/ukpga/2000/1/s1/1",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(1)",
+    )
+    p2 = Passage(
+        "Sibling 15.",
+        coordinate="uk/ukpga/2000/1/s1/2",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.1(2)",
+    )
+    p3 = Passage(
+        "Other section 20.",
+        coordinate="uk/ukpga/2000/1/s2/1",
+        kind=PassageKind.PROVISION,
+        heading="Act, s.2(1)",
+    )
+    premise = Premise(passages=(p1, p2, p3), enrichment=jg.HELDOUT_ENRICHMENT_ID)
+    rows = [
+        {
+            "id": "r1",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "Q?",
+            "sentence": "The figure is 10.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s1/1",
+            "premise": ["uk/ukpga/2000/1"],
+        },
+        {
+            "id": "r2",
+            "class": "grounded_paraphrase",
+            "expected": "EMIT",
+            "query": "Q?",
+            "sentence": "The figure is 20.",
+            "excerpt_coordinate": "uk/ukpga/2000/1/s99/1",
+            "premise": ["uk/ukpga/2000/1"],
+        },
+    ]
+
+    class FakeOutcome:
+        def __init__(
+            self, row_id: str, cls: str, expected: str, verdict: str, reasons: Any
+        ) -> None:
+            self.row_id = row_id
+            self.cls = cls
+            self.expected = expected
+            self.verdict = verdict
+            self.reasons = reasons
+
+    fake_rb = SimpleNamespace(
+        load_rows=lambda _p: rows,
+        premises=SimpleNamespace(premise_key=lambda r: r["id"]),
+        premises_for=lambda rs, _d, _e: {r["id"]: premise for r in rs},
+        Outcome=FakeOutcome,
+    )
+    fake_v = SimpleNamespace(root=tmp_path, judge_mod=jm)
+    monkeypatch.setattr(hm, "load_verifier", lambda _root: fake_v)
+    monkeypatch.setattr(hm, "load_run_battery", lambda _root: fake_rb)
+    monkeypatch.setattr(hm, "check_seal", lambda _root: {"seal": "s", "sha256": "h", "rows": 2})
+
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "all"]) == 0
+    all_summary = json.loads(capsys.readouterr().out)
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "cited"]) == 0
+    cited_summary = json.loads(capsys.readouterr().out)
+    assert hm.main(["--out", str(tmp_path), "--dry", "--judge-scope", "section"]) == 0
+    sec_summary = json.loads(capsys.readouterr().out)
+
+    assert sec_summary["detector"] == "qwen27-ar4-modal-section"
+    assert sec_summary["judge_scope"] == "section"
+    assert sec_summary["judge_calls"] == 2
+    assert sec_summary["cited_fallback"] == 1
+    assert sec_summary["rows_prompt_differs_from_all"] == 1
+    assert all_summary["rows_prompt_differs_from_all"] == 0
+    assert (
+        cited_summary["judge_prompt_chars"]
+        < sec_summary["judge_prompt_chars"]
+        < all_summary["judge_prompt_chars"]
+    )
 
 
 def test_warming_server_is_waited_for_not_a_failed_attempt(tmp_path: Path) -> None:

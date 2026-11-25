@@ -83,11 +83,17 @@ WARM_POLL_S: Final = 10.0
 """Seconds between resends while the Modal server warms (cold start measured at 406 s)."""
 DETECTOR_CITED: Final = "qwen27-ar4-modal-cited"
 """The detector with the judge on the cited windows only (S5.1b): its own once-per-detector run."""
+DETECTOR_SECTION: Final = "qwen27-ar4-modal-section"
+"""The detector with the judge on the cited sections (S5.1b2): its own once-per-detector run."""
 
 
 def detector_name(scope: str) -> str:
     """The detector name a run with ``scope`` reports and marks."""
-    return DETECTOR_CITED if scope == "cited" else DETECTOR
+    if scope == "cited":
+        return DETECTOR_CITED
+    if scope == "section":
+        return DETECTOR_SECTION
+    return DETECTOR
 
 
 DEFAULT_MAX_USD: Final = 3.00
@@ -382,6 +388,13 @@ def _resolve_layer_root(args: argparse.Namespace) -> Path:
     return Path(SEALED_LAYER)
 
 
+def _row_prompt_shas(calls: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
+    by_row: dict[str, list[str]] = {}
+    for c in calls:
+        by_row.setdefault(str(c["row"]), []).append(str(c["sha"]))
+    return by_row
+
+
 def _dry_run(
     v: Any,
     rb: Any,
@@ -397,6 +410,19 @@ def _dry_run(
         v, rb, counter, layer_root=layer_root, judge_scope=scope, stats=stats
     )
     prompt_chars = sum(len(m["content"]) for msgs in counter.prompts for m in msgs)
+    differs_from_all = 0
+    if scope != "all":
+        all_counter = _CountingChat()
+        _, _, all_calls, _, _ = run_heldout(
+            v, rb, all_counter, layer_root=layer_root, judge_scope="all"
+        )
+        all_shas = _row_prompt_shas(all_calls)
+        scope_shas = _row_prompt_shas(calls)
+        differs_from_all = sum(
+            1
+            for row_id in set(all_shas) | set(scope_shas)
+            if all_shas.get(row_id) != scope_shas.get(row_id)
+        )
     summary = {
         **seal,
         "detector": detector_name(scope),
@@ -409,6 +435,7 @@ def _dry_run(
         "max_usd": max_usd,
         "judge_prompt_chars": prompt_chars,
         "cited_fallback": stats.get("cited_fallback", 0),
+        "rows_prompt_differs_from_all": differs_from_all,
     }
     print(json.dumps(summary))
     return 0
@@ -423,7 +450,7 @@ def cmd_heldout(args: argparse.Namespace) -> int:
     if args.dry:
         return _dry_run(v, rb, seal, layer_root=layer_root, max_usd=args.max_usd, scope=scope)
 
-    out: Path = args.out / "cited" if scope == "cited" else args.out
+    out: Path = args.out if scope == "all" else args.out / scope
     stats: dict[str, int] = {}
 
     if not args.method_commit:
@@ -519,7 +546,7 @@ def cmd_heldout(args: argparse.Namespace) -> int:
         },
         **(
             {"judge_scope": scope, "cited_fallback": stats.get("cited_fallback", 0)}
-            if scope == "cited"
+            if scope != "all"
             else {}
         ),
     }
@@ -546,7 +573,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--max-usd", type=float, default=DEFAULT_MAX_USD, help="Modal cost ceiling in USD"
     )
-    parser.add_argument("--judge-scope", choices=["all", "cited"], default="all")
+    parser.add_argument("--judge-scope", choices=["all", "cited", "section"], default="all")
     parser.add_argument("cmd", nargs="?", default=None, help="optional subcommand")
     args = parser.parse_args(argv)
     return cmd_heldout(args)

@@ -400,11 +400,12 @@ def test_prefetch_pass_skips_rows_for_the_other_provider() -> None:
 # ---------------------------------------------------------------------------- R3: judge scope
 
 
-def test_fresh2_run_and_replay_reject_cited_scope(tmp_path: Path) -> None:
-    with pytest.raises(SystemExit, match="fresh2"):
-        jg.main(["--out", str(tmp_path), "run", "--provider", "groq", "--judge-scope", "cited"])
-    with pytest.raises(SystemExit, match="fresh2"):
-        jg.main(["--out", str(tmp_path), "--judge-scope", "cited", "replay"])
+def test_fresh2_run_and_replay_reject_cited_and_section_scopes(tmp_path: Path) -> None:
+    for scope in ("cited", "section"):
+        with pytest.raises(SystemExit, match="fresh2"):
+            jg.main(["--out", str(tmp_path), "run", "--provider", "groq", "--judge-scope", scope])
+        with pytest.raises(SystemExit, match="fresh2"):
+            jg.main(["--out", str(tmp_path), "--judge-scope", scope, "replay"])
 
 
 def test_cited_windows_rule_matches_equal_ancestor_and_descendant_only() -> None:
@@ -423,6 +424,23 @@ def test_cited_windows_rule_matches_equal_ancestor_and_descendant_only() -> None
     assert jg.cited_windows_for_coordinate(premise, "uk/ukpga/2006/46/s465/3") == (0, 1, 2)
     assert jg.cited_windows_for_coordinate(premise, "uk/ukpga/2006/46/s999") == ()
     assert jg.cited_windows_for_coordinate(premise, None) == ()
+
+
+def test_section_windows_rule_matches_entire_section_only() -> None:
+    from legal_rag_verifier.premise import Passage, PassageKind, Premise  # noqa: PLC0415
+
+    premise = Premise(
+        passages=(
+            Passage("Section stem", coordinate="uk/ukpga/2006/46/s465", kind=PassageKind.PROVISION),
+            Passage("Sub 3", coordinate="uk/ukpga/2006/46/s465/3", kind=PassageKind.PROVISION),
+            Passage("Sub 30", coordinate="uk/ukpga/2006/46/s465/30", kind=PassageKind.PROVISION),
+            Passage("Other s46", coordinate="uk/ukpga/2006/46/s46", kind=PassageKind.PROVISION),
+            Passage("Fact", coordinate=None, kind=PassageKind.FACT),
+        )
+    )
+    assert jg.section_windows_for_coordinate(premise, "uk/ukpga/2006/46/s465/3") == (0, 1, 2)
+    assert jg.section_windows_for_coordinate(premise, "uk/ukpga/2006/46/s999") == ()
+    assert jg.section_windows_for_coordinate(premise, None) == ()
 
 
 def test_run_heldout_cited_scope_and_fallback(tmp_path: Path) -> None:
@@ -522,3 +540,13 @@ def test_run_heldout_cited_scope_and_fallback(tmp_path: Path) -> None:
     # Second row matched nothing -> fallback to all 4 passages
     assert "[4]" in spy_cited.prompts[1]
     assert "unrelated" in spy_cited.prompts[1]
+
+    spy_section = SpyChat()
+    stats_section: dict[str, int] = {}
+    jg.run_heldout(fake_v, fake_rb, spy_section, judge_scope="section", stats=stats_section)
+    assert stats_section["cited_fallback"] == 1
+    # First row matches the whole s1 section (all 4 passages, including sibling s.1(3))
+    assert "[4]" in spy_section.prompts[0]
+    assert "unrelated" in spy_section.prompts[0]
+    # Second row matched nothing -> fallback to all 4 passages
+    assert "[4]" in spy_section.prompts[1]

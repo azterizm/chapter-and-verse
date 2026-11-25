@@ -34,6 +34,7 @@ from chapterverse.contracts import (
 from chapterverse.dense.colbert import ColbertScorer, split_section_windows
 from chapterverse.dense.doctext import _DEFAULTS
 from chapterverse.dense.retriever import DenseRetriever
+from chapterverse.sections import section_coordinate as _section_coordinate
 from chapterverse.templates import (
     out_of_scope_refusal,
     plain_text,
@@ -582,16 +583,6 @@ def _provision_start(parts: Sequence[str]) -> int:
         if (len(parts) > _YEAR_PART_INDEX and parts[_YEAR_PART_INDEX].isdigit())
         else _REGNAL_INST_PARTS
     )
-
-
-def _section_coordinate(coord: str) -> str:
-    parts = coord.split("/")
-    base = _provision_start(parts)
-    if len(parts) <= base:
-        return coord
-    if parts[base].startswith("sch") and len(parts) > base + 1:
-        return "/".join(parts[: base + 2])
-    return "/".join(parts[: base + 1])
 
 
 def _is_schedule_coordinate(coord: str) -> bool:

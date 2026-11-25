@@ -7,7 +7,7 @@ ledger reservations, and answer shapes against Groq's 8,000 TPM minute limit.
 
 Usage:
     uv run python -m eval.token_budget --split dev [--battery PATH] [--out DIR]
-        [--judge-scope all|cited] [--dense-dir DIR]
+        [--judge-scope all|cited|section] [--dense-dir DIR]
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from chapterverse.providers.judge_chat import RotationJudgeChat
 from chapterverse.providers.ledger import JUDGE_OUTPUT_RESERVE
 from chapterverse.providers.ledger import estimate_tokens as ledger_estimate_tokens
 from chapterverse.providers.presets import JUDGE_PRESET
+from chapterverse.sections import section_coordinate
 from eval.latency import percentile
 from eval.legal_gate import (
     DEFAULT_BATTERY,
@@ -76,7 +77,7 @@ ANSWER_SHAPES: Final[tuple[tuple[str, int, int], ...]] = (
     ("B", 2, 3),
     ("C", 3, 6),
 )
-JudgeScope = Literal["all", "cited"]
+JudgeScope = Literal["all", "cited", "section"]
 
 
 class CapturingRotation:
@@ -137,7 +138,23 @@ def build_judge_request(
     if not windows:
         raise ValueError("build_judge_request requires at least one window")
     rep_sentence = _representative_sentence(windows)
-    scope_windows = windows if scope == "all" else (windows[0],)
+    if scope == "all":
+        scope_windows: Sequence[Window] = windows
+    elif scope == "cited":
+        scope_windows = (windows[0],)
+    elif scope == "section":
+        target_section = section_coordinate(windows[0].coordinate) if windows[0].coordinate else ""
+        scope_windows = (
+            tuple(
+                w
+                for w in windows
+                if w.coordinate and section_coordinate(w.coordinate) == target_section
+            )
+            if target_section
+            else (windows[0],)
+        )
+    else:
+        raise ValueError(f"unknown judge scope {scope!r}")
     passages = tuple(
         Passage(w.text, w.coordinate, PassageKind.PROVISION, w.heading) for w in scope_windows
     )
@@ -478,7 +495,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--battery", type=Path, default=DEFAULT_BATTERY)
     parser.add_argument("--seal", type=Path, default=DEFAULT_SEAL)
     parser.add_argument("--out", type=Path, default=None)
-    parser.add_argument("--judge-scope", choices=("all", "cited"), default="all")
+    parser.add_argument("--judge-scope", choices=("all", "cited", "section"), default="all")
     parser.add_argument("--dense-dir", type=Path, default=None)
     parser.add_argument("--models-dir", type=Path, default=Path("artefacts/models"))
     parser.add_argument("--router-repo", type=Path, default=ROUTER_REPO)

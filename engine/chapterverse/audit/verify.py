@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from legal_rag_verifier.claims import extract_claims
 from legal_rag_verifier.index import build_index
@@ -37,9 +37,15 @@ from legal_rag_verifier.verifier import (
 )
 
 from chapterverse.audit.classify import CLASSIFICATION_SHIFT, classification_failure
-from chapterverse.audit.policy import CITED_PASSAGES_CONFIG, verifier_config
+from chapterverse.audit.policy import (
+    ALL_PASSAGES_CONFIG,
+    CITED_PASSAGES_CONFIG,
+    SECTION_PASSAGES_CONFIG,
+    verifier_config,
+)
 from chapterverse.audit.refs import REF_CODES, check_refs
 from chapterverse.contracts import JudgeChat, JudgeReply, Policy, ProviderCall
+from chapterverse.sections import section_coordinate
 from chapterverse.windows import passages_by_id
 
 __all__ = [
@@ -132,6 +138,38 @@ class _CitedScorer:
         return out
 
 
+JudgeScope = Literal["all", "cited", "section"]
+
+_POLICY_SCOPES: Final[dict[str, JudgeScope]] = {
+    ALL_PASSAGES_CONFIG: "all",
+    CITED_PASSAGES_CONFIG: "cited",
+    SECTION_PASSAGES_CONFIG: "section",
+}
+
+
+def _section_key(coord: str | None) -> str | None:
+    return section_coordinate(coord) if coord else None
+
+
+def _kept_positions(
+    premise: Premise,
+    cited_positions: frozenset[int],
+    scope: Literal["cited", "section"],
+) -> frozenset[int]:
+    if scope == "cited":
+        return cited_positions
+    if scope != "section":
+        raise ValueError(f"unknown judge scope {scope!r}")
+    cited_sections = {
+        _section_key(premise.passages[pos].coordinate)
+        for pos in cited_positions
+        if 0 <= pos < len(premise.passages)
+    }
+    return frozenset(
+        i for i, p in enumerate(premise.passages) if _section_key(p.coordinate) in cited_sections
+    )
+
+
 def cited_nli_scorer(
     scorer: NLIScorer,
     premise: Premise,
@@ -139,16 +177,26 @@ def cited_nli_scorer(
     cited_positions: Collection[int],
     *,
     query: str | None = None,
+    scope: Literal["cited", "section"] = "cited",
 ) -> NLIScorer:
-    """Wrap ``scorer`` to score only candidates whose first window is in ``cited_positions``."""
+    """Wrap ``scorer`` to score only candidates whose first window matches ``scope``.
+
+    With ``scope="cited"``, kept candidates are those whose first window is in
+    ``cited_positions``. With ``scope="section"``, kept candidates are those whose first window's
+    section matches the section of any window in ``cited_positions`` (uncoordinated windows are
+    kept only when a cited window also has no coordinate).
+    """
+    if scope not in {"cited", "section"}:
+        raise ValueError(f"unknown judge scope {scope!r}")
     positions = frozenset(cited_positions)
     if not positions:
         return _CitedScorer(scorer, (), (), had_cited=False)
+    kept_positions = _kept_positions(premise, positions, scope)
     index = build_index(premise)
     query_claims = extract_claims(query) if query else []
     when = _in_force_on(index, sentence, query_claims)
     candidates = _nli_candidates(index, when)
-    kept = tuple(i for i, (_, win_pos, _) in enumerate(candidates) if win_pos[0] in positions)
+    kept = tuple(i for i, (_, win_pos, _) in enumerate(candidates) if win_pos[0] in kept_positions)
     expected = tuple(text for text, _, _ in candidates)
     return _CitedScorer(scorer, expected, kept, had_cited=True)
 
@@ -163,10 +211,16 @@ class AuditVerifier(JudgedVerifier):
         config: VerifierConfig,
         *,
         cited_only: bool = False,
+        judge_scope: JudgeScope | None = None,
     ) -> None:
         super().__init__(judge, config)
         self.passage_ids = frozenset(passage_ids)
-        self._cited_only = cited_only
+        if judge_scope is None:
+            self._judge_scope: JudgeScope = "cited" if cited_only else "all"
+        else:
+            if judge_scope not in {"all", "cited", "section"}:
+                raise ValueError(f"unknown judge scope {judge_scope!r}")
+            self._judge_scope = judge_scope
 
     def check_sentence(
         self, premise: Premise, sentence: str, *, query: str | None = None
@@ -208,8 +262,15 @@ class AuditVerifier(JudgedVerifier):
                 repair=Repair("ban", 0),
                 details=(f"{CLASSIFICATION_SHIFT}: {detail}",),
             )
-        if self._cited_only:
-            self.nli = cited_nli_scorer(self.judge, premise, refs.text, aligned, query=query)
+        if self._judge_scope != "all":
+            self.nli = cited_nli_scorer(
+                self.judge,
+                premise,
+                refs.text,
+                aligned,
+                query=query,
+                scope=self._judge_scope,
+            )
         try:
             return super().check_sentence(premise, refs.text, query=query)
         finally:
@@ -226,8 +287,8 @@ def make_verifier(
     judge = Judge(RecordingJudgeChat(judge_chat, calls))
     judge.preset = policy.judge_preset
     config = verifier_config(policy)
-    cited_only = policy.verifier_config_name == CITED_PASSAGES_CONFIG
-    return AuditVerifier(judge, passage_ids, config, cited_only=cited_only)
+    scope = _POLICY_SCOPES[policy.verifier_config_name]
+    return AuditVerifier(judge, passage_ids, config, judge_scope=scope)
 
 
 def reason_codes(reasons: Iterable[str], details: Iterable[str]) -> tuple[str, ...]:

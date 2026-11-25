@@ -21,6 +21,8 @@ from chapterverse.contracts import (  # noqa: E402
     ChatRequest,
     Event,
     Rotation,
+    TemporalStatus,
+    Window,
 )
 from chapterverse.pipeline import AskRequest, Pipeline  # noqa: E402
 from chapterverse.providers.ledger import JUDGE_OUTPUT_RESERVE  # noqa: E402
@@ -29,6 +31,7 @@ from eval.run import NoModelRotation  # noqa: E402
 from eval.token_budget import (  # noqa: E402
     CapturingRotation,
     answers_per_minute,
+    build_judge_request,
     main,
     measure_row,
     render_markdown,
@@ -123,6 +126,49 @@ def test_cited_scope_produces_fewer_judge_chars_than_all(
     )
 
 
+def test_section_scope_keeps_windows_of_p1_section_only() -> None:
+    windows = (
+        Window(
+            passage_id="P1",
+            coordinate="uk/ukpga/1996/18/s119/1",
+            heading="ERA 1996, s.119(1)",
+            text="First subsection of section 119.",
+            status=TemporalStatus.IN_FORCE,
+            version_date="2026-01-01",
+            source_url="https://www.legislation.gov.uk/ukpga/1996/18/section/119/1",
+        ),
+        Window(
+            passage_id="P2",
+            coordinate="uk/ukpga/1996/18/s119/2",
+            heading="ERA 1996, s.119(2)",
+            text="Second subsection of section 119.",
+            status=TemporalStatus.IN_FORCE,
+            version_date="2026-01-01",
+            source_url="https://www.legislation.gov.uk/ukpga/1996/18/section/119/2",
+        ),
+        Window(
+            passage_id="P3",
+            coordinate="uk/ukpga/1996/18/s124/1",
+            heading="ERA 1996, s.124(1)",
+            text="Different section 124 content.",
+            status=TemporalStatus.IN_FORCE,
+            version_date="2026-01-01",
+            source_url="https://www.legislation.gov.uk/ukpga/1996/18/section/124/1",
+        ),
+    )
+    _, req_all = build_judge_request(windows, scope="all")
+    _, req_cited = build_judge_request(windows, scope="cited")
+    _, req_sec = build_judge_request(windows, scope="section")
+
+    sec_user = req_sec.messages[1]["content"]
+    assert "First subsection of section 119." in sec_user
+    assert "Second subsection of section 119." in sec_user
+    assert "Different section 124 content." not in sec_user
+    assert (
+        len(req_cited.messages[1]["content"]) < len(sec_user) < len(req_all.messages[1]["content"])
+    )
+
+
 def test_answers_per_minute_arithmetic() -> None:
     gen_res = 2000
     judge_res = 1000
@@ -203,3 +249,22 @@ def test_main_writes_outputs_on_fixture(
     summary = summarize_measurements(payload["rows"], judge_scope="cited")
     assert summary["answer_shapes"] == payload["summary"]["answer_shapes"]
     assert "Token Budget" in render_markdown(payload)
+
+    sec_dir = tmp_path / "out-section"
+    assert (
+        main(
+            [
+                "--split",
+                "dev",
+                "--battery",
+                str(battery),
+                "--out",
+                str(sec_dir),
+                "--judge-scope",
+                "section",
+            ]
+        )
+        == 0
+    )
+    sec_payload = json.loads((sec_dir / "token-budget.json").read_text(encoding="utf-8"))
+    assert sec_payload["summary"]["judge_scope"] == "section"
