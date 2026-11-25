@@ -8,7 +8,7 @@ PyPA's `build`). They import `chapterverse`, so run them with `uv run` from the 
 | `textstore.py build` | Builds the text store from `$LEGAL_DATA_ROOT/uk` into `artefacts/store/` |
 | `textstore.py bench` | Measures load time, RSS and `get()` latency of a built store |
 | `manifest.py show`, `manifest.py verify` | Prints a store's manifest and `corpus_id`; re-hashes every file |
-| `publish_dataset.py` | Uploads the store, router index, concepts, SymSpell dictionary, dense index and query model to a Hugging Face Dataset (dry run by default) |
+| `publish_dataset.py` | Uploads the store, router index, concepts, SymSpell dictionary, dense index, query model and clarify prior to a Hugging Face Dataset (dry run by default) |
 
 ## Text store
 
@@ -159,4 +159,7 @@ reads it:
 | `index/index-manifest.json` and the files it lists | The router index |
 | `concepts/concepts-manifest.json` and the files it lists | The router concept index |
 | `symspell/symspell-manifest.json` and the files it lists | The SymSpell spelling dictionary |
+| `dense/dense-manifest.json` and the files it lists | The dense index |
+| `models/models-files-manifest.json` and the files it lists | The query model |
+| `clarify/clarify-manifest.json` and the files it lists | The clarify ranking prior |
 | `README.md` | The dataset card |

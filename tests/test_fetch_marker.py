@@ -42,6 +42,8 @@ def fake_artefacts_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     dense_dir.mkdir()
     models_dir = root / "models"
     models_dir.mkdir()
+    clarify_dir = root / "clarify"
+    clarify_dir.mkdir()
 
     main_manifest = root / "corpus-manifest.json"
     main_manifest.write_text('{"files": {}}', encoding="utf-8")
@@ -50,6 +52,7 @@ def fake_artefacts_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     (symspell_dir / "symspell-manifest.json").write_text('{"files": {}}', encoding="utf-8")
     (dense_dir / "dense-manifest.json").write_text('{"files": {}}', encoding="utf-8")
     (models_dir / "models-files-manifest.json").write_text('{"files": {}}', encoding="utf-8")
+    (clarify_dir / "clarify-manifest.json").write_text('{"files": {}}', encoding="utf-8")
 
     revision = "a" * 40
     endpoint = "https://huggingface.co"
@@ -76,6 +79,9 @@ def fake_artefacts_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
         ).hexdigest(),
         "models/models-files-manifest.json": hashlib.sha256(
             (models_dir / "models-files-manifest.json").read_bytes()
+        ).hexdigest(),
+        "clarify/clarify-manifest.json": hashlib.sha256(
+            (clarify_dir / "clarify-manifest.json").read_bytes()
         ).hexdigest(),
     }
     marker_data = source.marker(main_sha, extras)
@@ -125,6 +131,7 @@ def test_marker_only_ram_copy_passes_and_fails_after_marker_changed(
     (ram_dir / "symspell").mkdir()
     (ram_dir / "dense").mkdir()
     (ram_dir / "models").mkdir()
+    (ram_dir / "clarify").mkdir()
 
     (ram_dir / "corpus-manifest.json").write_bytes(
         (fake_artefacts_root / "corpus-manifest.json").read_bytes()
@@ -144,6 +151,9 @@ def test_marker_only_ram_copy_passes_and_fails_after_marker_changed(
     (ram_dir / "models" / "models-files-manifest.json").write_bytes(
         (fake_artefacts_root / "models" / "models-files-manifest.json").read_bytes()
     )
+    (ram_dir / "clarify" / "clarify-manifest.json").write_bytes(
+        (fake_artefacts_root / "clarify" / "clarify-manifest.json").read_bytes()
+    )
     (ram_dir / ".artefacts-source.json").write_bytes(
         (fake_artefacts_root / ".artefacts-source.json").read_bytes()
     )
@@ -162,3 +172,9 @@ def test_marker_only_ram_copy_passes_and_fails_after_marker_changed(
 def test_verify_only_parallel_on_marker_fixture(fake_artefacts_root: Path) -> None:
     code = fetch_artefacts.main(["--data-dir", str(fake_artefacts_root), "--verify-only"])
     assert code == 0
+
+
+def test_default_extras_include_clarify_manifest() -> None:
+    settings = fetch_artefacts.config_from_env({})
+    assert "clarify/clarify-manifest.json" in settings.extras
+    assert "clarify/clarify-manifest.json" in fetch_artefacts.DEFAULT_EXTRAS

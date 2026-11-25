@@ -63,7 +63,7 @@ ROUTER_REPO: Final = Path(
 SEAL: Final = "seals/concept-2026-09-29.json"
 BATTERY: Final = "batteries/concept/uk.jsonl"
 SEALED_TEST: Final = "reports/discovery-uk-test.json"
-DEFAULT_PRIOR: Final = Path("artefacts/clarify_prior.json")
+DEFAULT_PRIOR: Final = Path("artefacts/clarify/clarify_prior.json")
 TOP_K_RANK: Final = 10
 GATE_HIT10_THRESHOLD: Final = 0.88
 GATE_MRR_THRESHOLD: Final = 0.63
@@ -126,7 +126,7 @@ def add_prior_args(parser: argparse.ArgumentParser) -> None:
         "--prior",
         type=Path,
         default=DEFAULT_PRIOR,
-        help="Path to clarify prior JSON (default: artefacts/clarify_prior.json)",
+        help="Path to clarify prior JSON (default: artefacts/clarify/clarify_prior.json)",
     )
     parser.add_argument(
         "--no-prior",

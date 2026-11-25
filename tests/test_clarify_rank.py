@@ -348,7 +348,7 @@ def test_eval_prior_flags_and_pipeline_wiring(
 
     for parser_fn in (eval_discovery_gate._parse_args, eval_clarify_rank._parse_args):
         default_args = parser_fn([])
-        assert default_args.prior == Path("artefacts/clarify_prior.json")
+        assert default_args.prior == Path("artefacts/clarify/clarify_prior.json")
         assert default_args.no_prior is False
 
         no_prior_args = parser_fn(["--no-prior"])
@@ -394,4 +394,36 @@ def test_eval_prior_flags_and_pipeline_wiring(
         "on": False,
         "path": None,
         "snapshot": None,
+    }
+
+
+def test_build_clarify_prior_writes_manifest(tmp_path: Path) -> None:
+    import hashlib  # noqa: PLC0415
+
+    from scripts import build_clarify_prior  # noqa: PLC0415
+
+    assert Path("artefacts/clarify/clarify_prior.json") == build_clarify_prior.DEFAULT_OUT
+
+    repo = tmp_path / "router"
+    (repo / "data" / "index").mkdir(parents=True)
+    (repo / "data" / "index" / "index-manifest.json").write_text(
+        json.dumps({"snapshot": "2026-09-28"}), encoding="utf-8"
+    )
+    out = tmp_path / "clarify" / "clarify_prior.json"
+    assert build_clarify_prior.main(["--router-repo", str(repo), "--out", str(out)]) == 0
+
+    raw = out.read_bytes()
+    prior = json.loads(raw)
+    assert prior["format_version"] == 1
+    assert prior["snapshot"] == "2026-09-28"
+
+    manifest = json.loads((out.parent / "clarify-manifest.json").read_bytes())
+    assert manifest == {
+        "snapshot": "2026-09-28",
+        "files": {
+            "clarify_prior.json": {
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "size": len(raw),
+            }
+        },
     }

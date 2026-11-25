@@ -1,4 +1,4 @@
-"""Upload the text store, router indexes, SymSpell dictionary, dense index and model
+"""Upload the text store, router indexes, SymSpell dictionary, dense index, model and clarify prior
 to a Hugging Face Dataset, with an OGL v3.0 dataset card.
 
     uv run --with huggingface_hub python build/publish_dataset.py [--store DIR] [--data ROOT]
@@ -12,6 +12,7 @@ Layout of the dataset (what ``deploy/fetch_artefacts.py`` fetches for one boot):
     symspell/symspell-manifest.json, ...    the SymSpell dictionary and manifest
     dense/dense-manifest.json, ...          the dense index
     models/models-files-manifest.json, ...  the query model
+    clarify/clarify-manifest.json, ...      the clarify ranking prior and manifest
     README.md                               the dataset card
 
 ``--data`` (default ``$LEGAL_DATA_ROOT``) is the data root holding ``index/`` and
@@ -19,11 +20,12 @@ Layout of the dataset (what ``deploy/fetch_artefacts.py`` fetches for one boot):
 dictionary and manifest. ``--dense`` (default ``artefacts/dense/index``) holds the
 quantised dense index. ``--models`` (default ``artefacts/models``) holds the ONNX
 models directory and ``models-manifest.json``. ``--dense-model`` (default
-``bge-small-en-v1.5``) chooses which query model to package.
+``bge-small-en-v1.5``) chooses which query model to package. ``--clarify`` (default
+``artefacts/clarify``) holds the clarify ranking prior and manifest.
 
-Every file is checked against its own manifest first, both router manifests and the
-dense manifest must carry the store's snapshot date, and the symspell and dense
-manifests must carry the store's snapshot date and corpus_id.
+Every file is checked against its own manifest first; the router, symspell, dense and
+clarify manifests must carry the store's snapshot date, and the symspell and dense
+manifests must carry the store's corpus_id.
 
 Without ``--yes`` it is a dry run: it runs the checks and prints what would be uploaded and the
 dataset card. A real upload needs both ``--repo`` and ``--yes``, and puts everything in one
@@ -107,14 +109,19 @@ def store_uploads(store: Path) -> tuple[dict[str, Any], list[Upload]]:
     return manifest, uploads
 
 
-def router_dir(data: Path, name: str, manifest_name: str, snapshot: str) -> RouterDir:
-    """One router directory, checked against the manifest the router wrote for it."""
-    root = data / name
-    path = root / manifest_name
+def _load_dir_manifest(
+    path: Path,
+    name: str,
+    manifest_name: str,
+    snapshot: str,
+    *,
+    err_root: Path,
+    cid: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
         manifest = json.loads(path.read_bytes())
     except FileNotFoundError:
-        raise PublishError(f"no {name}/{manifest_name} under {data}") from None
+        raise PublishError(f"no {name}/{manifest_name} under {err_root}") from None
     except ValueError as exc:
         raise PublishError(f"{name}/{manifest_name} is not valid JSON") from exc
     files = manifest.get("files") if isinstance(manifest, dict) else None
@@ -125,16 +132,49 @@ def router_dir(data: Path, name: str, manifest_name: str, snapshot: str) -> Rout
             f"{name}/{manifest_name} has snapshot {manifest.get('snapshot')!r}, "
             f"the store has {snapshot!r}"
         )
-    uploads = [Upload(f"{name}/{manifest_name}", path, path.stat().st_size, sha256_file(path))]
+    if cid is not None and manifest.get("corpus_id") != cid:
+        raise PublishError(
+            f"{name}/{manifest_name} has corpus_id {manifest.get('corpus_id')!r}, "
+            f"the store has {cid!r}"
+        )
+    return manifest, files
+
+
+def _verify_dir_uploads(
+    root: Path,
+    manifest_path: Path,
+    name: str,
+    manifest_name: str,
+    files: Mapping[str, Any],
+) -> list[Upload]:
+    uploads = [
+        Upload(
+            f"{name}/{manifest_name}",
+            manifest_path,
+            manifest_path.stat().st_size,
+            sha256_file(manifest_path),
+        )
+    ]
     for rel, entry in sorted(files.items()):
         local = root / rel
         if Path(rel).is_absolute() or ".." in Path(rel).parts or not local.is_file():
             raise PublishError(f"{name}/{rel}: missing or a bad path")
+        if not isinstance(entry, dict):
+            raise PublishError(f"{name}/{rel}: bad entry in {manifest_name}")
         size, digest = local.stat().st_size, sha256_file(local)
         wanted = entry.get("size", entry.get("bytes"))
         if digest != entry.get("sha256") or (wanted is not None and wanted != size):
             raise PublishError(f"{name}/{rel}: does not match {manifest_name}")
         uploads.append(Upload(f"{name}/{rel}", local, size, digest))
+    return uploads
+
+
+def router_dir(data: Path, name: str, manifest_name: str, snapshot: str) -> RouterDir:
+    """One router directory, checked against the manifest the router wrote for it."""
+    root = data / name
+    path = root / manifest_name
+    manifest, files = _load_dir_manifest(path, name, manifest_name, snapshot, err_root=data)
+    uploads = _verify_dir_uploads(root, path, name, manifest_name, files)
     return RouterDir(name, manifest_name, manifest, tuple(uploads))
 
 
@@ -143,25 +183,9 @@ def symspell_dir(data: Path, snapshot: str, cid: str) -> RouterDir:
     name = "symspell"
     manifest_name = "symspell-manifest.json"
     path = data / manifest_name
-    try:
-        manifest = json.loads(path.read_bytes())
-    except FileNotFoundError:
-        raise PublishError(f"no {name}/{manifest_name} under {data}") from None
-    except ValueError as exc:
-        raise PublishError(f"{name}/{manifest_name} is not valid JSON") from exc
-    files = manifest.get("files") if isinstance(manifest, dict) else None
-    if not isinstance(files, dict) or not files:
-        raise PublishError(f"{name}/{manifest_name} lists no files")
-    if manifest.get("snapshot") != snapshot:
-        raise PublishError(
-            f"{name}/{manifest_name} has snapshot {manifest.get('snapshot')!r}, "
-            f"the store has {snapshot!r}"
-        )
-    if manifest.get("corpus_id") != cid:
-        raise PublishError(
-            f"{name}/{manifest_name} has corpus_id {manifest.get('corpus_id')!r}, "
-            f"the store has {cid!r}"
-        )
+    manifest, files = _load_dir_manifest(
+        path, name, manifest_name, snapshot, err_root=data, cid=cid
+    )
     dict_entry = files.get("dictionary.txt")
     if not isinstance(dict_entry, dict):
         raise PublishError(f"{name}/{manifest_name} has no entry for dictionary.txt")
@@ -184,35 +208,22 @@ def dense_dir(data: Path, snapshot: str, cid: str) -> RouterDir:
     name = "dense"
     manifest_name = "dense-manifest.json"
     path = data / manifest_name
-    try:
-        manifest = json.loads(path.read_bytes())
-    except FileNotFoundError:
-        raise PublishError(f"no {name}/{manifest_name} under {data}") from None
-    except ValueError as exc:
-        raise PublishError(f"{name}/{manifest_name} is not valid JSON") from exc
-    files = manifest.get("files") if isinstance(manifest, dict) else None
-    if not isinstance(files, dict) or not files:
-        raise PublishError(f"{name}/{manifest_name} lists no files")
-    if manifest.get("snapshot") != snapshot:
-        raise PublishError(
-            f"{name}/{manifest_name} has snapshot {manifest.get('snapshot')!r}, "
-            f"the store has {snapshot!r}"
-        )
-    if manifest.get("corpus_id") != cid:
-        raise PublishError(
-            f"{name}/{manifest_name} has corpus_id {manifest.get('corpus_id')!r}, "
-            f"the store has {cid!r}"
-        )
-    uploads = [Upload(f"{name}/{manifest_name}", path, path.stat().st_size, sha256_file(path))]
-    for rel, entry in sorted(files.items()):
-        local = data / rel
-        if Path(rel).is_absolute() or ".." in Path(rel).parts or not local.is_file():
-            raise PublishError(f"{name}/{rel}: missing or a bad path")
-        size, digest = local.stat().st_size, sha256_file(local)
-        wanted = entry.get("size", entry.get("bytes"))
-        if digest != entry.get("sha256") or (wanted is not None and wanted != size):
-            raise PublishError(f"{name}/{rel}: does not match {manifest_name}")
-        uploads.append(Upload(f"{name}/{rel}", local, size, digest))
+    manifest, files = _load_dir_manifest(
+        path, name, manifest_name, snapshot, err_root=data, cid=cid
+    )
+    uploads = _verify_dir_uploads(data, path, name, manifest_name, files)
+    return RouterDir(name, manifest_name, manifest, tuple(uploads))
+
+
+def clarify_dir(data: Path, snapshot: str) -> RouterDir:
+    """The clarify prior directory, checked against clarify-manifest.json and the store snapshot."""
+    name = "clarify"
+    manifest_name = "clarify-manifest.json"
+    path = data / manifest_name
+    manifest, files = _load_dir_manifest(path, name, manifest_name, snapshot, err_root=data)
+    if not isinstance(files.get("clarify_prior.json"), dict):
+        raise PublishError(f"{name}/{manifest_name} has no entry for clarify_prior.json")
+    uploads = _verify_dir_uploads(data, path, name, manifest_name, files)
     return RouterDir(name, manifest_name, manifest, tuple(uploads))
 
 
@@ -439,6 +450,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="bge-small-en-v1.5",
         help="dense query model name (defaults to bge-small-en-v1.5)",
     )
+    parser.add_argument(
+        "--clarify",
+        type=Path,
+        default=Path("artefacts/clarify"),
+        help="clarify prior directory (defaults to artefacts/clarify)",
+    )
     parser.add_argument("--repo", help="dataset repository, OWNER/NAME")
     parser.add_argument("--yes", action="store_true", help="really upload (needs --repo)")
     parser.add_argument(
@@ -461,7 +478,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         symspell = symspell_dir(args.symspell, str(manifest["snapshot"]), cid)
         dense = dense_dir(args.dense, str(manifest["snapshot"]), cid)
         models, model_repo, model_rev = models_dir(args.models, args.dense_model)
-        all_dirs = [*routers, symspell, dense, models]
+        clarify = clarify_dir(args.clarify, str(manifest["snapshot"]))
+        all_dirs = [*routers, symspell, dense, models, clarify]
     except PublishError as exc:
         print(f"check failed: {exc}", file=sys.stderr)
         return 1

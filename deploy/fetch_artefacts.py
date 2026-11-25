@@ -11,6 +11,7 @@ published as a public Hugging Face Dataset. Layout of the dataset (and of ``DATA
     symspell/symspell-manifest.json, ... spelling dictionary
     dense/dense-manifest.json, ...   dense index
     models/models-files-manifest.json, ... query model
+    clarify/clarify-manifest.json, ... clarify ranking prior
 
 A manifest holds ``files``, either a mapping ``{"relative/path": {"sha256": "<hex>",
 "size": <int>}}`` (``bytes`` is accepted for ``size``; either is optional) or a list of
@@ -43,7 +44,7 @@ HF_ENDPOINT         default ``https://huggingface.co``
 MANIFEST_NAME       default ``corpus-manifest.json``
 MANIFEST_SHA256     optional pin of the manifest's own SHA-256; strongly recommended
 EXTRA_MANIFESTS     comma list (empty for none), default
-                    ``index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json,dense/dense-manifest.json,models/models-files-manifest.json``
+                    ``index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json,dense/dense-manifest.json,models/models-files-manifest.json,clarify/clarify-manifest.json``
 ARTEFACTS_WORKERS   parallel downloads (default 4); verify defaults to min(cpu, 8)
 ==================  =========================================================================
 
@@ -650,7 +651,7 @@ def copy_tree(src_root: Path, dst_root: Path, settings: Settings) -> int:
 
 DEFAULT_EXTRAS = (
     "index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json,"
-    "dense/dense-manifest.json,models/models-files-manifest.json"
+    "dense/dense-manifest.json,models/models-files-manifest.json,clarify/clarify-manifest.json"
 )
 
 

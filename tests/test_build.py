@@ -326,6 +326,32 @@ def make_dense_fixture(store_path: Path, out: Path) -> Path:
     return out
 
 
+def make_clarify_fixture(store_path: Path, out: Path) -> Path:
+    manifest = read_manifest(store_path)
+    snap = str(manifest["snapshot"])
+    out.mkdir(parents=True, exist_ok=True)
+    prior_bytes = canonical_json(
+        {
+            "format_version": 1,
+            "snapshot": snap,
+            "sections": {"uk/ukpga/1996/18/s124": 7},
+            "instruments": {"uk/ukpga/1996/18": 15},
+        }
+    )
+    (out / "clarify_prior.json").write_bytes(prior_bytes)
+    clarify_manifest = {
+        "snapshot": snap,
+        "files": {
+            "clarify_prior.json": {
+                "sha256": hashlib.sha256(prior_bytes).hexdigest(),
+                "size": len(prior_bytes),
+            }
+        },
+    }
+    (out / "clarify-manifest.json").write_bytes(canonical_json(clarify_manifest))
+    return out
+
+
 def publish(built: Path, data: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     extra_list = list(extra)
     if "--dense" not in extra_list:
@@ -358,6 +384,11 @@ def publish(built: Path, data: Path, *extra: str) -> subprocess.CompletedProcess
             }
             (sym_dir / "symspell-manifest.json").write_bytes(canonical_json(sym_manifest))
         extra_list.extend(["--symspell", str(sym_dir)])
+    if "--clarify" not in extra_list:
+        clarify_dir = built.parent / "clarify"
+        if not (clarify_dir / "clarify-manifest.json").is_file():
+            make_clarify_fixture(built, clarify_dir)
+        extra_list.extend(["--clarify", str(clarify_dir)])
     return run(
         "publish_dataset.py", "--store", str(built), "--data", str(data), *extra_list, check=False
     )
@@ -371,6 +402,7 @@ def _verify_dry_run_files(
     built_symspell: Path,
     dense_dir: Path,
     models_dir: Path,
+    clarify_dir: Path,
     expected_names: set[str],
 ) -> None:
     names = [f["path"] for f in plan["files"]]
@@ -388,6 +420,9 @@ def _verify_dry_run_files(
             assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
         elif p.startswith("symspell/"):
             local = built_symspell / Path(p).name
+            assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
+        elif p.startswith("clarify/"):
+            local = clarify_dir / Path(p).name
             assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
         elif "/" in p:
             local = fixture_data_root / p
@@ -443,8 +478,20 @@ def test_publish_is_a_dry_run_by_default(
         *(f"models/bge-small-en-v1.5/{rel}" for rel in model_manifest_data["files"]),
     }
 
+    clarify_dir = built.parent / "clarify"
+    clarify_manifest_path = clarify_dir / "clarify-manifest.json"
+    clarify_digest = hashlib.sha256(clarify_manifest_path.read_bytes()).hexdigest()
+    assert plan["extra_manifests"]["clarify/clarify-manifest.json"] == clarify_digest
+    clarify_names = {"clarify/clarify-manifest.json", "clarify/clarify_prior.json"}
+
     all_names = (
-        store_names | router_names | symspell_names | dense_names | model_file_names | {"README.md"}
+        store_names
+        | router_names
+        | symspell_names
+        | dense_names
+        | model_file_names
+        | clarify_names
+        | {"README.md"}
     )
     _verify_dry_run_files(
         plan,
@@ -453,6 +500,7 @@ def test_publish_is_a_dry_run_by_default(
         built_symspell=built_symspell,
         dense_dir=dense_dir,
         models_dir=models_dir,
+        clarify_dir=clarify_dir,
         expected_names=all_names,
     )
     assert "license_name: ogl-3.0" in card
@@ -461,9 +509,36 @@ def test_publish_is_a_dry_run_by_default(
     assert "| `symspell/` |" in card
     assert "| `dense/` |" in card
     assert "| `models/` |" in card
+    assert "| `clarify/` |" in card
     assert "Model licence: MIT" in card
     assert not _FORBIDDEN.search(card)
     assert "**" not in card
+
+
+def test_publish_refuses_clarify_of_another_snapshot(
+    built: Path, fixture_data_root: Path, tmp_path: Path
+) -> None:
+    clarify_copy = tmp_path / "clarify"
+    make_clarify_fixture(built, clarify_copy)
+    mpath = clarify_copy / "clarify-manifest.json"
+    manifest = json.loads(mpath.read_bytes())
+    manifest["snapshot"] = "2020-01-01"
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    result = publish(built, fixture_data_root, "--clarify", str(clarify_copy))
+    assert result.returncode == 1
+    assert "clarify/clarify-manifest.json has snapshot" in result.stderr
+
+
+def test_publish_refuses_a_damaged_clarify_file(
+    built: Path, fixture_data_root: Path, tmp_path: Path
+) -> None:
+    clarify_copy = tmp_path / "clarify"
+    make_clarify_fixture(built, clarify_copy)
+    ppath = clarify_copy / "clarify_prior.json"
+    ppath.write_bytes(ppath.read_bytes() + b"extra")
+    result = publish(built, fixture_data_root, "--clarify", str(clarify_copy))
+    assert result.returncode == 1
+    assert "clarify/clarify_prior.json: does not match clarify-manifest.json" in result.stderr
 
 
 def test_publish_refuses_symspell_of_another_corpus_id(

@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -20,7 +21,7 @@ from legal_rag_verifier.corpus import instrument_coordinate
 DEFAULT_ROUTER_REPO: Final = Path(
     os.environ.get("LRR_ROOT", str(Path.home() / "Code" / "legal-rag-router"))
 )
-DEFAULT_OUT: Final = Path("artefacts/clarify_prior.json")
+DEFAULT_OUT: Final = Path("artefacts/clarify/clarify_prior.json")
 _YEAR_PART_INDEX: Final = 2
 _CALENDAR_INST_PARTS: Final = 4
 _REGNAL_INST_PARTS: Final = 5
@@ -109,13 +110,28 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.perf_counter()
     repo = args.router_repo.expanduser().resolve()
     payload = build_prior(repo)
+    prior_bytes = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_bytes(orjson.dumps(payload, option=orjson.OPT_SORT_KEYS))
+    args.out.write_bytes(prior_bytes)
+
+    manifest = {
+        "snapshot": str(payload.get("snapshot", "")),
+        "files": {
+            args.out.name: {
+                "sha256": hashlib.sha256(prior_bytes).hexdigest(),
+                "size": len(prior_bytes),
+            }
+        },
+    }
+    manifest_path = args.out.parent / "clarify-manifest.json"
+    manifest_path.write_bytes(
+        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8") + b"\n"
+    )
     elapsed = time.perf_counter() - t0
     print(
-        f"Wrote {args.out} in {elapsed:.2f}s "
+        f"Wrote {args.out} and {manifest_path} in {elapsed:.2f}s "
         f"({len(payload['sections'])} sections, {len(payload['instruments'])} instruments, "
-        f"{args.out.stat().st_size / 1024:.1f} KB)"
+        f"{len(prior_bytes) / 1024:.1f} KB)"
     )
     return 0
 

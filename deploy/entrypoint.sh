@@ -58,6 +58,13 @@ else
   echo "warning: dense index or models manifest not found in $STORE_DIR; running with dense retrieval off" >&2
 fi
 
+if [ -f "$STORE_DIR/clarify/clarify_prior.json" ]; then
+  CLARIFY_PRIOR_PATH="$STORE_DIR/clarify/clarify_prior.json"
+  export CLARIFY_PRIOR_PATH
+else
+  echo "warning: $STORE_DIR/clarify/clarify_prior.json not found; running with clarify prior off" >&2
+fi
+
 export STORE_DIR ROUTER_INDEX CONCEPTS_INDEX
 
 exec uvicorn chapterverse.app:app \
