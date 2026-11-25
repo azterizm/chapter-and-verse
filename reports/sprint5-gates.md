@@ -69,3 +69,12 @@ Optional prior (`CLARIFY_PRIOR_PATH`, off when unset). Sealed concept test, pre-
 ## Web (S5.4)
 
 Engine-recorded mock streams (`web/mock/record_engine.py`), local real-engine preview (`npm run dev:engine` with `scripts/dev_engine.py`, 127.0.0.1 only), `eval/web_smoke.py` in the repo, clarify Change flow tested at phone width.
+
+## Live (deployed 25 Nov 2026 06:55 UTC: A1 engine at sprint-5 4ddd19a, dataset 85bc3efc; Worker unchanged 7b93ed49)
+
+- Dataset revision 85bc3efc adds only `clarify/` (every other manifest byte-identical to 12e38978, checked before upload). Host `engine.env` HF_REVISION bumped (backup `engine.env.bak-pre-s5`).
+- Engine healthy 30 s after start; dense on; clarify prior on (snapshot 2026-09-28).
+- Live probes at pace 7: 29/29.
+- Live legal answers (rubric): L01, L07, L09, L45, L73 pass, 5/5.
+- Live clarify for "How long do I have to sue in tort?": s.2 Limitation Act 1980 first (was TULRCA s.22 and s.219 first without dense).
+- The full paced live run of the battery is left for after 00:00 UTC: today's local runs used about half of Groq's 200,000-token day on the shared key.
