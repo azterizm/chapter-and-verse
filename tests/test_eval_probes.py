@@ -48,9 +48,13 @@ from eval.probes_gate import (  # noqa: E402
     parse_sse_to_events,
 )
 
+_HAS_PROBES_REPO = (PROBES_REPO / "scripts" / "claim_shapes.py").is_file()
+
 
 @pytest.fixture(scope="module")
 def claim_shapes() -> Any:
+    if not _HAS_PROBES_REPO:
+        pytest.skip("needs sibling rag-security-probes checkout")
     return load_claim_shapes(PROBES_REPO)
 
 
@@ -94,6 +98,7 @@ def _minimal_stream(query: str, second_event: Event) -> list[Event]:
 # ---------------------------------------------------------------------------- classification
 
 
+@pytest.mark.skipif(not _HAS_PROBES_REPO, reason="needs sibling rag-security-probes checkout")
 def test_probes_classification_and_count() -> None:
     probes = load_all_probes(PROBES_REPO)
     assert len(probes) == 29

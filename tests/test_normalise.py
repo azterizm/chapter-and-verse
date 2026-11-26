@@ -51,7 +51,7 @@ def symspell_dict(tmp_path_factory: pytest.TempPathFactory) -> SymSpell:
     # Ensure standard test vocabulary is present
     test_words = {
         "unfair": 2000,
-        "dismissal": 200,
+        "dismissal": 2000,
         "employment": 1000,
         "rights": 800,
         "act": 50000,
@@ -63,6 +63,23 @@ def symspell_dict(tmp_path_factory: pytest.TempPathFactory) -> SymSpell:
         "tribunal": 1000,
         "redundancy": 5000,
         "pay": 10000,
+        "here": 5000,
+        "check": 5000,
+        "landlord": 1000,
+        "discrimination": 1000,
+        "dismissed": 1000,
+        "automatically": 1000,
+        "unfairly": 1000,
+        "because": 1000,
+        "puts": 1000,
+        "unwanted": 1000,
+        "violating": 1000,
+        "arrested": 1000,
+        "defrauding": 1000,
+        "induced": 1000,
+        "refused": 1000,
+        "unmarried": 1000,
+        "compensaton": 3,
     }
     for word, count in test_words.items():
         sym.create_dictionary_entry(word, count)

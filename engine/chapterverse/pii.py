@@ -330,6 +330,11 @@ def _process_run(
     return (run_start, run_end, "NAME", run_text, 0)
 
 
+_NON_NAME_FALLBACK_POS: Final[frozenset[str]] = frozenset(
+    {"AUX", "DET", "PRON", "ADP", "CCONJ", "SCONJ", "PART", "INTJ"}
+)
+
+
 def _is_fallback_token(
     tok: Token,
     vocabulary: frozenset[str] | None,
@@ -337,7 +342,12 @@ def _is_fallback_token(
     existing_candidates: list[Candidate],
 ) -> bool:
     """Check whether a token qualifies as a fallback name candidate."""
-    if tok.is_space or tok.is_punct or not tok.text[:1].isupper():
+    if (
+        tok.is_space
+        or tok.is_punct
+        or not tok.text[:1].isupper()
+        or tok.pos_ in _NON_NAME_FALLBACK_POS
+    ):
         return False
     tok_lower = tok.text.lower()
     if tok_lower in MONTH_AND_DAY_NAMES or tok_lower in SINGLE_WORD_STOPLIST:

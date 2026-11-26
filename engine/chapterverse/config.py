@@ -115,6 +115,10 @@ class Settings:
     """``VERCEL_MODEL``: optional model id override for Vercel AI Gateway."""
     gemini_model: str | None = None
     """``GEMINI_MODEL``: optional model id override for Google AI Studio."""
+    vercel_thinking_off_effort: str | None = None
+    """``VERCEL_THINKING_OFF_EFFORT``: optional ``reasoning_effort`` when thinking is off."""
+    gemini_thinking_off_effort: str | None = None
+    """``GEMINI_THINKING_OFF_EFFORT``: optional ``reasoning_effort`` when thinking is off."""
     # The names of the variables holding the keys, not keys.
     groq_api_key_env: str = "GROQ_API_KEY"
     cloudflare_token_env: str = "CLOUDFLARE_AI_WORKER_TOKEN"  # noqa: S105 - a variable name
@@ -141,6 +145,8 @@ class Settings:
             "max_prompt_windows": self.max_prompt_windows,
             "vercel_model": self.vercel_model,
             "gemini_model": self.gemini_model,
+            "vercel_thinking_off_effort": self.vercel_thinking_off_effort,
+            "gemini_thinking_off_effort": self.gemini_thinking_off_effort,
             "groq_api_key_env": self.groq_api_key_env,
             "cloudflare_token_env": self.cloudflare_token_env,
             "vercel_key_env": self.vercel_key_env,
@@ -201,4 +207,6 @@ class Settings:
             max_prompt_windows=_positive_int(env, "MAX_PROMPT_WINDOWS", DEFAULT_MAX_PROMPT_WINDOWS),
             vercel_model=_optional(env, "VERCEL_MODEL"),
             gemini_model=_optional(env, "GEMINI_MODEL"),
+            vercel_thinking_off_effort=_optional(env, "VERCEL_THINKING_OFF_EFFORT"),
+            gemini_thinking_off_effort=_optional(env, "GEMINI_THINKING_OFF_EFFORT"),
         )

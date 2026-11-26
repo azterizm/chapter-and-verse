@@ -76,9 +76,15 @@ def _gate_chat(tmp_path: Path, inner: FakeInner, **kw: Any) -> hm.ModalGateChat:
     return chat
 
 
+_HAS_VERIFIER_REPO = (jg.VERIFIER_ROOT / "scripts" / "live_check.py").is_file() and (
+    jg.VERIFIER_ROOT / "scripts" / "run_battery.py"
+).is_file()
+
+
 # ---------------------------------------------------------------------- 1. Refuses without commit
 
 
+@pytest.mark.skipif(not _HAS_VERIFIER_REPO, reason="needs sibling legal-rag-verifier checkout")
 def test_refuses_without_method_commit(tmp_path: Path) -> None:
     args = argparse.Namespace(
         verifier=jg.VERIFIER_ROOT,
@@ -168,6 +174,7 @@ def test_cost_cap_stops_run_after_budget_spent(tmp_path: Path) -> None:
 # -------------------------------------------------------- 4. Counting matches Groq runner
 
 
+@pytest.mark.skipif(not _HAS_VERIFIER_REPO, reason="needs sibling legal-rag-verifier checkout")
 def test_counting_matches_groq_runner() -> None:
     rb = jg.load_run_battery(jg.VERIFIER_ROOT)
     fake_outcomes = [

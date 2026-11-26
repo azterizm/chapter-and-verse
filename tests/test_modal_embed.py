@@ -8,6 +8,7 @@ import sys
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -202,7 +203,11 @@ def test_spend_guard_refusal(
         )
 
 
-def test_embedder_raises_without_cuda() -> None:
+def test_embedder_raises_without_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "chapterverse.dense.embed.load_model",
+        lambda *_a, **_kw: SimpleNamespace(active_providers=["CPUExecutionProvider"]),
+    )
     embedder = Embedder()
     # On Mac / CPU environment, CUDAExecutionProvider will not be in active_providers
     with warnings.catch_warnings():

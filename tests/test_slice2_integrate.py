@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from legal_rag_router import Router
+from symspellpy import SymSpell  # type: ignore[import-untyped]
 
 from chapterverse.audit.policy import build_policy
 from chapterverse.contracts import (
@@ -45,18 +46,55 @@ def store(fixture_text_store: TextStore) -> CountingStore:
     return CountingStore(fixture_text_store)
 
 
+def _fallback_symspell_dict() -> SymSpell:
+    sym = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
+    for word, count in {
+        "unfair": 2000,
+        "dismissal": 2000,
+        "compensatory": 500,
+        "award": 5000,
+        "cap": 1000,
+        "redundancy": 5000,
+        "pay": 10000,
+        "can": 10000,
+        "claim": 5000,
+        "under": 5000,
+        "from": 5000,
+        "what": 5000,
+        "does": 5000,
+        "federal": 1000,
+        "law": 5000,
+        "say": 1000,
+        "about": 5000,
+        "overtime": 1000,
+        "employment": 5000,
+        "rights": 5000,
+        "act": 50000,
+        "section": 5000,
+        "tribunal": 1000,
+        "order": 10000,
+    }.items():
+        sym.create_dictionary_entry(word, count)
+    return sym
+
+
+def _load_or_fallback_dict() -> Any:
+    dict_path = REPO_ROOT / "artefacts" / "symspell" / "dictionary.txt"
+    if dict_path.is_file():
+        return load_dictionary(dict_path)
+    return _fallback_symspell_dict()
+
+
 @pytest.fixture(scope="session")
 def symspell_dict() -> Any:
-    return load_dictionary(REPO_ROOT / "artefacts" / "symspell" / "dictionary.txt")
+    return _load_or_fallback_dict()
 
 
 def _make_pipeline(
     router: Router, store: TextStore, rotation: Any, dictionary: Any = None, **kwargs: Any
 ) -> Pipeline:
     if dictionary is None:
-        dict_path = REPO_ROOT / "artefacts" / "symspell" / "dictionary.txt"
-        if dict_path.is_file():
-            dictionary = load_dictionary(dict_path)
+        dictionary = _load_or_fallback_dict()
     return Pipeline(
         router=router,
         store=store,

@@ -894,12 +894,16 @@ def test_config_with_vercel_and_gemini_overrides() -> None:
         "GEMINI_API_KEY": "AIzaTestKey1234567890",
         "VERCEL_MODEL": "alibaba/qwen3.8-flash",
         "GEMINI_MODEL": "gemini-3.5-flash-lite",
+        "VERCEL_THINKING_OFF_EFFORT": "minimal",
+        "GEMINI_THINKING_OFF_EFFORT": "low",
     }
     cfg = RotationConfig.from_env(env)
     assert cfg.generate == ("vercel", "gemini")
     assert cfg.judge == ()
     assert cfg.vercel_model == "alibaba/qwen3.8-flash"
     assert cfg.gemini_model == "gemini-3.5-flash-lite"
+    assert cfg.vercel_thinking_off_effort == "minimal"
+    assert cfg.gemini_thinking_off_effort == "low"
     assert dict(cfg.skipped) == {
         "groq": "GROQ_API_KEY is not set",
         "cloudflare": "CLOUDFLARE_ACCOUNT_ID is not set",
@@ -914,10 +918,14 @@ def test_config_with_vercel_and_gemini_overrides() -> None:
         concepts_index=Path("c"),
         vercel_model="alibaba/qwen3.7-flash",
         gemini_model="gemini-3-flash-preview",
+        vercel_thinking_off_effort="omit",
+        gemini_thinking_off_effort="low",
     )
     cfg2 = RotationConfig.from_env(env, settings=settings)
     assert cfg2.vercel_model == "alibaba/qwen3.7-flash"
     assert cfg2.gemini_model == "gemini-3-flash-preview"
+    assert cfg2.vercel_thinking_off_effort == "omit"
+    assert cfg2.gemini_thinking_off_effort == "low"
 
 
 @respx.mock

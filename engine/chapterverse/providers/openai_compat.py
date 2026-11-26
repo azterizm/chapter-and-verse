@@ -122,6 +122,21 @@ def _normalize_short_timeouts(
     return dict(timeouts)
 
 
+def _normalize_thinking_off_effort(value: str | None) -> str | None:
+    if value is None:
+        return None
+    clean = value.strip().lower()
+    return clean or None
+
+
+def _thinking_off_fields(effort: str | None, *, default: str) -> dict[str, Any]:
+    if effort is None:
+        return {"reasoning_effort": default}
+    if effort in ("off", "omit"):
+        return {}
+    return {"reasoning_effort": effort}
+
+
 _MINUTE_S: Final = 60.0
 ErrorOutcome = tuple[UnavailableKind, float | None, float | None]
 """(kind, retry_after_s, ledger block_s)."""
@@ -470,6 +485,7 @@ class VercelAdapter(Adapter):
         key_env: str = "AI_GATEWAY_API_KEY",
         base_url: str = VERCEL_BASE_URL,
         short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+        thinking_off_effort: str | None = None,
     ) -> None:
         clean = model.strip()
         if not clean:
@@ -478,6 +494,7 @@ class VercelAdapter(Adapter):
         self.model_id = clean
         self.key_env = key_env
         self._base = base_url.rstrip("/")
+        self._thinking_off_effort = _normalize_thinking_off_effort(thinking_off_effort)
         self.short_read_timeouts = (
             DEFAULT_SHORT_READ_TIMEOUTS
             if short_read_timeouts is DEFAULT_SHORT_READ_TIMEOUTS
@@ -491,7 +508,7 @@ class VercelAdapter(Adapter):
         del prefill
         if thinking:
             return {"reasoning_effort": "medium"}
-        return {"reasoning_effort": "none"}
+        return _thinking_off_fields(self._thinking_off_effort, default="none")
 
     def classify_429(self, headers: Mapping[str, str], text: str, now: float) -> ErrorOutcome:
         del now
@@ -522,6 +539,7 @@ class GeminiAdapter(Adapter):
         key_env: str = "GEMINI_API_KEY",
         base_url: str = GEMINI_BASE_URL,
         short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+        thinking_off_effort: str | None = None,
     ) -> None:
         clean = model.strip().removeprefix("models/")
         if not clean:
@@ -530,6 +548,7 @@ class GeminiAdapter(Adapter):
         self.model_id = clean
         self.key_env = key_env
         self._base = base_url.rstrip("/")
+        self._thinking_off_effort = _normalize_thinking_off_effort(thinking_off_effort)
         self.short_read_timeouts = (
             DEFAULT_SHORT_READ_TIMEOUTS
             if short_read_timeouts is DEFAULT_SHORT_READ_TIMEOUTS
@@ -546,8 +565,8 @@ class GeminiAdapter(Adapter):
         del prefill
         if thinking:
             return {"reasoning_effort": "medium"}
-        effort = "none" if "2.5" in self.request_model else "minimal"
-        return {"reasoning_effort": effort}
+        default = "none" if "2.5" in self.request_model else "minimal"
+        return _thinking_off_fields(self._thinking_off_effort, default=default)
 
     def classify_429(self, headers: Mapping[str, str], text: str, now: float) -> ErrorOutcome:
         lowered = text.lower()
@@ -1114,10 +1133,16 @@ def make_vercel(
     key_env: str = "AI_GATEWAY_API_KEY",
     ledger: QuotaLedger | None = None,
     short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+    thinking_off_effort: str | None = None,
     **kwargs: Any,
 ) -> OpenAICompatProvider:
     return OpenAICompatProvider(
-        VercelAdapter(model=model, key_env=key_env, short_read_timeouts=short_read_timeouts),
+        VercelAdapter(
+            model=model,
+            key_env=key_env,
+            short_read_timeouts=short_read_timeouts,
+            thinking_off_effort=thinking_off_effort,
+        ),
         ledger=ledger,
         **kwargs,
     )
@@ -1129,10 +1154,16 @@ def make_gemini(
     key_env: str = "GEMINI_API_KEY",
     ledger: QuotaLedger | None = None,
     short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+    thinking_off_effort: str | None = None,
     **kwargs: Any,
 ) -> OpenAICompatProvider:
     return OpenAICompatProvider(
-        GeminiAdapter(model=model, key_env=key_env, short_read_timeouts=short_read_timeouts),
+        GeminiAdapter(
+            model=model,
+            key_env=key_env,
+            short_read_timeouts=short_read_timeouts,
+            thinking_off_effort=thinking_off_effort,
+        ),
         ledger=ledger,
         **kwargs,
     )

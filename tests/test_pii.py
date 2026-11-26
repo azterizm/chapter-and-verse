@@ -235,3 +235,11 @@ def test_mask_pii_r6_sentence_initial_multi_token_person() -> None:
     assert masked.reverse_map["[PERSON 1]"] == "John Smith"
     assert masked.reverse_map["[ORG 1]"] == "Acme Ltd"
     assert masked.unmask() == text
+
+
+def test_mask_pii_does_not_merge_sentence_initial_aux_without_vocab() -> None:
+    text = "Can Priya Nkemelu claim under s.124 ERA 1996?"
+    res = analyse(text)
+    masked = mask_pii(text, res, vocabulary=frozenset({"claim"}))
+    assert masked.reverse_map["[NAME 1]"] == "Priya Nkemelu"
+    assert masked.text.startswith("Can [NAME 1] claim")

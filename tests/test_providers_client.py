@@ -981,3 +981,30 @@ def test_gemini_strips_models_prefix_and_maps_429() -> None:
         provider.complete(short())
     assert caught_rpd.value.kind == "quota"
     assert GEMINI_KEY not in caught_rpd.value.detail
+
+
+@respx.mock
+def test_thinking_off_effort_overrides_for_vercel_and_gemini() -> None:
+    v_low_route = respx.post(VERCEL_URL).mock(
+        return_value=httpx.Response(200, json=reply("Paris.", model=VERCEL_MODEL))
+    )
+    make_vercel(environ=VG_ENV, sleep=lambda _s: None, thinking_off_effort="low").complete(short())
+    assert sent(v_low_route)["reasoning_effort"] == "low"
+
+    v_omit_route = respx.post(VERCEL_URL).mock(
+        return_value=httpx.Response(200, json=reply("Paris.", model=VERCEL_MODEL))
+    )
+    make_vercel(environ=VG_ENV, sleep=lambda _s: None, thinking_off_effort="omit").complete(short())
+    assert "reasoning_effort" not in sent(v_omit_route)
+
+    g_low_route = respx.post(GEMINI_URL).mock(
+        return_value=httpx.Response(200, json=reply("Paris.", model=GEMINI_MODEL))
+    )
+    make_gemini(environ=VG_ENV, sleep=lambda _s: None, thinking_off_effort="low").complete(short())
+    assert sent(g_low_route)["reasoning_effort"] == "low"
+
+    g_omit_route = respx.post(GEMINI_URL).mock(
+        return_value=httpx.Response(200, json=reply("Paris.", model=GEMINI_MODEL))
+    )
+    make_gemini(environ=VG_ENV, sleep=lambda _s: None, thinking_off_effort="off").complete(short())
+    assert "reasoning_effort" not in sent(g_omit_route)

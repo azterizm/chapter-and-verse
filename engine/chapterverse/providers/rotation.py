@@ -121,6 +121,8 @@ class RotationConfig:
     modal_key_env: str = "MODAL_API_KEY"
     vercel_model: str = VERCEL_MODEL
     gemini_model: str = GEMINI_MODEL
+    vercel_thinking_off_effort: str | None = None
+    gemini_thinking_off_effort: str | None = None
     skipped: tuple[tuple[str, str], ...] = ()
 
     @property
@@ -154,6 +156,8 @@ class RotationConfig:
             modal_key = settings.modal_api_key_env
             vercel_model = settings.vercel_model or VERCEL_MODEL
             gemini_model = settings.gemini_model or GEMINI_MODEL
+            vercel_effort = settings.vercel_thinking_off_effort
+            gemini_effort = settings.gemini_thinking_off_effort
         else:
             account = env.get("CLOUDFLARE_ACCOUNT_ID", "").strip() or None
             modal_url = env.get("MODAL_URL", "").strip() or None
@@ -163,6 +167,8 @@ class RotationConfig:
             modal_key = "MODAL_API_KEY"
             vercel_model = env.get("VERCEL_MODEL", "").strip() or VERCEL_MODEL
             gemini_model = env.get("GEMINI_MODEL", "").strip() or GEMINI_MODEL
+            vercel_effort = env.get("VERCEL_THINKING_OFF_EFFORT", "").strip() or None
+            gemini_effort = env.get("GEMINI_THINKING_OFF_EFFORT", "").strip() or None
         groq_key, cf_key = keys
 
         def has(var: str) -> str | None:
@@ -199,6 +205,8 @@ class RotationConfig:
             modal_key_env=modal_key,
             vercel_model=vercel_model,
             gemini_model=gemini_model,
+            vercel_thinking_off_effort=vercel_effort,
+            gemini_thinking_off_effort=gemini_effort,
             skipped=tuple((n, reasons[n]) for n in listed if n in reasons),
         )
 
@@ -307,6 +315,7 @@ class ProviderRotation:
                         model=config.vercel_model,
                         key_env=config.vercel_key_env,
                         ledger=shared,
+                        thinking_off_effort=config.vercel_thinking_off_effort,
                         **kw,
                     )
                 )
@@ -316,6 +325,7 @@ class ProviderRotation:
                         model=config.gemini_model,
                         key_env=config.gemini_key_env,
                         ledger=shared,
+                        thinking_off_effort=config.gemini_thinking_off_effort,
                         **kw,
                     )
                 )

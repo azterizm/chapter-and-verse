@@ -390,6 +390,34 @@ def make_pit_fixture(store_path: Path, out: Path) -> Path:
     return out
 
 
+def make_models_fixture(out: Path) -> Path:
+    out.mkdir(parents=True, exist_ok=True)
+    model_name = "bge-small-en-v1.5"
+    model_dir = out / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
+    rel_bytes = {
+        "config.json": b'{"hidden_size":384}\n',
+        "tokenizer.json": b'{"version":"1.0"}\n',
+        "model.onnx": b"fake-onnx-model",
+    }
+    files_meta: dict[str, dict[str, Any]] = {}
+    for rel, content in rel_bytes.items():
+        (model_dir / rel).write_bytes(content)
+        files_meta[rel] = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+        }
+    models_manifest = {
+        model_name: {
+            "repo": "BAAI/bge-small-en-v1.5",
+            "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+            "files": files_meta,
+        }
+    }
+    (out / "models-manifest.json").write_bytes(canonical_json(models_manifest))
+    return out
+
+
 def publish(built: Path, data: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     extra_list = list(extra)
     if "--dense" not in extra_list:
@@ -398,7 +426,10 @@ def publish(built: Path, data: Path, *extra: str) -> subprocess.CompletedProcess
             make_dense_fixture(built, dense_dir)
         extra_list.extend(["--dense", str(dense_dir)])
     if "--models" not in extra_list:
-        extra_list.extend(["--models", str(REPO / "artefacts" / "models")])
+        models_dir = built.parent / "models"
+        if not (models_dir / "models-manifest.json").is_file():
+            make_models_fixture(models_dir)
+        extra_list.extend(["--models", str(models_dir)])
     if "--symspell" not in extra_list:
         sym_dir = built.parent / "symspell"
         if not (sym_dir / "symspell-manifest.json").is_file():
@@ -513,7 +544,7 @@ def test_publish_is_a_dry_run_by_default(
         *(f"dense/{rel}" for rel in json.loads(dense_manifest_path.read_bytes())["files"]),
     }
 
-    models_dir = REPO / "artefacts" / "models"
+    models_dir = built.parent / "models"
     models_files_manifest = plan["extra_manifests"].get("models/models-files-manifest.json")
     assert models_files_manifest is not None
     model_manifest_data = json.loads((models_dir / "models-manifest.json").read_bytes())[
@@ -686,8 +717,7 @@ def test_publish_refuses_missing_model(built: Path, fixture_data_root: Path) -> 
 def test_publish_refuses_a_damaged_model_file(
     built: Path, fixture_data_root: Path, tmp_path: Path
 ) -> None:
-    models_copy = tmp_path / "models"
-    shutil.copytree(REPO / "artefacts" / "models", models_copy)
+    models_copy = make_models_fixture(tmp_path / "models")
     target = models_copy / "bge-small-en-v1.5" / "config.json"
     target.write_bytes(target.read_bytes() + b"x")
     result = publish(built, fixture_data_root, "--models", str(models_copy))
