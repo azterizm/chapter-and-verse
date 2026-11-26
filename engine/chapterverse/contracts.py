@@ -500,6 +500,24 @@ class AnswerFactObject:
         """sha256 hex of :func:`canonical_json` of this object."""
         return sha256_hex(canonical_json(self))
 
+    @property
+    def evidence_id(self) -> str:
+        """sha256 hex of :func:`canonical_json` of the deterministic L1 evidence fields."""
+        return sha256_hex(
+            canonical_json(
+                {
+                    "query_sha256": self.query_sha256,
+                    "route_status": self.route_status,
+                    "coordinates": self.coordinates,
+                    "passages": self.passages,
+                    "version_dates": self.version_dates,
+                    "spans": self.spans,
+                    "corpus_id": self.corpus_id,
+                    "policy_hash": self.policy_hash,
+                }
+            )
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready dict: lists for tuples, plain dicts, ``from_dict`` inverts it."""
         out = to_jsonable(self)

@@ -248,6 +248,77 @@ def test_afo_holds_no_raw_query() -> None:
     assert afo.query_sha256 == sha256_hex("What is the limit of the compensatory award?")
 
 
+@given(afos, st.integers())
+@settings(max_examples=200)
+def test_evidence_id_is_stable_and_schema_v1_compatible(afo: AnswerFactObject, seed: int) -> None:
+    eid = afo.evidence_id
+    assert len(eid) == 64
+    assert all(c in "0123456789abcdef" for c in eid)
+    raw = afo.to_dict()
+    assert "evidence_id" not in raw
+    assert raw["schema"] == 1
+    shuffled = _shuffled(raw, random.Random(seed))
+    reloaded = AnswerFactObject.from_dict(shuffled)
+    assert reloaded.evidence_id == eid
+    assert canonical_json(reloaded) == canonical_json(afo)
+
+
+def test_evidence_id_ignores_execution_fields_and_tracks_l1_fields() -> None:
+    base = _example_afo()
+    other_exec = AnswerFactObject(
+        query_sha256=base.query_sha256,
+        route_status=base.route_status,
+        coordinates=base.coordinates,
+        passages=base.passages,
+        version_dates=base.version_dates,
+        spans=base.spans,
+        sentences=(),
+        corpus_id=base.corpus_id,
+        calls=(
+            ProviderCall(
+                provider="groq",
+                model_id="qwen/qwen3.8-27b",
+                quantisation=None,
+                purpose="generate",
+                prompt_tokens=100,
+                completion_tokens=20,
+                latency_ms=42.5,
+            ),
+        ),
+        policy_hash=base.policy_hash,
+        mode="extractive",
+    )
+    assert other_exec.evidence_id == base.evidence_id
+    assert other_exec.answer_id != base.answer_id
+
+    variants = (
+        {"query_sha256": sha256_hex("different query")},
+        {"route_status": RouteStatus.AMBIGUOUS.value},
+        {"coordinates": ("uk/ukpga/1996/18/s124", "uk/ukpga/1996/18/s123")},
+        {"passages": {"P1": "uk/ukpga/1996/18/s124/1"}},
+        {"version_dates": {"uk/ukpga/1996/18": "2026-08-01"}},
+        {"spans": {"uk/ukpga/1996/18/s124/1ZA": (0, 10)}},
+        {"corpus_id": "other-corpus"},
+        {"policy_hash": sha256_hex("other-policy")},
+    )
+    base_kwargs: dict[str, Any] = {
+        "query_sha256": base.query_sha256,
+        "route_status": base.route_status,
+        "coordinates": base.coordinates,
+        "passages": base.passages,
+        "version_dates": base.version_dates,
+        "spans": base.spans,
+        "sentences": base.sentences,
+        "corpus_id": base.corpus_id,
+        "calls": base.calls,
+        "policy_hash": base.policy_hash,
+        "mode": base.mode,
+    }
+    for override in variants:
+        changed = AnswerFactObject(**{**base_kwargs, **override})
+        assert changed.evidence_id != base.evidence_id
+
+
 # ============================================================================ policy
 
 

@@ -192,6 +192,7 @@ def test_output_on_fixture_fact_round_trip(
 
     # Check top metadata
     assert f"answer id:         {fact.answer_id}" in out
+    assert f"evidence id:       {fact.evidence_id}" in out
     assert "mode:              generated" in out
     assert "route status:      ROUTE_BOUNDED" in out
     assert "bound coordinates: uk/ukpga/1996/18/s124" in out
@@ -229,6 +230,7 @@ def test_output_on_fixture_fact_round_trip(
     assert ret_json == 0
     captured_json = capsys.readouterr()
     json_out = json.loads(captured_json.out)
+    assert "evidence_id" not in json_out
     assert AnswerFactObject.from_dict(json_out) == fact
 
 

@@ -164,6 +164,7 @@ def format_receipt_text(
 
     lines: list[str] = [
         f"answer id:         {aid}",
+        f"evidence id:       {fact.evidence_id}",
         f"created_at UTC:    {cat}",
         f"mode:              {fact.mode}",
         f"route status:      {fact.route_status}",
