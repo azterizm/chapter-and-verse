@@ -29,6 +29,7 @@ from chapterverse.providers.ledger import (
     RateHeaders,
 )
 from chapterverse.providers.openai_compat import (
+    VERCEL_MODEL,
     ProviderWarming,
     make_cloudflare,
     make_gemini,
@@ -891,13 +892,13 @@ def test_config_with_vercel_and_gemini_overrides() -> None:
         "AI_GATEWAY_API_KEY": "vck_test",
         "GEMINI_API_KEY": "AIzaTestKey1234567890",
         "VERCEL_MODEL": "alibaba/qwen3.8-flash",
-        "GEMINI_MODEL": "gemini-2.5-flash",
+        "GEMINI_MODEL": "gemini-3.5-flash-lite",
     }
     cfg = RotationConfig.from_env(env)
     assert cfg.generate == ("vercel", "gemini")
     assert cfg.judge == ()
     assert cfg.vercel_model == "alibaba/qwen3.8-flash"
-    assert cfg.gemini_model == "gemini-2.5-flash"
+    assert cfg.gemini_model == "gemini-3.5-flash-lite"
     assert dict(cfg.skipped) == {
         "groq": "GROQ_API_KEY is not set",
         "cloudflare": "CLOUDFLARE_ACCOUNT_ID is not set",
@@ -910,11 +911,11 @@ def test_config_with_vercel_and_gemini_overrides() -> None:
         legal_data_root=None,
         router_index=Path("i"),
         concepts_index=Path("c"),
-        vercel_model="google/gemini-2.5-flash",
+        vercel_model="alibaba/qwen3.7-flash",
         gemini_model="gemini-3-flash-preview",
     )
     cfg2 = RotationConfig.from_env(env, settings=settings)
-    assert cfg2.vercel_model == "google/gemini-2.5-flash"
+    assert cfg2.vercel_model == "alibaba/qwen3.7-flash"
     assert cfg2.gemini_model == "gemini-3-flash-preview"
 
 
@@ -951,7 +952,7 @@ def test_from_config_falls_through_to_vercel_and_gemini_and_pin_check() -> None:
 
     # Pin check succeeds on both vercel and gemini (including Google's models/ prefix).
     respx.get("https://ai-gateway.vercel.sh/v1/models").mock(
-        return_value=httpx.Response(200, json={"data": [{"id": "google/gemini-2.5-flash"}]})
+        return_value=httpx.Response(200, json={"data": [{"id": VERCEL_MODEL}]})
     )
     respx.get("https://generativelanguage.googleapis.com/v1beta/openai/models").mock(
         return_value=httpx.Response(200, json={"data": [{"id": "models/gemini-flash-lite-latest"}]})

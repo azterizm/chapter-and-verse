@@ -101,7 +101,7 @@ GROQ_MODEL: Final = "qwen/qwen3.8-27b"
 CLOUDFLARE_API: Final = "https://api.cloudflare.com/client/v4/accounts"
 CLOUDFLARE_MODEL: Final = "@cf/qwen/qwen3.8-27b"
 VERCEL_BASE_URL: Final = "https://ai-gateway.vercel.sh/v1"
-VERCEL_MODEL: Final = "google/gemini-2.5-flash"
+VERCEL_MODEL: Final = "alibaba/qwen3.7-flash"
 GEMINI_BASE_URL: Final = "https://generativelanguage.googleapis.com/v1beta/openai"
 GEMINI_MODEL: Final = "gemini-flash-lite-latest"
 
