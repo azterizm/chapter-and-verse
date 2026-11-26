@@ -29,6 +29,7 @@ from chapterverse.providers.ledger import (
     RateHeaders,
 )
 from chapterverse.providers.openai_compat import (
+    GEMINI_MODEL,
     VERCEL_MODEL,
     ProviderWarming,
     make_cloudflare,
@@ -938,7 +939,7 @@ def test_from_config_falls_through_to_vercel_and_gemini_and_pin_check() -> None:
         return_value=httpx.Response(
             200,
             json={
-                "model": "models/gemini-flash-lite-latest",
+                "model": f"models/{GEMINI_MODEL}",
                 "choices": [{"message": {"content": "Paris."}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 5, "completion_tokens": 2},
             },
@@ -955,7 +956,7 @@ def test_from_config_falls_through_to_vercel_and_gemini_and_pin_check() -> None:
         return_value=httpx.Response(200, json={"data": [{"id": VERCEL_MODEL}]})
     )
     respx.get("https://generativelanguage.googleapis.com/v1beta/openai/models").mock(
-        return_value=httpx.Response(200, json={"data": [{"id": "models/gemini-flash-lite-latest"}]})
+        return_value=httpx.Response(200, json={"data": [{"id": f"models/{GEMINI_MODEL}"}]})
     )
     respx.post("https://ai-gateway.vercel.sh/v1/chat/completions").mock(
         return_value=_completion("Paris.")
