@@ -73,17 +73,25 @@ __all__ = [
     "CLOUDFLARE_MODEL",
     "DEFAULT_SHORT_READ_TIMEOUTS",
     "DEFAULT_SHORT_READ_TIMEOUT_S",
+    "GEMINI_BASE_URL",
+    "GEMINI_MODEL",
     "GROQ_BASE_URL",
     "GROQ_MODEL",
+    "VERCEL_BASE_URL",
+    "VERCEL_MODEL",
     "Adapter",
     "CloudflareAdapter",
+    "GeminiAdapter",
     "GroqAdapter",
     "ModalAdapter",
     "OpenAICompatProvider",
     "ProviderWarming",
+    "VercelAdapter",
     "make_cloudflare",
+    "make_gemini",
     "make_groq",
     "make_modal",
+    "make_vercel",
     "normalise_finish",
     "rejoin_continuation",
 ]
@@ -92,6 +100,10 @@ GROQ_BASE_URL: Final = "https://api.groq.com/openai/v1"
 GROQ_MODEL: Final = "qwen/qwen3.8-27b"
 CLOUDFLARE_API: Final = "https://api.cloudflare.com/client/v4/accounts"
 CLOUDFLARE_MODEL: Final = "@cf/qwen/qwen3.8-27b"
+VERCEL_BASE_URL: Final = "https://ai-gateway.vercel.sh/v1"
+VERCEL_MODEL: Final = "google/gemini-2.5-flash"
+GEMINI_BASE_URL: Final = "https://generativelanguage.googleapis.com/v1beta/openai"
+GEMINI_MODEL: Final = "gemini-flash-lite-latest"
 
 DEFAULT_SHORT_READ_TIMEOUT_S: Final = 12.0
 DEFAULT_SHORT_READ_TIMEOUTS: Final[Mapping[Purpose, float]] = types.MappingProxyType(
@@ -161,7 +173,9 @@ def normalise_finish(raw: object) -> FinishReason:
 
 
 _HEX_ID = re.compile(r"\b[0-9a-fA-F]{32}\b")
-_KEYLIKE = re.compile(r"(gsk_[A-Za-z0-9]+|Bearer\s+\S+|sk-[A-Za-z0-9_-]{8,})")
+_KEYLIKE = re.compile(
+    r"(gsk_[A-Za-z0-9]+|vck_[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]{16,}|Bearer\s+\S+|sk-[A-Za-z0-9_-]{8,})"
+)
 
 
 def _scrub(text: str, secrets: Sequence[str | None]) -> str:
@@ -439,6 +453,116 @@ class CloudflareAdapter(Adapter):
         return "rate_limit", retry if retry is not None else 60.0, None
 
 
+class VercelAdapter(Adapter):
+    name = "vercel"
+    request_model = VERCEL_MODEL
+    model_id = VERCEL_MODEL
+    key_env = "AI_GATEWAY_API_KEY"
+    prefill_capable = False
+    native_prefill = False
+    timeout = httpx.Timeout(60.0, connect=5.0)
+    short_read_timeouts: Mapping[Purpose, float] | None = DEFAULT_SHORT_READ_TIMEOUTS
+
+    def __init__(
+        self,
+        *,
+        model: str = VERCEL_MODEL,
+        key_env: str = "AI_GATEWAY_API_KEY",
+        base_url: str = VERCEL_BASE_URL,
+        short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+    ) -> None:
+        clean = model.strip()
+        if not clean:
+            raise ConfigError("VERCEL_MODEL is empty")
+        self.request_model = clean
+        self.model_id = clean
+        self.key_env = key_env
+        self._base = base_url.rstrip("/")
+        self.short_read_timeouts = (
+            DEFAULT_SHORT_READ_TIMEOUTS
+            if short_read_timeouts is DEFAULT_SHORT_READ_TIMEOUTS
+            else _normalize_short_timeouts(short_read_timeouts)
+        )
+
+    def base_url(self) -> str:
+        return self._base
+
+    def thinking_fields(self, *, thinking: bool, prefill: bool) -> dict[str, Any]:
+        del prefill
+        if thinking:
+            return {"reasoning_effort": "medium"}
+        return {"reasoning_effort": "none"}
+
+    def classify_429(self, headers: Mapping[str, str], text: str, now: float) -> ErrorOutcome:
+        del now
+        lowered = text.lower()
+        if any(
+            s in lowered
+            for s in ("insufficient", "quota", "credit", "billing", "balance", "budget", "monthly")
+        ):
+            return "quota", 3600.0, 3600.0
+        retry = parse_retry_after(headers.get("retry-after"))
+        return "rate_limit", retry if retry is not None else 30.0, None
+
+
+class GeminiAdapter(Adapter):
+    name = "gemini"
+    request_model = GEMINI_MODEL
+    model_id = GEMINI_MODEL
+    key_env = "GEMINI_API_KEY"
+    prefill_capable = False
+    native_prefill = False
+    timeout = httpx.Timeout(60.0, connect=5.0)
+    short_read_timeouts: Mapping[Purpose, float] | None = DEFAULT_SHORT_READ_TIMEOUTS
+
+    def __init__(
+        self,
+        *,
+        model: str = GEMINI_MODEL,
+        key_env: str = "GEMINI_API_KEY",
+        base_url: str = GEMINI_BASE_URL,
+        short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+    ) -> None:
+        clean = model.strip().removeprefix("models/")
+        if not clean:
+            raise ConfigError("GEMINI_MODEL is empty")
+        self.request_model = clean
+        self.model_id = clean
+        self.key_env = key_env
+        self._base = base_url.rstrip("/")
+        self.short_read_timeouts = (
+            DEFAULT_SHORT_READ_TIMEOUTS
+            if short_read_timeouts is DEFAULT_SHORT_READ_TIMEOUTS
+            else _normalize_short_timeouts(short_read_timeouts)
+        )
+
+    def base_url(self) -> str:
+        return self._base
+
+    def parse_models(self, body: Any) -> list[str]:
+        return [m.removeprefix("models/") for m in super().parse_models(body)]
+
+    def thinking_fields(self, *, thinking: bool, prefill: bool) -> dict[str, Any]:
+        del prefill
+        if thinking:
+            return {"reasoning_effort": "medium"}
+        effort = "none" if "2.5" in self.request_model else "minimal"
+        return {"reasoning_effort": effort}
+
+    def classify_429(self, headers: Mapping[str, str], text: str, now: float) -> ErrorOutcome:
+        lowered = text.lower()
+        minute = any(s in lowered for s in ("per minute", "perminute", "rpm", "tpm"))
+        daily = any(
+            s in lowered
+            for s in ("per day", "perday", "daily", "rpd", "tpd", "billing", "credit", "monthly")
+        )
+        if daily and not minute:
+            wait = seconds_to_utc_midnight(now)
+            return "quota", wait, wait
+        retry = parse_retry_after(headers.get("retry-after"))
+        return "rate_limit", retry if retry is not None else 60.0, None
+
+
 class ModalAdapter(Adapter):
     name = "modal"
     request_model = JUDGE_PRESET.model
@@ -633,7 +757,7 @@ class OpenAICompatProvider:
         extra: dict[str, Any] = {}
         native_ok = self.supports_prefill if native_prefill is None else native_prefill
         if req.prefill:
-            if native_ok and a.prefill_capable:
+            if native_ok and a.prefill_capable and not req.prefill.endswith("\n"):
                 messages.append(ChatMessage(role="assistant", content=req.prefill))
                 native = req.prefill
                 extra = a.prefill_fields()
@@ -866,6 +990,8 @@ class OpenAICompatProvider:
             # Modal answers a long-held web request with a 303; elsewhere a redirect is a
             # wrong URL. Never followed (it would resend the key).
             return ("timeout", None, None) if a.health_url() is not None else ("config", None, None)
+        if status == 402:  # noqa: PLR2004
+            return "quota", 3600.0, 3600.0
         if status in {401, 403}:
             return "config", None, None
         if status == 404:  # noqa: PLR2004
@@ -977,6 +1103,36 @@ def make_cloudflare(
     """Raises: ConfigError: ``account_id`` is empty."""
     return OpenAICompatProvider(
         CloudflareAdapter(account_id, key_env=key_env, short_read_timeouts=short_read_timeouts),
+        ledger=ledger,
+        **kwargs,
+    )
+
+
+def make_vercel(
+    *,
+    model: str = VERCEL_MODEL,
+    key_env: str = "AI_GATEWAY_API_KEY",
+    ledger: QuotaLedger | None = None,
+    short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+    **kwargs: Any,
+) -> OpenAICompatProvider:
+    return OpenAICompatProvider(
+        VercelAdapter(model=model, key_env=key_env, short_read_timeouts=short_read_timeouts),
+        ledger=ledger,
+        **kwargs,
+    )
+
+
+def make_gemini(
+    *,
+    model: str = GEMINI_MODEL,
+    key_env: str = "GEMINI_API_KEY",
+    ledger: QuotaLedger | None = None,
+    short_read_timeouts: Mapping[Purpose, float] | float | None = DEFAULT_SHORT_READ_TIMEOUTS,
+    **kwargs: Any,
+) -> OpenAICompatProvider:
+    return OpenAICompatProvider(
+        GeminiAdapter(model=model, key_env=key_env, short_read_timeouts=short_read_timeouts),
         ledger=ledger,
         **kwargs,
     )

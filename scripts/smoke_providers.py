@@ -27,9 +27,13 @@ import httpx
 from chapterverse.contracts import ProviderUnavailable
 from chapterverse.providers.ledger import InMemoryLedger
 from chapterverse.providers.openai_compat import (
+    GEMINI_MODEL,
+    VERCEL_MODEL,
     OpenAICompatProvider,
     make_cloudflare,
+    make_gemini,
     make_groq,
+    make_vercel,
 )
 from chapterverse.providers.pinning import (
     CANARY_MAX_TOKENS,
@@ -41,7 +45,7 @@ from chapterverse.providers.pinning import (
 )
 from chapterverse.providers.presets import generation_request
 
-CAPS = {"groq": 8, "cloudflare": 5}
+CAPS = {"groq": 8, "cloudflare": 5, "vercel": 5, "gemini": 5}
 
 
 class Budget:
@@ -78,8 +82,14 @@ def _run(provider: OpenAICompatProvider, *, models: bool, cases: list[str]) -> l
     by_case = {e["purpose"]: e for e in log}
     plain, pre = by_case.get("generate/plain"), by_case.get("generate/prefill")
     if plain and pre and plain["status"] == "ok" and pre["status"] == "ok":
-        pre["prompt_extra_vs_plain"] = pre["prompt_tokens"] - plain["prompt_tokens"]
-        pre["prefill_ok"] = prefill_ok(pre["text"], plain["prompt_tokens"], pre["prompt_tokens"])
+        if plain.get("prompt_tokens") is not None and pre.get("prompt_tokens") is not None:
+            pre["prompt_extra_vs_plain"] = pre["prompt_tokens"] - plain["prompt_tokens"]
+        if provider.adapter.prefill_capable:
+            pre["prefill_ok"] = prefill_ok(
+                pre["text"], plain.get("prompt_tokens"), pre.get("prompt_tokens")
+            )
+        else:
+            pre["prefill_ok"] = prefill_continued(pre["text"])
     return log
 
 
@@ -152,7 +162,7 @@ def main() -> int:
             provider = make_groq(
                 ledger=ledger, retries=0, client=_client(budget, httpx.Timeout(60.0, connect=5.0))
             )
-        else:
+        elif name == "cloudflare":
             account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
             if not account:
                 print("skip cloudflare: CLOUDFLARE_ACCOUNT_ID is not set", file=sys.stderr)
@@ -162,6 +172,22 @@ def main() -> int:
                 ledger=ledger,
                 retries=0,
                 client=_client(budget, httpx.Timeout(120.0, connect=5.0)),
+            )
+        elif name == "vercel":
+            model = os.environ.get("VERCEL_MODEL", "").strip() or VERCEL_MODEL
+            provider = make_vercel(
+                model=model,
+                ledger=ledger,
+                retries=0,
+                client=_client(budget, httpx.Timeout(60.0, connect=5.0)),
+            )
+        else:
+            model = os.environ.get("GEMINI_MODEL", "").strip() or GEMINI_MODEL
+            provider = make_gemini(
+                model=model,
+                ledger=ledger,
+                retries=0,
+                client=_client(budget, httpx.Timeout(60.0, connect=5.0)),
             )
         log.extend(_run(provider, models=not args.skip_models, cases=cases))
 

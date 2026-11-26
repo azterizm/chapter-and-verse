@@ -331,7 +331,7 @@ def test_section_policy_constant_hash_and_default_unchanged() -> None:
 
     assert default_policy == all_policy
     assert default_policy.verifier_config_name == "STRICT_FIGURES"
-    assert default_policy.policy_hash.startswith("235ec4a6")
+    assert default_policy.policy_hash.startswith("59e7ab7a")
     assert verifier_config(section_policy) is STRICT_FIGURES
     assert section_policy.policy_hash != all_policy.policy_hash
     assert section_policy.policy_hash != cited_policy.policy_hash

@@ -17,14 +17,17 @@ knows them from its ``ChatResult``); missing keys are recorded as ``"unknown"``,
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any, Final, Literal
 
 from legal_rag_verifier.claims import extract_claims
-from legal_rag_verifier.index import build_index
+from legal_rag_verifier.deontic import Deontic, DeonticMatch
+from legal_rag_verifier.index import PremiseIndex, build_index
 from legal_rag_verifier.judge import Judge, JudgedVerifier
 from legal_rag_verifier.premise import Premise
 from legal_rag_verifier.verifier import (
+    ClaimResult,
     NLIProbs,
     NLIScorer,
     Reason,
@@ -32,6 +35,7 @@ from legal_rag_verifier.verifier import (
     SentenceVerdict,
     Verdict,
     VerifierConfig,
+    _Findings,
     _in_force_on,
     _nli_candidates,
 )
@@ -61,6 +65,17 @@ log = logging.getLogger(__name__)
 
 AUDIT_CODES: Final = REF_CODES | {CLASSIFICATION_SHIFT}
 _UNKEPT_PROBS: Final = NLIProbs(entailment=-1.0, neutral=2.0, contradiction=0.0)
+_COMMA_ASIDE_PERMISSION: Final = re.compile(
+    r"(?<!\bnot\s)\b(?:is|are|was|were|be|will\s+be)\s+(?!not\b)"
+    r"(?:entitled|permitted|allowed)\s*,\s*[^,.;:]{2,80},\s*to\b",
+    re.IGNORECASE,
+)
+
+
+def _comma_aside_licenses_permission(window_text: str) -> bool:
+    """True when statutory text grants entitlement/permission split by a comma aside
+    (e.g. ``shall be entitled, if he so requests, to consult``)."""
+    return bool(_COMMA_ASIDE_PERMISSION.search(window_text))
 
 
 class RecordingJudgeChat:
@@ -275,6 +290,36 @@ class AuditVerifier(JudgedVerifier):
             return super().check_sentence(premise, refs.text, query=query)
         finally:
             self.nli = self.judge
+
+    def _window_checks(
+        self,
+        results: list[ClaimResult],
+        index: PremiseIndex,
+        aligned: tuple[int, ...],
+        *,
+        judged: tuple[int, ...],
+        deontics: list[DeonticMatch],
+        sentence: str,
+    ) -> _Findings:
+        found = super()._window_checks(
+            results, index, aligned, judged=judged, deontics=deontics, sentence=sentence
+        )
+        if Reason.DEONTIC_SHIFT in found.reasons:
+            windows = [index.windows[i] for i in aligned]
+            if any(_comma_aside_licenses_permission(w.text) for w in windows):
+                augmented = frozenset[Deontic]().union(*(w.deontics for w in windows)) | {
+                    Deontic.PERMISSION
+                }
+                if all(d.deontic in augmented for d in deontics):
+                    found.reasons = [r for r in found.reasons if r is not Reason.DEONTIC_SHIFT]
+                    found.details = [
+                        d
+                        for d in found.details
+                        if not (d.startswith("sentence ") and " vs window " in d)
+                    ]
+                    if not found.reasons:
+                        found.repair = None
+        return found
 
 
 def make_verifier(

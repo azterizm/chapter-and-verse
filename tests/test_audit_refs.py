@@ -451,3 +451,77 @@ def test_audit_verifier_passes_self_reference(fixture_text_store: object) -> Non
     # Subsection (2) does not exist in s.124 (only (1), (1ZA), (1A), etc.)
     v_sub2 = verifier.check_sentence(premise, "Under subsection (2) the award is capped [P1].")
     assert any("MODEL_CITATION: subsection (2)" in str(d) for d in v_sub2.details)
+
+
+def test_audit_verifier_comma_aside_permission_deontic() -> None:
+    records = [
+        {
+            "record_type": "instrument",
+            "coordinate": "uk/ukpga/1984/60",
+            "title": "Police and Criminal Evidence Act 1984",
+            "status": "IN_FORCE",
+        },
+        {
+            "record_type": "provision",
+            "coordinate": "uk/ukpga/1984/60/s58/1",
+            "heading": "Section 58(1)",
+            "text": (
+                "(1) A person arrested and held in custody in a police station or other premises "
+                "shall be entitled, if he so requests, to consult a solicitor privately at any "
+                "time."
+            ),
+            "status": "IN_FORCE",
+        },
+        {
+            "record_type": "provision",
+            "coordinate": "uk/ukpga/1984/60/s58/2",
+            "heading": "Section 58(2)",
+            "text": "(2) An officer may consult records when authorised.",
+            "status": "IN_FORCE",
+        },
+        {
+            "record_type": "provision",
+            "coordinate": "uk/ukpga/1984/60/s58/3",
+            "heading": "Section 58(3)",
+            "text": (
+                "(3) A detainee shall not be entitled, if arrested under terrorism rules, to delay."
+            ),
+            "status": "IN_FORCE",
+        },
+    ]
+    premise = Premise.from_records(records)
+
+    class DummyChat:
+        model = "dummy"
+
+        def __call__(self, messages: list[dict[str, str]]) -> dict[str, object]:
+            sentence = messages[1]["content"].split("Sentence to check:\n<<<\n", 1)[1]
+            passage = 2 if "authorised" in sentence else (3 if "terrorism" in sentence else 1)
+            return {
+                "content": f'{{"label": "supported", "passage": {passage}}}',
+                "ms": 1.0,
+                "tokens": 1,
+                "finish": "stop",
+            }
+
+    verifier = AuditVerifier(Judge(DummyChat()), ["P1", "P2", "P3"], STRICT_FIGURES)
+    # Comma aside ("shall be entitled, if he so requests, to") licenses PERMISSION
+    v_ok = verifier.check_sentence(
+        premise,
+        "A detained person is entitled to consult a solicitor privately if they request it [P1].",
+    )
+    assert "DEONTIC_SHIFT" not in [r.value for r in v_ok.reasons]
+
+    # Real deontic shift ("must" vs "may" in P2) is still caught
+    v_shift = verifier.check_sentence(
+        premise,
+        "An officer must consult records when authorised [P2].",
+    )
+    assert "DEONTIC_SHIFT" in [r.value for r in v_shift.reasons]
+
+    # Negated entitlement ("shall not be entitled, ..., to") must NOT license PERMISSION
+    v_neg = verifier.check_sentence(
+        premise,
+        "A detainee is entitled to delay under terrorism rules [P3].",
+    )
+    assert "DEONTIC_SHIFT" in [r.value for r in v_neg.reasons]

@@ -60,7 +60,7 @@ def windows(premise: Premise) -> tuple[Window, ...]:
 
 def test_prompt_sha_is_the_hash_of_every_template_part() -> None:
     assert re.fullmatch(r"[0-9a-f]{64}", PROMPT_SHA256)
-    assert PROMPT_SHA256 == "7264c2bee465b48512cec143f4dec31f59ac88fc8551c84cb80c67d53f625219"
+    assert PROMPT_SHA256 == "7fb8d0714c5f749cfa3101a5e63adc078eb4cb825fad9837a299569818b21e77"
     assert sha256_hex(canonical_json(_TEMPLATE_PARTS)) == PROMPT_SHA256
 
 
@@ -89,8 +89,8 @@ def test_s124_prompt_numbers_passages_and_states_the_rules(windows: tuple[Window
 
 def test_s124_prompt_is_lean(windows: tuple[Window, ...]) -> None:
     prompt = build_prompt(QUERY, windows)
-    assert prompt.chars == 3596
-    assert prompt.estimated_tokens == 899  # 3596 characters at 4 a token
+    assert prompt.chars == 3768
+    assert prompt.estimated_tokens == 942  # 3768 characters at 4 a token
     assert prompt.estimated_tokens < 1000
 
 

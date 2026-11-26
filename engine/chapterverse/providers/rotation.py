@@ -44,10 +44,14 @@ from chapterverse.providers.ledger import (
     purpose_context,
 )
 from chapterverse.providers.openai_compat import (
+    GEMINI_MODEL,
+    VERCEL_MODEL,
     ProviderWarming,
     make_cloudflare,
+    make_gemini,
     make_groq,
     make_modal,
+    make_vercel,
 )
 
 __all__ = [
@@ -112,7 +116,11 @@ class RotationConfig:
     modal_url: str | None = None
     groq_key_env: str = "GROQ_API_KEY"
     cloudflare_token_env: str = "CLOUDFLARE_AI_WORKER_TOKEN"  # noqa: S105 - a variable name
+    vercel_key_env: str = "AI_GATEWAY_API_KEY"
+    gemini_key_env: str = "GEMINI_API_KEY"
     modal_key_env: str = "MODAL_API_KEY"
+    vercel_model: str = VERCEL_MODEL
+    gemini_model: str = GEMINI_MODEL
     skipped: tuple[tuple[str, str], ...] = ()
 
     @property
@@ -126,9 +134,10 @@ class RotationConfig:
     ) -> RotationConfig:
         """Read ``GEN_PROVIDERS`` and ``JUDGE_PROVIDERS`` and drop unconfigured providers.
 
-        Groq needs its key; Cloudflare its token and ``CLOUDFLARE_ACCOUNT_ID``; Modal
-        ``MODAL_URL`` and its key. ``settings`` (when given) supplies the account id, the URL
-        and the key variable names; otherwise they are read from ``environ``.
+        Groq needs its key; Cloudflare its token and ``CLOUDFLARE_ACCOUNT_ID``; Vercel
+        ``AI_GATEWAY_API_KEY``; Gemini ``GEMINI_API_KEY``; Modal ``MODAL_URL`` and its key.
+        ``settings`` (when given) supplies the account id, the URL, model overrides and the
+        key variable names; otherwise they are read from ``environ``.
 
         Raises:
             ConfigError: an order names an unknown provider or one twice.
@@ -140,12 +149,20 @@ class RotationConfig:
             account = settings.cloudflare_account_id
             modal_url = settings.modal_url
             keys = (settings.groq_api_key_env, settings.cloudflare_token_env)
+            vercel_key = settings.vercel_key_env
+            gemini_key = settings.gemini_key_env
             modal_key = settings.modal_api_key_env
+            vercel_model = settings.vercel_model or VERCEL_MODEL
+            gemini_model = settings.gemini_model or GEMINI_MODEL
         else:
             account = env.get("CLOUDFLARE_ACCOUNT_ID", "").strip() or None
             modal_url = env.get("MODAL_URL", "").strip() or None
             keys = ("GROQ_API_KEY", "CLOUDFLARE_AI_WORKER_TOKEN")
+            vercel_key = "AI_GATEWAY_API_KEY"
+            gemini_key = "GEMINI_API_KEY"
             modal_key = "MODAL_API_KEY"
+            vercel_model = env.get("VERCEL_MODEL", "").strip() or VERCEL_MODEL
+            gemini_model = env.get("GEMINI_MODEL", "").strip() or GEMINI_MODEL
         groq_key, cf_key = keys
 
         def has(var: str) -> str | None:
@@ -161,6 +178,10 @@ class RotationConfig:
             reasons["cloudflare"] = "CLOUDFLARE_ACCOUNT_ID is not set"
         elif (why := has(cf_key)) is not None:
             reasons["cloudflare"] = why
+        if (why := has(vercel_key)) is not None:
+            reasons["vercel"] = why
+        if (why := has(gemini_key)) is not None:
+            reasons["gemini"] = why
         if modal_url is None:
             reasons["modal"] = "MODAL_URL is not set"
         elif (why := has(modal_key)) is not None:
@@ -173,7 +194,11 @@ class RotationConfig:
             modal_url=modal_url,
             groq_key_env=groq_key,
             cloudflare_token_env=cf_key,
+            vercel_key_env=vercel_key,
+            gemini_key_env=gemini_key,
             modal_key_env=modal_key,
+            vercel_model=vercel_model,
+            gemini_model=gemini_model,
             skipped=tuple((n, reasons[n]) for n in listed if n in reasons),
         )
 
@@ -272,6 +297,24 @@ class ProviderRotation:
                     make_cloudflare(
                         config.cloudflare_account_id,
                         key_env=config.cloudflare_token_env,
+                        ledger=shared,
+                        **kw,
+                    )
+                )
+            elif name == "vercel":
+                built.append(
+                    make_vercel(
+                        model=config.vercel_model,
+                        key_env=config.vercel_key_env,
+                        ledger=shared,
+                        **kw,
+                    )
+                )
+            elif name == "gemini":
+                built.append(
+                    make_gemini(
+                        model=config.gemini_model,
+                        key_env=config.gemini_key_env,
                         ledger=shared,
                         **kw,
                     )

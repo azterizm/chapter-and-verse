@@ -28,7 +28,13 @@ from chapterverse.providers.ledger import (
     InMemoryLedger,
     RateHeaders,
 )
-from chapterverse.providers.openai_compat import ProviderWarming, make_cloudflare, make_groq
+from chapterverse.providers.openai_compat import (
+    ProviderWarming,
+    make_cloudflare,
+    make_gemini,
+    make_groq,
+    make_vercel,
+)
 from chapterverse.providers.pinning import (
     CANARY_PREFILL,
     PinCheck,
@@ -613,7 +619,7 @@ def test_generation_cards() -> None:
     assert not request_settings("modal", "short", "generate").measured
     assert REJECTED_PARAMS["groq"] == {"top_k", "min_p", "chat_template_kwargs"}
     rows = describe()
-    assert len(rows) == 12
+    assert len(rows) == 20
     assert sum(r["measured"] for r in rows) == 2  # modal judge, both modes
     req_ = judge_request([{"role": "user", "content": "x"}])
     assert (req_.purpose, req_.seed, req_.max_tokens) == ("judge", 0, 1024)
@@ -877,3 +883,90 @@ def test_slow_provider_times_out_and_moves_on_without_opening_breaker() -> None:
     # Circuit breaker on Groq recorded 1 failure, but does NOT open on ONE timeout (threshold is 3)
     assert rot.breaker("groq").state == "closed"
     assert rot.breaker("groq")._failures == 1
+
+
+def test_config_with_vercel_and_gemini_overrides() -> None:
+    env = {
+        "GEN_PROVIDERS": "groq,cloudflare,vercel,gemini,modal",
+        "AI_GATEWAY_API_KEY": "vck_test",
+        "GEMINI_API_KEY": "AIzaTestKey1234567890",
+        "VERCEL_MODEL": "alibaba/qwen3.8-flash",
+        "GEMINI_MODEL": "gemini-2.5-flash",
+    }
+    cfg = RotationConfig.from_env(env)
+    assert cfg.generate == ("vercel", "gemini")
+    assert cfg.judge == ()
+    assert cfg.vercel_model == "alibaba/qwen3.8-flash"
+    assert cfg.gemini_model == "gemini-2.5-flash"
+    assert dict(cfg.skipped) == {
+        "groq": "GROQ_API_KEY is not set",
+        "cloudflare": "CLOUDFLARE_ACCOUNT_ID is not set",
+        "modal": "MODAL_URL is not set",
+    }
+
+    from pathlib import Path  # noqa: PLC0415
+
+    settings = Settings(
+        legal_data_root=None,
+        router_index=Path("i"),
+        concepts_index=Path("c"),
+        vercel_model="google/gemini-2.5-flash",
+        gemini_model="gemini-3-flash-preview",
+    )
+    cfg2 = RotationConfig.from_env(env, settings=settings)
+    assert cfg2.vercel_model == "google/gemini-2.5-flash"
+    assert cfg2.gemini_model == "gemini-3-flash-preview"
+
+
+@respx.mock
+def test_from_config_falls_through_to_vercel_and_gemini_and_pin_check() -> None:
+    env = {
+        "GEN_PROVIDERS": "vercel,gemini",
+        "AI_GATEWAY_API_KEY": "vck_test",
+        "GEMINI_API_KEY": "AIzaTestKey1234567890",
+    }
+    cfg = RotationConfig.from_env(env)
+    rot = ProviderRotation.from_config(cfg, environ=env, sleep=lambda _s: None)
+    assert rot.order("generate") == ("vercel", "gemini")
+    assert rot.order("judge") == ()
+
+    respx.post("https://ai-gateway.vercel.sh/v1/chat/completions").mock(
+        return_value=httpx.Response(402, json={"error": {"message": "No credits"}})
+    )
+    respx.post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model": "models/gemini-flash-lite-latest",
+                "choices": [{"message": {"content": "Paris."}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+            },
+        )
+    )
+    result = rot.complete(
+        generation_request([{"role": "user", "content": "q"}], mode="short", max_tokens=16)
+    )
+    assert result.provider == "gemini"
+    assert rot.breaker("vercel").state == "open"
+
+    # Pin check succeeds on both vercel and gemini (including Google's models/ prefix).
+    respx.get("https://ai-gateway.vercel.sh/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "google/gemini-2.5-flash"}]})
+    )
+    respx.get("https://generativelanguage.googleapis.com/v1beta/openai/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "models/gemini-flash-lite-latest"}]})
+    )
+    respx.post("https://ai-gateway.vercel.sh/v1/chat/completions").mock(
+        return_value=_completion("Paris.")
+    )
+    respx.post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions").mock(
+        return_value=_completion("Paris.")
+    )
+    v = make_vercel(environ=env, sleep=lambda _s: None)
+    g = make_gemini(environ=env, sleep=lambda _s: None)
+    pin_rot = ProviderRotation([v, g], generate=["vercel", "gemini"])
+    checks = run_daily_check(pin_rot)
+    assert checks["vercel"].pinned
+    assert checks["gemini"].pinned
+    assert pin_rot.is_pinned("vercel")
+    assert pin_rot.is_pinned("gemini")

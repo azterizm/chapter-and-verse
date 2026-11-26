@@ -49,7 +49,13 @@ from chapterverse.persistence import (
     totals_params,
     window_start,
 )
-from chapterverse.providers.ledger import CallUsage, InMemoryLedger, QuotaLedger, RateHeaders
+from chapterverse.providers.ledger import (
+    CallUsage,
+    GroqLimits,
+    InMemoryLedger,
+    QuotaLedger,
+    RateHeaders,
+)
 from chapterverse.ratelimit import DailyBudgetCounts, client_key_hash
 
 REPO = Path(__file__).resolve().parents[1]
@@ -266,6 +272,60 @@ def test_open_persistence_with_a_database_is_lazy(tmp_path: Path) -> None:
     assert isinstance(opened.receipts, ReceiptStore)
     assert calls == []
     opened.close()
+
+
+def test_open_persistence_propagates_custom_groq_limits(tmp_path: Path) -> None:
+    s = Settings(
+        legal_data_root=tmp_path,
+        router_index=tmp_path,
+        concepts_index=tmp_path,
+        groq_tokens_per_minute=25_000,
+        groq_tokens_per_day=500_000,
+        groq_requests_per_minute=60,
+        groq_requests_per_day=2_500,
+    )
+    mem = open_persistence(s)
+    assert isinstance(mem.ledger, InMemoryLedger)
+    assert mem.ledger.groq_limits == GroqLimits(
+        requests_per_day=2_500,
+        tokens_per_minute=25_000,
+        requests_per_minute=60,
+        tokens_per_day=500_000,
+    )
+    mem.close()
+
+    rows = [("groq", "day", 1000, 200_000, 0, 0, 0)]
+    log: list[tuple[str, Any]] = []
+    db_settings = Settings(
+        legal_data_root=tmp_path,
+        router_index=tmp_path,
+        concepts_index=tmp_path,
+        database_url="postgres://u:p@h/db",
+        groq_tokens_per_minute=25_000,
+        groq_tokens_per_day=500_000,
+        groq_requests_per_minute=60,
+        groq_requests_per_day=2_500,
+    )
+    opened = open_persistence(
+        db_settings,
+        connect=lambda _: FakeConnection(log, rows),
+        background=False,
+    )
+    assert isinstance(opened.ledger, PostgresLedger)
+    # 1000 requests / 200K tokens would be refused under free defaults, allowed under custom limits.
+    assert opened.ledger.reserve("groq", 1_000)
+    opened.ledger.record(CallUsage("groq", 1_000, sent=False))
+    # Explicit groq_limits override takes precedence over settings fields.
+    capped = open_persistence(
+        db_settings,
+        connect=lambda _: FakeConnection(log, rows),
+        background=False,
+        groq_limits=GroqLimits(requests_per_day=1000),
+    )
+    assert isinstance(capped.ledger, PostgresLedger)
+    assert not capped.ledger.reserve("groq", 100)
+    opened.close()
+    capped.close()
 
 
 def test_postgres_ledger_window_wait_unit() -> None:

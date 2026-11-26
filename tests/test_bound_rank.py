@@ -14,7 +14,7 @@ from legal_rag_router.concepts import PRIOR_FLAGS
 from legal_rag_router.coordinate import Coordinate as RouterCoordinate
 from legal_rag_router.discovery import DEFAULT_DISCOVERY
 from legal_rag_router.result import Candidate, NextAction, RouteResult, RouteStatus
-from legal_rag_verifier.premise import Premise
+from legal_rag_verifier.premise import Passage, PassageKind, Premise
 
 if TYPE_CHECKING:
     from tests.test_pipeline import POLICY, CountingStore, of, receipt, run
@@ -40,7 +40,9 @@ from chapterverse.contracts import (
 from chapterverse.dense.store import BinaryInt8Store
 from chapterverse.pipeline import (
     TOP_SECTION_WINDOWS,
+    UNTRIMMED_MAX_CHARS,
     Pipeline,
+    _premise_passage,
     select_ranked_windows,
 )
 from chapterverse.store.manifest import sha256_file
@@ -593,3 +595,216 @@ def test_pipeline_range_query_expands_route_and_receipt(
     assert "uk/ukpga/1996/18/s98/2" in store.gets
     assert "uk/ukpga/1996/18/s98/2A" in store.gets
     assert "uk/ukpga/1996/18/s98/3" in store.gets
+
+
+# ------------------------------------------------ 9. Layer 2: Cross-refs, Ordering, Untrimmed
+
+
+def test_select_ranked_windows_promotes_targeted_xref_not_omnibus() -> None:
+    query = "agree work more than 48 hours week"
+    w_reg4 = _make_window(
+        "uk/uksi/1998/1833/reg4/1",
+        "A worker's working time shall not exceed 48 hours each week.",
+        num=1,
+    )
+    w_reg5 = Window(
+        passage_id="P2",
+        coordinate="uk/uksi/1998/1833/reg5/2",
+        heading="Regulation 5(2) (Agreement to exclude the maximum)",
+        text="An agreement for the purposes of regulation 4 may apply indefinitely.",
+        status=TemporalStatus.IN_FORCE,
+        version_date="2026-04-06",
+        source_url="https://example.com/reg5/2",
+    )
+    w_omni = Window(
+        passage_id="P3",
+        coordinate="uk/uksi/1998/1833/reg18/2",
+        heading="Regulation 18(2) (Excluded sectors)",
+        text="Regulations 4(1), 6(1), 8, 10(1), 11(1), 12(1) and 13 do not apply.",
+        status=TemporalStatus.IN_FORCE,
+        version_date="2026-04-06",
+        source_url="https://example.com/reg18/2",
+    )
+    extra = [
+        _make_window(f"uk/uksi/1998/1833/reg{i}/1", f"Other hours week text {i}.", num=i)
+        for i in range(6, 14)
+    ]
+    all_windows = [w_reg4, w_reg5, w_omni, *extra]
+    ranked = [
+        ("uk/uksi/1998/1833/reg4", 0.9),
+        *[(f"uk/uksi/1998/1833/reg{i}", 0.8 - i * 0.01) for i in range(6, 14)],
+        ("uk/uksi/1998/1833/reg18", 0.2),
+        ("uk/uksi/1998/1833/reg5", 0.1),
+    ]
+
+    sel = select_ranked_windows(all_windows, ranked, query, budget_tokens=1500, max_windows=8)
+    coords = [w.coordinate for w in sel.windows]
+    assert "uk/uksi/1998/1833/reg5/2" in coords
+    assert "uk/uksi/1998/1833/reg18/2" not in coords
+
+
+def test_select_ranked_windows_keeps_long_window_untrimmed_within_budget() -> None:
+    query = "protected disclosure qualifying period"
+    # > 600 chars so trim_window_text would chop the tail, yet fits inside budget=4000
+    long_text = (
+        "(3) Subsection (1) does not apply if— "
+        + " ".join(f"({chr(97 + i % 26)}) section {98 + i} applies," for i in range(30))
+        + " (ff) section 103A applies."
+    )
+    assert len(long_text) > 600
+    w1 = _make_window("uk/ukpga/1996/18/s108/1", "Two years qualifying period.", num=1)
+    w3 = _make_window("uk/ukpga/1996/18/s108/3", long_text, num=2)
+    w_other = _make_window("uk/ukpga/1996/18/s103A", "Protected disclosure dismissal.", num=3)
+    ranked = [
+        ("uk/ukpga/1996/18/s103A", 0.95),
+        ("uk/ukpga/1996/18/s108", 0.90),
+    ]
+
+    sel = select_ranked_windows(
+        [w_other, w1, w3], ranked, query, budget_tokens=4000, max_windows=12
+    )
+    by_coord = {w.coordinate: w for w in sel.windows}
+    assert by_coord["uk/ukpga/1996/18/s108/3"].highlight is None
+
+
+def test_select_ranked_windows_depth_for_ranks_two_and_three_with_12_windows() -> None:
+    query = "annual leave entitlement"
+    w_s1 = [
+        _make_window(f"uk/uksi/1998/1833/reg13/{i}", f"leave reg13 {i}", num=i) for i in range(1, 5)
+    ]
+    w_s2 = [
+        _make_window(f"uk/uksi/1998/1833/reg13A/{i}", f"leave reg13A {i}", num=10 + i)
+        for i in range(1, 5)
+    ]
+    w_s3 = [
+        _make_window(f"uk/uksi/1998/1833/reg15B/{i}", f"leave reg15B {i}", num=20 + i)
+        for i in range(1, 5)
+    ]
+    w_rest = [
+        _make_window(f"uk/uksi/1998/1833/reg{20 + i}/1", f"leave reg{20 + i}", num=30 + i)
+        for i in range(8)
+    ]
+    all_windows = [*w_s1, *w_s2, *w_s3, *w_rest]
+    ranked = [
+        ("uk/uksi/1998/1833/reg13", 1.0),
+        ("uk/uksi/1998/1833/reg13A", 0.9),
+        ("uk/uksi/1998/1833/reg15B", 0.8),
+        *[(f"uk/uksi/1998/1833/reg{20 + i}", 0.5 - i * 0.01) for i in range(8)],
+    ]
+
+    sel = select_ranked_windows(all_windows, ranked, query, budget_tokens=4000, max_windows=12)
+    assert len(sel.windows) == 12
+    reg13a_count = sum(1 for w in sel.windows if "/reg13A/" in w.coordinate)
+    reg15b_count = sum(1 for w in sel.windows if "/reg15B/" in w.coordinate)
+    assert reg13a_count == 3
+    assert reg15b_count == 3
+
+
+def test_select_ranked_windows_keeps_huge_window_trimmed_above_untrimmed_max() -> None:
+    query = "special qualifying exemption clause"
+    huge_text = (
+        ("Introductory filler words repeated. " * 110)
+        + "special qualifying exemption clause applies here. "
+        + ("Trailing schedule text repeated. " * 20)
+    )
+    assert len(huge_text) > UNTRIMMED_MAX_CHARS
+    w_huge = _make_window("uk/ukpga/1996/18/s108/3", huge_text, num=1)
+    w_other = _make_window("uk/ukpga/1996/18/s103A", "Protected disclosure.", num=2)
+    w_extra = _make_window("uk/ukpga/1996/18/s109/1", "Other unrelated text.", num=3)
+    ranked = [
+        ("uk/ukpga/1996/18/s103A", 0.95),
+        ("uk/ukpga/1996/18/s108", 0.90),
+        ("uk/ukpga/1996/18/s109", 0.50),
+    ]
+
+    sel = select_ranked_windows(
+        [w_other, w_huge, w_extra], ranked, query, budget_tokens=4000, max_windows=2
+    )
+    assert sel.strategy == "ranked"
+    by_coord = {w.coordinate: w for w in sel.windows}
+    assert by_coord["uk/ukpga/1996/18/s108/3"].highlight is not None
+
+
+def test_select_ranked_windows_round4_distributes_round_robin() -> None:
+    query = "annual leave entitlement"
+    w_s1 = _make_window("uk/uksi/1998/1833/reg1/1", "annual leave reg1", num=1)
+    w_s2 = [
+        _make_window(f"uk/uksi/1998/1833/reg2/{i}", f"annual leave reg2 {i}", num=10 + i)
+        for i in range(1, 6)
+    ]
+    w_s3 = [
+        _make_window(f"uk/uksi/1998/1833/reg3/{i}", f"annual leave reg3 {i}", num=20 + i)
+        for i in range(1, 6)
+    ]
+    w_s4 = [
+        _make_window(f"uk/uksi/1998/1833/reg4/{i}", f"annual leave reg4 {i}", num=30 + i)
+        for i in range(1, 6)
+    ]
+    w_rest = [
+        _make_window(f"uk/uksi/1998/1833/reg{10 + i}/1", f"annual leave reg{10 + i}", num=40 + i)
+        for i in range(3)
+    ]
+    all_windows = [w_s1, *w_s2, *w_s3, *w_s4, *w_rest]
+    ranked = [
+        ("uk/uksi/1998/1833/reg1", 1.0),
+        ("uk/uksi/1998/1833/reg2", 0.9),
+        ("uk/uksi/1998/1833/reg3", 0.8),
+        ("uk/uksi/1998/1833/reg4", 0.7),
+        *[(f"uk/uksi/1998/1833/reg{10 + i}", 0.5 - i * 0.01) for i in range(3)],
+    ]
+
+    sel = select_ranked_windows(all_windows, ranked, query, budget_tokens=4000, max_windows=12)
+    assert len(sel.windows) == 12
+    reg2_count = sum(1 for w in sel.windows if "/reg2/" in w.coordinate)
+    reg3_count = sum(1 for w in sel.windows if "/reg3/" in w.coordinate)
+    reg4_count = sum(1 for w in sel.windows if "/reg4/" in w.coordinate)
+    assert reg2_count == TOP_SECTION_WINDOWS
+    assert reg3_count == TOP_SECTION_WINDOWS
+    assert reg4_count == 2
+
+
+def test_premise_passage_trims_to_highlight_and_clears_limbs() -> None:
+    long_text = ("A " * 500) + "target clause here." + (" B" * 500)
+    passage = Passage(
+        text=long_text,
+        coordinate="uk/ukpga/2015/15/sch5",
+        kind=PassageKind.PROVISION,
+        heading="Schedule 5",
+        limbs=("limb 1", "limb 2"),
+    )
+    win_untrimmed = _make_window("uk/ukpga/2015/15/sch5", long_text, num=1)
+    assert _premise_passage(passage, win_untrimmed) is passage
+
+    win_short_hl = Window(
+        passage_id="P1",
+        coordinate="uk/ukpga/2015/15/sch5",
+        heading="Schedule 5",
+        text="Short text.",
+        status=TemporalStatus.IN_FORCE,
+        version_date="2026-04-06",
+        source_url="https://example.com/sch5",
+        highlight=(0, 5),
+    )
+    short_passage = Passage(
+        text="Short text.",
+        coordinate="uk/ukpga/2015/15/sch5",
+        kind=PassageKind.PROVISION,
+        limbs=("limb",),
+    )
+    assert _premise_passage(short_passage, win_short_hl) is short_passage
+
+    win_trimmed = Window(
+        passage_id="P1",
+        coordinate="uk/ukpga/2015/15/sch5",
+        heading="Schedule 5",
+        text=long_text,
+        status=TemporalStatus.IN_FORCE,
+        version_date="2026-04-06",
+        source_url="https://example.com/sch5",
+        highlight=(1000, 1019),
+    )
+    trimmed = _premise_passage(passage, win_trimmed)
+    assert trimmed is not passage
+    assert len(trimmed.text) < len(long_text)
+    assert "target clause here." in trimmed.text
+    assert trimmed.limbs == ()

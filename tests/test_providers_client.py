@@ -13,11 +13,15 @@ from legal_rag_verifier.judge import PRESETS, OpenAIChat
 from chapterverse.contracts import ChatMessage, ChatProvider, ChatRequest, ProviderUnavailable
 from chapterverse.providers.ledger import InMemoryLedger
 from chapterverse.providers.openai_compat import (
+    GEMINI_MODEL,
+    VERCEL_MODEL,
     OpenAICompatProvider,
     ProviderWarming,
     make_cloudflare,
+    make_gemini,
     make_groq,
     make_modal,
+    make_vercel,
     normalise_finish,
     rejoin_continuation,
 )
@@ -513,6 +517,19 @@ def test_cloudflare_prefill_fields_and_text_as_returned() -> None:
 
 
 @respx.mock
+def test_cloudflare_folds_newline_terminated_steering_prefill() -> None:
+    route = respx.post(CF_URL).mock(return_value=httpx.Response(200, json=reply("Continued.")))
+    steering_prefill = "\n\n(Source: [P1] text)\n\n"
+    result = cloudflare().complete(short(prefill=steering_prefill))
+    body = sent(route)
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
+    assert "continue_final_message" not in body
+    assert "add_generation_prompt" not in body
+    assert steering_prefill in body["messages"][-1]["content"]
+    assert result.text == "Continued."
+
+
+@respx.mock
 def test_cloudflare_neurons_reach_the_ledger() -> None:
     ledger = InMemoryLedger(clock=Clock())
     route = respx.post(CF_URL)
@@ -818,3 +835,149 @@ def test_short_call_times_out_and_raises_provider_unavailable() -> None:
         provider.complete(req)
     assert caught.value.kind == "timeout"
     assert caught.value.provider == "groq"
+
+
+# ---------------------------------------------------------------------------- Vercel & Gemini
+
+
+VERCEL_KEY = "vck_TESTSECRETvercel123"
+GEMINI_KEY = "AIzaSyTESTSECRETgemini12345"
+VERCEL_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+VG_ENV = {"AI_GATEWAY_API_KEY": VERCEL_KEY, "GEMINI_API_KEY": GEMINI_KEY}
+
+
+def test_vercel_and_gemini_satisfy_protocol_and_hide_secrets() -> None:
+    v = make_vercel(environ=VG_ENV, sleep=lambda _s: None)
+    g = make_gemini(environ=VG_ENV, sleep=lambda _s: None)
+    for provider in (v, g):
+        assert isinstance(provider, ChatProvider)
+        text = repr(provider) + repr(provider.adapter)
+        for secret in (VERCEL_KEY, GEMINI_KEY):
+            assert secret not in text
+        assert not prefill_on(provider)
+        provider.set_prefill(enabled=True)
+        assert not prefill_on(provider)
+    assert v.model_id == VERCEL_MODEL
+    assert g.model_id == GEMINI_MODEL
+    short_gen = short()
+    assert v.timeout_for(short_gen).read == 12.0
+    assert g.timeout_for(short_gen).read == 12.0
+
+
+@respx.mock
+def test_vercel_body_folds_prefill_and_maps_402_429() -> None:
+    route = respx.post(VERCEL_URL).mock(
+        return_value=httpx.Response(200, json=reply("Paris.", model=VERCEL_MODEL))
+    )
+    provider = make_vercel(environ=VG_ENV, sleep=lambda _s: None)
+    result = provider.complete(short(prefill="La capitale de la France est"))
+    body = sent(route)
+    assert body["model"] == VERCEL_MODEL
+    for field in ("top_k", "min_p", "chat_template_kwargs", "continue_final_message"):
+        assert field not in body
+    assert body["reasoning_effort"] == "none"
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
+    assert "La capitale de la France est" in body["messages"][-1]["content"]
+    assert result.text == "Paris."
+
+    respx.post(VERCEL_URL).mock(
+        return_value=httpx.Response(402, json={"error": {"message": f"bad {VERCEL_KEY}"}})
+    )
+    with pytest.raises(ProviderUnavailable) as caught_402:
+        provider.complete(short())
+    assert caught_402.value.kind == "quota"
+    assert caught_402.value.retry_after_s == 3600.0
+    assert VERCEL_KEY not in caught_402.value.detail
+
+    respx.post(VERCEL_URL).mock(
+        return_value=httpx.Response(
+            429, json={"error": {"message": "Insufficient monthly credits"}}, headers={}
+        )
+    )
+    with pytest.raises(ProviderUnavailable) as caught_credit:
+        provider.complete(short())
+    assert caught_credit.value.kind == "quota"
+
+    respx.post(VERCEL_URL).mock(
+        return_value=httpx.Response(
+            429, json={"error": {"message": "Rate limit exceeded"}}, headers={"retry-after": "7"}
+        )
+    )
+    with pytest.raises(ProviderUnavailable) as caught_rate:
+        provider.complete(short())
+    assert caught_rate.value.kind == "rate_limit"
+    assert caught_rate.value.retry_after_s == 7.0
+
+
+@respx.mock
+def test_gemini_strips_models_prefix_and_maps_429() -> None:
+    respx.get("https://generativelanguage.googleapis.com/v1beta/openai/models").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "models/gemini-flash-lite-latest"},
+                    {"id": "models/gemini-2.5-flash-lite"},
+                ]
+            },
+        )
+    )
+    route = respx.post(GEMINI_URL).mock(
+        return_value=httpx.Response(
+            200, json=reply("Paris.", model="models/gemini-flash-lite-latest")
+        )
+    )
+    provider = make_gemini(
+        model="models/gemini-flash-lite-latest", environ=VG_ENV, sleep=lambda _s: None
+    )
+    assert provider.model_id == "gemini-flash-lite-latest"
+    assert "gemini-flash-lite-latest" in provider.list_models()
+    result = provider.complete(
+        generation_request(MESSAGES, mode="short", max_tokens=32, seed=0, stop=("\n\n",))
+    )
+    body = sent(route)
+    assert body["model"] == "gemini-flash-lite-latest"
+    for field in ("top_k", "min_p", "presence_penalty", "seed", "chat_template_kwargs"):
+        assert field not in body
+    assert body["stop"] == ["\n\n"]
+    assert body["reasoning_effort"] == "minimal"
+    assert result.text == "Paris."
+
+    # 2.5 models still send reasoning_effort="none"
+    legacy_route = respx.post(GEMINI_URL).mock(
+        return_value=httpx.Response(200, json=reply("Paris.", model="models/gemini-2.5-flash-lite"))
+    )
+    make_gemini(model="gemini-2.5-flash-lite", environ=VG_ENV, sleep=lambda _s: None).complete(
+        short()
+    )
+    assert sent(legacy_route)["reasoning_effort"] == "none"
+
+    # Google 429 with RESOURCE_EXHAUSTED for per-minute burst stays rate_limit
+    respx.post(GEMINI_URL).mock(
+        return_value=httpx.Response(
+            429,
+            json={
+                "error": {
+                    "status": "RESOURCE_EXHAUSTED",
+                    "message": "Rate limit per minute RPM",
+                }
+            },
+            headers={"retry-after": "12"},
+        )
+    )
+    with pytest.raises(ProviderUnavailable) as caught_rpm:
+        provider.complete(short())
+    assert caught_rpm.value.kind == "rate_limit"
+    assert caught_rpm.value.retry_after_s == 12.0
+
+    # Daily quota exhaustion triggers quota until UTC midnight
+    respx.post(GEMINI_URL).mock(
+        return_value=httpx.Response(
+            429, json={"error": {"message": f"Requests per day RPD exceeded {GEMINI_KEY}"}}
+        )
+    )
+    with pytest.raises(ProviderUnavailable) as caught_rpd:
+        provider.complete(short())
+    assert caught_rpd.value.kind == "quota"
+    assert GEMINI_KEY not in caught_rpd.value.detail

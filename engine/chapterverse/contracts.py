@@ -184,7 +184,7 @@ UnavailableKind: TypeAlias = Literal[
     "quota", "rate_limit", "server", "timeout", "model_changed", "config"
 ]
 
-PROVIDER_NAMES: Final = ("groq", "cloudflare", "modal")
+PROVIDER_NAMES: Final = ("groq", "cloudflare", "vercel", "gemini", "modal")
 """Provider names in rotation order (plan §5 stage 7). Tests may use other names."""
 
 

@@ -33,7 +33,7 @@ from chapterverse.audit.modal_path import (
     _can_ban,
 )
 from chapterverse.audit.policy import ABSTAIN_TEXT, build_policy
-from chapterverse.audit.prompt import STEER_NOTE
+from chapterverse.audit.prompt import QUALIFIER_STEER_NOTE, STEER_NOTE
 from chapterverse.contracts import (
     AllProvidersUnavailable,
     ChatRequest,
@@ -398,6 +398,21 @@ def test_a_citation_written_by_the_model_fails_without_a_judge_call(
     assert out == [supported(0, TEXT1, ("P2",), rollbacks=1)]
     assert judge.sentences == [TEXT1]
     assert rotation.requests[1].prefill == STEER_NOTE
+
+
+def test_qualifier_dropped_injects_source_and_qualifier_steer_note_once(
+    run_chat: Callable[..., Run], windows: tuple[Window, ...]
+) -> None:
+    # P2 is s.124(1ZA): "the lower of- (a) £123,543, and (b) 52 multiplied by a week's pay"
+    dropped = "The compensatory award cannot exceed £123,543 [P2]."
+    out, rotation, _judge, gen = run_chat([(dropped, "stop"), (dropped, "stop"), (GOOD1, "stop")])
+    assert out == [supported(0, TEXT1, ("P2",), rollbacks=2)]
+    assert gen.stop_reason == "stop"
+    expected_prefill = inject(windows, 2) + QUALIFIER_STEER_NOTE
+    assert rotation.requests[1].prefill == expected_prefill
+    # Second rollback does not duplicate QUALIFIER_STEER_NOTE; it resamples via seed_offset
+    assert rotation.requests[2].prefill == expected_prefill
+    assert [r.seed for r in rotation.requests] == [0, 0, 1]
 
 
 def test_a_model_citation_every_time_is_refused_with_its_reason(

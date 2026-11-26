@@ -316,6 +316,46 @@ def _extract_sentences_and_citations(
     return sentences_out, all_citations
 
 
+def _check_expect_abstention(
+    row: Mapping[str, Any],
+    sentences: Sequence[tuple[str, list[str]]],
+    refusal_stripped: str,
+    abstention_count: int,
+    failure_reasons: list[str],
+) -> None:
+    if abstention_count < 1:
+        failure_reasons.append("expected abstention sentence, none found")
+    row_instruments = [
+        inst
+        for inst in (row.get("instrument"), *(row.get("other_instruments") or []))
+        if isinstance(inst, str) and inst.strip()
+    ]
+    bad_cits = [
+        c
+        for stext, cits in sentences
+        if stext.strip() != refusal_stripped
+        for c in cits
+        if any(is_descendant_or_equal(c, inst) for inst in row_instruments)
+    ]
+    if bad_cits:
+        failure_reasons.append(f"non-abstention sentence cites row instrument: {bad_cits}")
+
+
+def _check_required_any_phrases(
+    req_any: Sequence[str],
+    sentence_texts: Sequence[str],
+    refusal_stripped: str,
+    failure_reasons: list[str],
+) -> None:
+    if not req_any:
+        return
+    supported_text = " ".join(
+        stext for stext in sentence_texts if stext.strip() != refusal_stripped
+    ).lower()
+    if not any(phrase.lower() in supported_text for phrase in req_any):
+        failure_reasons.append(f"missing required phrase (any of {list(req_any)})")
+
+
 def evaluate_answer(  # noqa: PLR0912
     row: dict[str, Any],
     events: Sequence[Any],
@@ -391,24 +431,18 @@ def evaluate_answer(  # noqa: PLR0912
             failure_reasons.append(f"duplicate sentences found: {duplicate_sentences}")
 
     # 7. expect_abstention
-    expect_abstention: bool = bool(checks.get("expect_abstention", False))
-    if expect_abstention:
-        if abstention_count < 1:
-            failure_reasons.append("expected abstention sentence, none found")
-        row_instruments = [
-            inst
-            for inst in (row.get("instrument"), *(row.get("other_instruments") or []))
-            if isinstance(inst, str) and inst.strip()
-        ]
-        bad_cits = [
-            c
-            for stext, cits in sentences
-            if stext.strip() != refusal_stripped
-            for c in cits
-            if any(is_descendant_or_equal(c, inst) for inst in row_instruments)
-        ]
-        if bad_cits:
-            failure_reasons.append(f"non-abstention sentence cites row instrument: {bad_cits}")
+    if checks.get("expect_abstention", False):
+        _check_expect_abstention(
+            row, sentences, refusal_stripped, abstention_count, failure_reasons
+        )
+
+    # 8. required_any_phrases (at least one phrase must appear in non-abstention sentences)
+    _check_required_any_phrases(
+        checks.get("required_any_phrases") or [],
+        sentence_texts,
+        refusal_stripped,
+        failure_reasons,
+    )
 
     passed = len(failure_reasons) == 0
     return {
@@ -553,6 +587,10 @@ def _record_local(
         active_pipeline = pipeline
 
     try:
+        bound_ranker = getattr(active_pipeline, "bound_ranker", None)
+        wait_fn = getattr(bound_ranker, "wait", None)
+        if callable(wait_fn):
+            wait_fn(timeout=15.0)
         rotation = getattr(active_pipeline, "rotation", None)
         gen_providers = _available_providers(rotation, "generate")
         judge_providers = _available_providers(rotation, "judge")

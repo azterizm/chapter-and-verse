@@ -54,6 +54,7 @@ __all__ = [
     "MODE_RULES",
     "PASSAGE_TEMPLATE",
     "PROMPT_SHA256",
+    "QUALIFIER_STEER_NOTE",
     "SOURCE_TEMPLATE",
     "STEER_NOTE",
     "SYSTEM_TEMPLATE",
@@ -90,7 +91,9 @@ SYSTEM_TEMPLATE: Final = (
     'or "the text provided" in your sentences (the [P#] ids are citation marks only).\n'
     "- You may name a section, subsection or paragraph only when the passage it cites names it, "
     "and must still cite with [P#]. Never write an SI number or any other citation.\n"
-    "- State figures, dates and conditions exactly as the passages give them.\n"
+    "- State figures, dates, and any attached qualifier or condition (such as 'subject to', "
+    "'unless', 'except', 'maximum', 'average', or 'at least') in the same sentence, and "
+    "include all relevant entitlements or exemptions shown across the passages.\n"
     "- Placeholders like [PERSON 1] stand for people the user named and must be kept as written.\n"
     "- When the law shown does not settle the question, say what it does settle (cited) and "
     f'then write exactly "{ABSTAIN_TEXT}", once, as the last sentence.\n'
@@ -124,6 +127,11 @@ STEER_NOTE: Final = (
     "number.)\n\n"
 )
 """Written into the context once per answer after a sentence fails the passage-reference rules."""
+QUALIFIER_STEER_NOTE: Final = (
+    "\n\n(Keep any statutory qualifier or condition such as 'subject to', 'unless', 'except', "
+    "'maximum', 'average', or 'at least' in the same sentence as the figure.)\n\n"
+)
+"""Written into the context once per answer after a sentence drops a figure's qualifier."""
 
 _TEMPLATE_PARTS: Final = {
     "system": SYSTEM_TEMPLATE,
@@ -136,6 +144,7 @@ _TEMPLATE_PARTS: Final = {
     "source": SOURCE_TEMPLATE,
     "inject": INJECT_TEMPLATE,
     "steer": STEER_NOTE,
+    "qualifier_steer": QUALIFIER_STEER_NOTE,
     "ellipsis": ELLIPSIS,
     "margin": CONTEXT_MARGIN_CHARS,
 }

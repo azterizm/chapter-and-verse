@@ -119,9 +119,10 @@ from chapterverse.pipeline import (
     AskRequest,
     ModalKV,
     Pipeline,
+    PipelineConfig,
     StreamClosed,
 )
-from chapterverse.providers.ledger import CallUsage
+from chapterverse.providers.ledger import CallUsage, GroqLimits
 from chapterverse.providers.openai_compat import OpenAICompatProvider
 from chapterverse.providers.pinning import PinCheck, apply_checks, check_provider, is_conclusive
 from chapterverse.providers.presets import JUDGE_PRESET, JUDGE_PRESET_NAME, MODAL_MODEL_ID
@@ -785,7 +786,13 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         store.corpus_id[:12],
         store.snapshot,
     )
-    persistence = open_persistence(settings)
+    groq_limits = GroqLimits(
+        requests_per_day=settings.groq_requests_per_day,
+        tokens_per_minute=settings.groq_tokens_per_minute,
+        requests_per_minute=settings.groq_requests_per_minute,
+        tokens_per_day=settings.groq_tokens_per_day,
+    )
+    persistence = open_persistence(settings, groq_limits=groq_limits)
     config = RotationConfig.from_env(env, settings=settings)
     for name, why in config.skipped:
         log.info("provider %s out of rotation: %s", name, why)
@@ -823,6 +830,10 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         store=store,
         rotation=rotation,
         policy=build_policy(JUDGE_PRESET_NAME),
+        config=PipelineConfig(
+            premise_budget_tokens=settings.premise_budget_tokens,
+            max_prompt_windows=settings.max_prompt_windows,
+        ),
         modal_kv=modal_kv,
         daily_caps=persistence.daily_caps,
         daily_ask_cap=daily_ask_cap,

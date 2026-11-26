@@ -1265,3 +1265,94 @@ def test_retrieval_gate_empty_must_reach_rule() -> None:
     assert by_id["E4"]["bound"] == "no"
     assert report["totals"]["rows_passed"] == 3
     assert report["totals"]["rows_failed"] == 1
+
+
+def test_rubric_required_any_phrases_and_l55_exemption() -> None:
+    policy = build_policy(JUDGE_PRESET_NAME)
+    refusal_text = policy.refusal_text
+    l55_row = next(r for r in load_battery(DEFAULT_BATTERY, split="dev") if r["id"] == "L55")
+
+    def make_ev(s108_coord: str, s108_text: str) -> list[Any]:
+        return [
+            SentenceEvent(
+                sentence=SentenceOut(
+                    index=0,
+                    text="A protected disclosure dismissal is automatically unfair.",
+                    verdict="supported",
+                    passage_ids=("P1",),
+                    reasons=("GROUNDED",),
+                    rollbacks=0,
+                ),
+                citations=(
+                    RenderedCitation(
+                        passage_id="P1",
+                        coordinate="uk/ukpga/1996/18/s103A",
+                        label="s.103A",
+                        url="http://example.com/s103A",
+                    ),
+                ),
+            ),
+            SentenceEvent(
+                sentence=SentenceOut(
+                    index=1,
+                    text=s108_text,
+                    verdict="supported",
+                    passage_ids=("P2",),
+                    reasons=("GROUNDED",),
+                    rollbacks=0,
+                ),
+                citations=(
+                    RenderedCitation(
+                        passage_id="P2",
+                        coordinate=s108_coord,
+                        label="s.108",
+                        url="http://example.com/s108",
+                    ),
+                ),
+            ),
+        ]
+
+    # Passing: cites s108/3 and states the exemption phrase
+    res_ok = evaluate_answer(
+        l55_row,
+        make_ev(
+            "uk/ukpga/1996/18/s108/3",
+            "The two-year qualifying period does not apply to protected disclosure dismissals.",
+        ),
+        refusal_text,
+    )
+    assert res_ok["passed"] is True
+
+    # Failing 1: cites only s108/1 and states only the two-year rule
+    res_only_two_years = evaluate_answer(
+        l55_row,
+        make_ev(
+            "uk/ukpga/1996/18/s108/1",
+            "An employee needs two years of continuous employment to claim unfair dismissal.",
+        ),
+        refusal_text,
+    )
+    assert res_only_two_years["passed"] is False
+    assert any("s108/3" in r for r in res_only_two_years["failure_reasons"])
+    assert any("missing required phrase" in r for r in res_only_two_years["failure_reasons"])
+
+    # Failing 2: abstention text alone does not satisfy required_any_phrases
+    res_abstain = evaluate_answer(
+        l55_row,
+        [
+            SentenceEvent(
+                sentence=SentenceOut(
+                    index=0,
+                    text=refusal_text,
+                    verdict="refused",
+                    passage_ids=(),
+                    reasons=("ABSTAINED",),
+                    rollbacks=0,
+                ),
+                citations=(),
+            )
+        ],
+        refusal_text,
+    )
+    assert res_abstain["passed"] is False
+    assert any("missing required phrase" in r for r in res_abstain["failure_reasons"])

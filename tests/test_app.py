@@ -52,7 +52,7 @@ from chapterverse.contracts import (
 from chapterverse.persistence import INSERT_RECEIPT_SQL, Database, ReceiptStore
 from chapterverse.pipeline import AskRequest, ModalKV, Pipeline
 from chapterverse.providers import ProviderRotation, make_cloudflare, make_groq, make_modal
-from chapterverse.providers.ledger import InMemoryLedger, ModalLimits
+from chapterverse.providers.ledger import GroqLimits, InMemoryLedger, ModalLimits
 from chapterverse.providers.presets import JUDGE_PRESET, JUDGE_PRESET_NAME
 from chapterverse.ratelimit import (
     DEFAULT_DAILY_ASK_CAP,
@@ -631,6 +631,53 @@ def test_build_runtime_from_the_environment(
     assert [t for t, _, _ in parsed] == ["route", "sources", "extractive", "receipt", "done"]
     messages = [r.getMessage() for r in caplog.records]
     assert any("provider groq out of rotation: GROQ_API_KEY is not set" in m for m in messages)
+
+
+@pytest.mark.parametrize(
+    "var",
+    [
+        "GROQ_TOKENS_PER_MINUTE",
+        "GROQ_TOKENS_PER_DAY",
+        "GROQ_REQUESTS_PER_MINUTE",
+        "GROQ_REQUESTS_PER_DAY",
+        "PREMISE_BUDGET_TOKENS",
+        "MAX_PROMPT_WINDOWS",
+    ],
+)
+@pytest.mark.parametrize("bad", ["abc", "0", "-5"])
+def test_settings_rejects_invalid_layer1_ints(var: str, bad: str) -> None:
+    with pytest.raises(ConfigError):
+        Settings.from_env({"LEGAL_DATA_ROOT": "/data", var: bad})
+
+
+def test_build_runtime_wires_layer1_groq_limits_and_pipeline_config(
+    fixture_data_root: Path, built_store: Path
+) -> None:
+    env = {
+        "LEGAL_DATA_ROOT": str(fixture_data_root),
+        "STORE_DIR": str(built_store),
+        "GROQ_TOKENS_PER_MINUTE": "30000",
+        "GROQ_TOKENS_PER_DAY": "500000",
+        "GROQ_REQUESTS_PER_MINUTE": "60",
+        "GROQ_REQUESTS_PER_DAY": "2500",
+        "PREMISE_BUDGET_TOKENS": "4000",
+        "MAX_PROMPT_WINDOWS": "12",
+        "DAILY_ASK_CAP": "0",
+    }
+    rt = build_runtime(env)
+    try:
+        ledger = rt.pipeline.rotation.ledger  # type: ignore[attr-defined]
+        assert isinstance(ledger, InMemoryLedger)
+        assert ledger.groq_limits == GroqLimits(
+            requests_per_day=2500,
+            tokens_per_minute=30_000,
+            requests_per_minute=60,
+            tokens_per_day=500_000,
+        )
+        assert rt.pipeline.config.premise_budget_tokens == 4000
+        assert rt.pipeline.config.max_prompt_windows == 12
+    finally:
+        rt.shutdown()
 
 
 # ---------------------------------------------------------------------- pin check

@@ -609,3 +609,36 @@ def test_window_wait_modal_monthly() -> None:
     assert res is not None
     assert res[0] == "month"
     assert res[1] == pytest.approx(60.0)
+
+
+def test_groq_limits_defaults_and_custom_override() -> None:
+    defaults = GroqLimits()
+    assert (
+        defaults.requests_per_day,
+        defaults.tokens_per_minute,
+        defaults.requests_per_minute,
+        defaults.tokens_per_day,
+    ) == (1000, 8000, 30, 200_000)
+
+    clock = Clock()
+    custom = GroqLimits(
+        requests_per_day=5000,
+        tokens_per_minute=30_000,
+        requests_per_minute=100,
+        tokens_per_day=1_000_000,
+    )
+    ledger = InMemoryLedger(groq=custom, clock=clock)
+    assert ledger.reserve("groq", 20_000, max_output_tokens=5_000)
+    ledger.record(
+        CallUsage(
+            provider="groq",
+            est_tokens=20_000,
+            max_output_tokens=5_000,
+            prompt_tokens=20_000,
+            completion_tokens=0,
+        )
+    )
+    snap = ledger.snapshot()["groq"]
+    assert snap["requests_per_day"] == 5000
+    assert snap["tokens_per_minute"] == 30_000
+    assert snap["tokens_day"] == 20_000

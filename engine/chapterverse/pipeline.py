@@ -64,6 +64,7 @@ from typing import Any, Final, Literal
 
 from legal_rag_router import RouteContext, Router, RouteResult, RouteStatus, partition_filter
 from legal_rag_router.coordinate import Coordinate as RouterCoordinate
+from legal_rag_verifier.citations import find_citations, is_relative
 from legal_rag_verifier.corpus import instrument_coordinate
 from legal_rag_verifier.premise import Passage, Premise
 from symspellpy import SymSpell  # type: ignore[import-untyped]
@@ -75,6 +76,7 @@ from chapterverse.audit.prompt import (
     CONTEXT_MARGIN_CHARS,
     estimate_tokens,
     render_passage,
+    trim_window_text,
 )
 from chapterverse.bound_rank import InstrumentRanges, expand_siblings, rank_sections
 from chapterverse.citations import instrument_name, provision_label, render_citation
@@ -140,6 +142,7 @@ from chapterverse.ratelimit import (
     DailyBudgetStore,
     DailyCapStore,
 )
+from chapterverse.sections import section_coordinate
 from chapterverse.status import StatusDecision, decide_status, instrument_status
 from chapterverse.symspell_build import build_symspell_in_memory
 from chapterverse.templates import (
@@ -184,8 +187,18 @@ MAX_PROMPT_WINDOWS: Final = 8
 """At most this many windows go to the model (the extractive cap too)."""
 TOP_SECTION_WINDOWS: Final = 3
 """Maximum windows allocated to the top-ranked section in round 1 (requirement R8)."""
+ROUND2_BREADTH_SECTIONS: Final = 6
+"""Maximum ranked sections allocated one window each in round 2 before adding depth."""
+UNTRIMMED_MIN_CHARS: Final = 2 * CONTEXT_MARGIN_CHARS
+"""Windows longer than this stay untrimmed when the full text fits inside the budget."""
+UNTRIMMED_MAX_CHARS: Final = 3200
+"""Upper bound on untrimmed long windows so massive schedules remain highlight-trimmed."""
 MAX_CONTEXT_COORDINATES: Final = 10
 """Previous-turn coordinates accepted as routing context."""
+_REL_SUBSECTION: Final = re.compile(
+    r"\b(?:subsection|paragraph|sub-paragraph)\s*\(([0-9A-Za-z]+)\)",
+    re.IGNORECASE,
+)
 
 INCOMPLETE_NOTICE: Final = providers_unavailable_notice()
 NO_TEXT_NOTICE: Final = NoticeEvent(
@@ -327,26 +340,129 @@ def _renumber(windows: Iterable[Window]) -> tuple[Window, ...]:
     return tuple(dataclasses.replace(w, passage_id=f"P{i}") for i, w in enumerate(windows, start=1))
 
 
+def _term_overlap(text: str, terms: frozenset[str]) -> int:
+    lowered = text.lower()
+    return sum(1 for t in terms if t in lowered or (len(t) >= 5 and t[:5] in lowered))  # noqa: PLR2004
+
+
+def _intra_instrument_xrefs(
+    windows: Sequence[Window],
+    ordered_secs: list[Coordinate],
+    terms: frozenset[str],
+    *,
+    by_sec: Mapping[Coordinate, Sequence[tuple[int, Window]]],
+) -> tuple[list[Coordinate], frozenset[int]]:
+    """Find 1-hop intra-instrument cross-references to the top 3 ranked sections.
+
+    Returns ``(updated_ordered_secs, citing_window_indices)``. At most one targeted citing
+    section (citing <= 2 distinct sections in that window and overlapping the query) that is not
+    already in the top 5 ranked sections is promoted into position 3 so related opt-out or
+    exception provisions (e.g. WTR 1998 reg.5 citing reg.4) are reached.
+    """
+    del by_sec
+    top_secs = ordered_secs[:3]
+    top_tails = {s.rsplit("/", 1)[-1]: s for s in top_secs}
+    citing_windows: set[int] = set()
+    citing_sec_score: dict[Coordinate, tuple[int, int]] = {}
+
+    for idx, w in enumerate(windows):
+        sec = section_coordinate(w.coordinate)
+        cited_secs = {
+            m.canonical.split("/", 1)[0]
+            for m in find_citations(w.text)
+            if m.canonical and not is_relative(m.canonical)
+        }
+        if any(t in top_tails and top_tails[t] != sec for t in cited_secs):
+            citing_windows.add(idx)
+            if len(cited_secs) <= 2:  # noqa: PLR2004 - exclude omnibus exception lists
+                h_ov = _term_overlap(w.heading, terms)
+                t_ov = _term_overlap(w.text, terms)
+                if h_ov + t_ov >= 1:
+                    prev = citing_sec_score.get(sec, (-1, -1))
+                    if (h_ov, t_ov) > prev:
+                        citing_sec_score[sec] = (h_ov, t_ov)
+
+    top_five = set(ordered_secs[:5])
+    rank_pos = {sec: pos for pos, sec in enumerate(ordered_secs)}
+    if len(ordered_secs) <= ROUND2_BREADTH_SECTIONS:
+        return list(ordered_secs), frozenset(citing_windows)
+    candidates = [
+        sec
+        for sec, _score in sorted(
+            citing_sec_score.items(),
+            key=lambda kv: (-kv[1][0], -kv[1][1], rank_pos.get(kv[0], len(ordered_secs))),
+        )
+        if sec in rank_pos and sec not in top_five
+    ]
+    updated = list(ordered_secs)
+    for extra in candidates[:1]:
+        if extra in updated:
+            updated.remove(extra)
+        updated.insert(min(3, len(updated)), extra)
+    return updated, frozenset(citing_windows)
+
+
+def _push_relative_refs(
+    seed: tuple[int, Window, tuple[int, int] | None] | None,
+    sub_to_item: Mapping[str, tuple[int, Window, tuple[int, int] | None]],
+    push: Callable[[tuple[int, Window, tuple[int, int] | None]], None],
+) -> None:
+    if seed is None:
+        return
+    for match in _REL_SUBSECTION.finditer(seed[1].text):
+        item = sub_to_item.get(match.group(1).lower())
+        if item is not None:
+            push(item)
+
+
 def _order_section_windows(
     sec_windows: list[tuple[int, Window]],
     terms: frozenset[str],
+    *,
+    sec_coord: Coordinate = "",
+    citing_windows: frozenset[int] = frozenset(),
 ) -> list[tuple[int, Window, tuple[int, int] | None]]:
-    scored = []
-    best_candidate = None
+    scored: list[tuple[int, Window, tuple[int, int] | None]] = []
+    best_candidate: tuple[int, Window, tuple[int, int] | None] | None = None
     best_tuple = (-1, -1, -1)
+    sub_to_item: dict[str, tuple[int, Window, tuple[int, int] | None]] = {}
+    prefix = f"{sec_coord}/" if sec_coord else ""
+
     for idx, w in sec_windows:
         span, distinct, matches = highlight_span(w.text, terms)
         item = (idx, w, span)
         scored.append(item)
+        if prefix and w.coordinate.startswith(prefix):
+            sub_to_item[w.coordinate[len(prefix) :].lower()] = item
         if distinct > 0:
             tup = (w.status is TemporalStatus.IN_FORCE, distinct, matches)
             if tup > best_tuple:
                 best_tuple = tup
                 best_candidate = item
 
+    ordered: list[tuple[int, Window, tuple[int, int] | None]] = []
+    used: set[int] = set()
+
+    def push(item: tuple[int, Window, tuple[int, int] | None]) -> None:
+        if item[0] not in used:
+            ordered.append(item)
+            used.add(item[0])
+
     if best_candidate is not None:
-        return [best_candidate, *(item for item in scored if item[0] != best_candidate[0])]
-    return scored
+        push(best_candidate)
+    op1 = sub_to_item.get("1")
+    if op1 is not None and op1[1].status is TemporalStatus.IN_FORCE:
+        push(op1)
+        _push_relative_refs(op1, sub_to_item, push)
+    for item in scored:
+        if item[0] in citing_windows:
+            push(item)
+            break
+    if best_candidate is not None and best_candidate is not op1:
+        _push_relative_refs(best_candidate, sub_to_item, push)
+    for item in scored:
+        push(item)
+    return ordered
 
 
 def _group_section_windows(
@@ -354,21 +470,100 @@ def _group_section_windows(
     ranked_sections: Sequence[tuple[Coordinate, float]],
     terms: frozenset[str],
 ) -> list[list[tuple[int, Window, tuple[int, int] | None]]]:
-    window_index_map = {id(w): i for i, w in enumerate(windows)}
-    section_lists: list[list[tuple[int, Window, tuple[int, int] | None]]] = []
+    by_sec: dict[Coordinate, list[tuple[int, Window]]] = {}
+    for idx, w in enumerate(windows):
+        by_sec.setdefault(section_coordinate(w.coordinate), []).append((idx, w))
+
+    ordered_secs: list[Coordinate] = []
     seen_sections: set[Coordinate] = set()
     for sec_coord, _ in ranked_sections:
         if sec_coord in seen_sections:
             continue
         seen_sections.add(sec_coord)
-        sec_windows = [
-            (window_index_map[id(w)], w)
-            for w in windows
-            if w.coordinate == sec_coord or w.coordinate.startswith(f"{sec_coord}/")
-        ]
-        if sec_windows:
-            section_lists.append(_order_section_windows(sec_windows, terms))
-    return section_lists
+        if sec_coord in by_sec:
+            ordered_secs.append(sec_coord)
+        else:
+            # Handle sub-section ranked keys or exact-prefix matches in synthetic tests.
+            prefix = f"{sec_coord}/"
+            matched = [
+                (i, w)
+                for i, w in enumerate(windows)
+                if w.coordinate == sec_coord or w.coordinate.startswith(prefix)
+            ]
+            if matched:
+                by_sec[sec_coord] = matched
+                ordered_secs.append(sec_coord)
+
+    if not ordered_secs:
+        return []
+
+    ordered_secs, citing_windows = _intra_instrument_xrefs(
+        windows, ordered_secs, terms, by_sec=by_sec
+    )
+    return [
+        _order_section_windows(
+            by_sec[sec_coord],
+            terms,
+            sec_coord=sec_coord,
+            citing_windows=citing_windows,
+        )
+        for sec_coord in ordered_secs
+    ]
+
+
+def _add_round3_depth(
+    section_lists: list[list[tuple[int, Window, tuple[int, int] | None]]],
+    chosen: dict[int, Window],
+    max_windows: int,
+    try_add: Callable[[int, Window, tuple[int, int] | None], bool],
+) -> None:
+    depth_secs = section_lists[1 : min(len(section_lists), 3)]
+    for _ in range(TOP_SECTION_WINDOWS - 1):
+        for sec in depth_secs:
+            if len(chosen) >= max_windows:
+                return
+            for item in sec:
+                if item[0] not in chosen:
+                    try_add(*item)
+                    break
+
+
+def _add_round4_remaining(
+    section_lists: list[list[tuple[int, Window, tuple[int, int] | None]]],
+    chosen: dict[int, Window],
+    max_windows: int,
+    try_add: Callable[[int, Window, tuple[int, int] | None], bool],
+) -> None:
+    sec_counts = [sum(1 for idx, _, _ in sec if idx in chosen) for sec in section_lists]
+
+    def _round_robin(*, cap: int | None) -> None:
+        while len(chosen) < max_windows:
+            progressed = False
+            for i, sec in enumerate(section_lists):
+                if len(chosen) >= max_windows:
+                    return
+                if cap is not None and sec_counts[i] >= cap:
+                    continue
+                for item in sec:
+                    if item[0] not in chosen and try_add(*item):
+                        sec_counts[i] += 1
+                        progressed = True
+                        break
+            if not progressed:
+                return
+
+    _round_robin(cap=TOP_SECTION_WINDOWS)
+    _round_robin(cap=None)
+
+
+def _premise_passage(passage: Passage, window: Window) -> Passage:
+    """Apply ``window.highlight`` trimming to ``passage`` so the judge sees the same text."""
+    if window.highlight is None:
+        return passage
+    trimmed = trim_window_text(window.text, window.highlight)
+    if trimmed == passage.text:
+        return passage
+    return dataclasses.replace(passage, text=trimmed, limbs=())
 
 
 def _allocate_ranked_windows(
@@ -383,6 +578,13 @@ def _allocate_ranked_windows(
         nonlocal used
         if idx in chosen or len(chosen) >= max_windows:
             return False
+        if UNTRIMMED_MIN_CHARS < len(w.text) <= UNTRIMMED_MAX_CHARS:
+            full_win = dataclasses.replace(w, highlight=None)
+            full_cost = _cost(full_win)
+            if used + full_cost <= budget_tokens:
+                chosen[idx] = full_win
+                used += full_cost
+                return True
         trimmed = dataclasses.replace(w, highlight=span) if span is not None else w
         cost = _cost(trimmed)
         if used + cost > budget_tokens:
@@ -401,19 +603,25 @@ def _allocate_ranked_windows(
         if not try_add(*item) and len(chosen) >= max_windows:
             break
 
-    # Round 2: every next section gets its single best window
-    for next_section in section_lists[1:]:
+    # Round 2: ranks 2..ROUND2_BREADTH_SECTIONS get 1 window each
+    for next_section in section_lists[1:ROUND2_BREADTH_SECTIONS]:
         if len(chosen) >= max_windows:
             break
         try_add(*next_section[0])
 
-    # Round 3: any slots left go to further windows of the ranked sections in rank order
-    for sec in section_lists:
-        if len(chosen) >= max_windows:
-            break
-        for item in sec:
-            if not try_add(*item) and len(chosen) >= max_windows:
+    # Round 3 & 4: with expanded window budget (> MAX_PROMPT_WINDOWS), add depth for ranks 2-3
+    # and fill remaining slots round-robin (preferring sections under TOP_SECTION_WINDOWS) so no
+    # single section drains all tail slots; otherwise keep legacy rank-order tail fill.
+    if max_windows > MAX_PROMPT_WINDOWS:
+        _add_round3_depth(section_lists, chosen, max_windows, try_add)
+        _add_round4_remaining(section_lists, chosen, max_windows, try_add)
+    else:
+        for sec in section_lists:
+            if len(chosen) >= max_windows:
                 break
+            for item in sec:
+                if not try_add(*item) and len(chosen) >= max_windows:
+                    break
 
     return chosen, used
 
@@ -1218,7 +1426,7 @@ class Pipeline:
             )
             return
         premise = Premise(
-            tuple(passages[w.coordinate] for w in model_windows),
+            tuple(_premise_passage(passages[w.coordinate], w) for w in model_windows),
             frozenset(citations),
             tuple(dict.fromkeys(titles)),
         )

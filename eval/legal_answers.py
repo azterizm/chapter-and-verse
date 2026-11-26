@@ -103,6 +103,10 @@ def build_answers_env(environ: Mapping[str, str] | None = None) -> dict[str, str
         env["LEGAL_DATA_ROOT"] = str(ROUTER_REPO / "data")
     if "STORE_DIR" not in env and Path("artefacts/store").is_dir():
         env["STORE_DIR"] = "artefacts/store"
+    if "DENSE_DIR" not in env and Path("artefacts/dense/index").is_dir():
+        env["DENSE_DIR"] = "artefacts/dense/index"
+    if "DENSE_MODEL_DIR" not in env and Path("artefacts/models").is_dir():
+        env["DENSE_MODEL_DIR"] = "artefacts/models"
     return env
 
 

@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Final
 
 __all__ = [
+    "DEFAULT_GROQ_REQUESTS_PER_DAY",
+    "DEFAULT_GROQ_REQUESTS_PER_MINUTE",
+    "DEFAULT_GROQ_TOKENS_PER_DAY",
+    "DEFAULT_GROQ_TOKENS_PER_MINUTE",
+    "DEFAULT_MAX_PROMPT_WINDOWS",
     "DEFAULT_MAX_QUERY_BYTES",
+    "DEFAULT_PREMISE_BUDGET_TOKENS",
     "DEFAULT_STORE_DIR",
     "ConfigError",
     "Settings",
@@ -23,6 +29,12 @@ __all__ = [
 
 DEFAULT_MAX_QUERY_BYTES: Final = 4096
 DEFAULT_STORE_DIR: Final = Path("artefacts/store")
+DEFAULT_GROQ_TOKENS_PER_MINUTE: Final = 8_000
+DEFAULT_GROQ_TOKENS_PER_DAY: Final = 200_000
+DEFAULT_GROQ_REQUESTS_PER_MINUTE: Final = 30
+DEFAULT_GROQ_REQUESTS_PER_DAY: Final = 1_000
+DEFAULT_PREMISE_BUDGET_TOKENS: Final = 1_500
+DEFAULT_MAX_PROMPT_WINDOWS: Final = 8
 
 
 class ConfigError(ValueError):
@@ -50,6 +62,19 @@ def _optional(env: Mapping[str, str], name: str) -> str | None:
     return value or None
 
 
+def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
+    text = _optional(env, name)
+    if text is None:
+        return default
+    try:
+        value = int(text)
+    except ValueError:
+        raise ConfigError(f"{name} is not an integer") from None
+    if value <= 0:
+        raise ConfigError(f"{name} must be positive")
+    return value
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Settings:
     """Engine settings. Build with :meth:`from_env`; construct directly in tests."""
@@ -74,9 +99,27 @@ class Settings:
     """``MAX_QUERY_BYTES``: the UTF-8 size cap on a query (plan §5 stage 1)."""
     cors_origins: tuple[str, ...] = ()
     """``CORS_ORIGINS``: comma-separated origins; none when unset."""
+    groq_tokens_per_minute: int = DEFAULT_GROQ_TOKENS_PER_MINUTE
+    """``GROQ_TOKENS_PER_MINUTE``: Groq TPM limit enforced by the quota ledger."""
+    groq_tokens_per_day: int = DEFAULT_GROQ_TOKENS_PER_DAY
+    """``GROQ_TOKENS_PER_DAY``: Groq TPD limit enforced by the quota ledger."""
+    groq_requests_per_minute: int = DEFAULT_GROQ_REQUESTS_PER_MINUTE
+    """``GROQ_REQUESTS_PER_MINUTE``: Groq RPM limit enforced by the quota ledger."""
+    groq_requests_per_day: int = DEFAULT_GROQ_REQUESTS_PER_DAY
+    """``GROQ_REQUESTS_PER_DAY``: Groq RPD limit enforced by the quota ledger."""
+    premise_budget_tokens: int = DEFAULT_PREMISE_BUDGET_TOKENS
+    """``PREMISE_BUDGET_TOKENS``: estimated token budget for rendered prompt passages."""
+    max_prompt_windows: int = DEFAULT_MAX_PROMPT_WINDOWS
+    """``MAX_PROMPT_WINDOWS``: maximum number of passage windows sent to generation."""
+    vercel_model: str | None = None
+    """``VERCEL_MODEL``: optional model id override for Vercel AI Gateway."""
+    gemini_model: str | None = None
+    """``GEMINI_MODEL``: optional model id override for Google AI Studio."""
     # The names of the variables holding the keys, not keys.
     groq_api_key_env: str = "GROQ_API_KEY"
     cloudflare_token_env: str = "CLOUDFLARE_AI_WORKER_TOKEN"  # noqa: S105 - a variable name
+    vercel_key_env: str = "AI_GATEWAY_API_KEY"
+    gemini_key_env: str = "GEMINI_API_KEY"
     modal_api_key_env: str = "MODAL_API_KEY"
 
     def __repr__(self) -> str:
@@ -90,8 +133,18 @@ class Settings:
             "cloudflare_account_id": self.cloudflare_account_id,
             "max_query_bytes": self.max_query_bytes,
             "cors_origins": self.cors_origins,
+            "groq_tokens_per_minute": self.groq_tokens_per_minute,
+            "groq_tokens_per_day": self.groq_tokens_per_day,
+            "groq_requests_per_minute": self.groq_requests_per_minute,
+            "groq_requests_per_day": self.groq_requests_per_day,
+            "premise_budget_tokens": self.premise_budget_tokens,
+            "max_prompt_windows": self.max_prompt_windows,
+            "vercel_model": self.vercel_model,
+            "gemini_model": self.gemini_model,
             "groq_api_key_env": self.groq_api_key_env,
             "cloudflare_token_env": self.cloudflare_token_env,
+            "vercel_key_env": self.vercel_key_env,
+            "gemini_key_env": self.gemini_key_env,
             "modal_api_key_env": self.modal_api_key_env,
         }
         return "Settings(" + ", ".join(f"{k}={v!r}" for k, v in shown.items()) + ")"
@@ -117,13 +170,7 @@ class Settings:
                 raise ConfigError(f"set {name} or LEGAL_DATA_ROOT")
             return root / default
 
-        max_bytes_text = _optional(env, "MAX_QUERY_BYTES")
-        try:
-            max_bytes = int(max_bytes_text) if max_bytes_text else DEFAULT_MAX_QUERY_BYTES
-        except ValueError:
-            raise ConfigError("MAX_QUERY_BYTES is not an integer") from None
-        if max_bytes <= 0:
-            raise ConfigError("MAX_QUERY_BYTES must be positive")
+        max_bytes = _positive_int(env, "MAX_QUERY_BYTES", DEFAULT_MAX_QUERY_BYTES)
         store_text = _optional(env, "STORE_DIR")
         origins = tuple(o.strip() for o in env.get("CORS_ORIGINS", "").split(",") if o.strip())
         return cls(
@@ -136,4 +183,22 @@ class Settings:
             cloudflare_account_id=_optional(env, "CLOUDFLARE_ACCOUNT_ID"),
             max_query_bytes=max_bytes,
             cors_origins=origins,
+            groq_tokens_per_minute=_positive_int(
+                env, "GROQ_TOKENS_PER_MINUTE", DEFAULT_GROQ_TOKENS_PER_MINUTE
+            ),
+            groq_tokens_per_day=_positive_int(
+                env, "GROQ_TOKENS_PER_DAY", DEFAULT_GROQ_TOKENS_PER_DAY
+            ),
+            groq_requests_per_minute=_positive_int(
+                env, "GROQ_REQUESTS_PER_MINUTE", DEFAULT_GROQ_REQUESTS_PER_MINUTE
+            ),
+            groq_requests_per_day=_positive_int(
+                env, "GROQ_REQUESTS_PER_DAY", DEFAULT_GROQ_REQUESTS_PER_DAY
+            ),
+            premise_budget_tokens=_positive_int(
+                env, "PREMISE_BUDGET_TOKENS", DEFAULT_PREMISE_BUDGET_TOKENS
+            ),
+            max_prompt_windows=_positive_int(env, "MAX_PROMPT_WINDOWS", DEFAULT_MAX_PROMPT_WINDOWS),
+            vercel_model=_optional(env, "VERCEL_MODEL"),
+            gemini_model=_optional(env, "GEMINI_MODEL"),
         )

@@ -22,3 +22,7 @@ web/dist/
 
 # OS
 .DS_Store
+
+# Local notes
+docs/PRE-PITCH-PLAN.md
+

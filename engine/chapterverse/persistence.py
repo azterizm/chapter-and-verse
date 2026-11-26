@@ -44,6 +44,7 @@ from chapterverse.contracts import AnswerFactObject, Purpose, canonical_json
 from chapterverse.providers.ledger import (
     JUDGE_OUTPUT_RESERVE,
     CallUsage,
+    GroqLimits,
     InMemoryLedger,
     QuotaLedger,
     seconds_to_utc_midnight,
@@ -754,16 +755,26 @@ class Persistence:
 
 
 def open_persistence(
-    settings: Settings, *, connect: Connect | None = None, background: bool = True
+    settings: Settings,
+    *,
+    connect: Connect | None = None,
+    background: bool = True,
+    groq_limits: GroqLimits | None = None,
 ) -> Persistence:
     """The Postgres ledger and receipt store, or (no ``DATABASE_URL``) an in-memory ledger
     and no receipt store. Opening never fails: the first connection is lazy."""
+    limits = groq_limits or GroqLimits(
+        requests_per_day=settings.groq_requests_per_day,
+        tokens_per_minute=settings.groq_tokens_per_minute,
+        requests_per_minute=settings.groq_requests_per_minute,
+        tokens_per_day=settings.groq_tokens_per_day,
+    )
     if not settings.database_url:
         if not _LOGGED_NO_DATABASE.is_set():
             _LOGGED_NO_DATABASE.set()
             log.info("DATABASE_URL is not set: quota ledger in memory, receipts not stored")
         return Persistence(
-            ledger=InMemoryLedger(),
+            ledger=InMemoryLedger(groq=limits),
             receipts=None,
             database=None,
             daily_caps=InMemoryDailyCap(),
@@ -771,7 +782,7 @@ def open_persistence(
         )
     db = Database(settings.database_url, connect=connect or _psycopg_connect, background=background)
     return Persistence(
-        ledger=PostgresLedger(db),
+        ledger=PostgresLedger(db, inner=InMemoryLedger(groq=limits)),
         receipts=ReceiptStore(db),
         database=db,
         daily_caps=PostgresDailyCap(db),

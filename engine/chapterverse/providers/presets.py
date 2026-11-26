@@ -63,6 +63,8 @@ REJECTED_PARAMS: Final[Mapping[str, frozenset[str]]] = types.MappingProxyType(
         # Live 2026-11-18: HTTP 400 for each (decision 0001, Groq table).
         "groq": frozenset({"top_k", "min_p", "chat_template_kwargs"}),
         "cloudflare": frozenset(),
+        "vercel": frozenset({"top_k", "min_p", "chat_template_kwargs"}),
+        "gemini": frozenset({"top_k", "min_p", "presence_penalty", "seed", "chat_template_kwargs"}),
         "modal": frozenset(),
     }
 )

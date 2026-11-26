@@ -69,6 +69,7 @@ from chapterverse.audit.prompt import (
     CHARS_PER_TOKEN,
     ELLIPSIS,
     INJECT_TEMPLATE,
+    QUALIFIER_STEER_NOTE,
     STEER_NOTE,
     PriorTurn,
     Prompt,
@@ -197,6 +198,7 @@ class _State:
     seed_offset: int = 0
     answer_chars: int = 0
     noted: bool = False
+    qualifier_noted: bool = False
     injected: set[int] = field(default_factory=set)
     last_reasons: tuple[str, ...] = ()
     refused: bool = False
@@ -468,6 +470,7 @@ class ChatContinuationGenerator:
             state.noted = True
             state.context += STEER_NOTE
             return
+        steered = False
         if self.policy.steering == "inject":
             fresh = [i for i in dict.fromkeys(aligned) if i in self.positions]
             fresh = [i for i in fresh if i not in state.injected][: self.settings.inject_windows]
@@ -478,5 +481,11 @@ class ChatContinuationGenerator:
                 if len(source) > cap:
                     source = source[:cap].rstrip() + f" {ELLIPSIS}"
                 state.context += INJECT_TEMPLATE.format(source=source, query=self.query)
-                return
+                steered = True
+        if "QUALIFIER_DROPPED" in reasons and not state.qualifier_noted:
+            state.qualifier_noted = True
+            state.context += QUALIFIER_STEER_NOTE
+            steered = True
+        if steered:
+            return
         state.seed_offset += 1
