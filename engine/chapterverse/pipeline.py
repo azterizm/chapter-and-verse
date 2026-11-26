@@ -132,6 +132,14 @@ from chapterverse.intent import is_quote_request
 from chapterverse.nlp import analyse
 from chapterverse.normalise import Normalised, find_protected_spans, load_dictionary, normalise
 from chapterverse.pii import Masked, mask_pii
+from chapterverse.pit_limits import (
+    PitLimitRow,
+    PitLimits,
+    build_pit_window,
+    parse_exact_date,
+    render_pit_citation,
+    render_pit_sentence,
+)
 from chapterverse.providers.judge_chat import RotationJudgeChat
 from chapterverse.providers.openai_compat import ProviderWarming
 from chapterverse.providers.rotation import ProviderRotation
@@ -927,6 +935,7 @@ class Pipeline:
         colbert: ColbertScorer | None = None,
         bound_ranker: InstrumentRanges | None = None,
         clarify_prior: ClarifyPrior | None = None,
+        pit_limits: PitLimits | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -937,6 +946,7 @@ class Pipeline:
         self.dense = dense
         self.colbert = colbert
         self.clarify_prior = clarify_prior
+        self.pit_limits = pit_limits
         if bound_ranker is None:
             concepts = getattr(router, "concepts", None) or getattr(router, "_concepts", None)
             if concepts is not None:
@@ -1358,12 +1368,23 @@ class Pipeline:
             )
         if norm_text is None:
             norm_text = request.query
+        pit_as_at = (
+            request.as_at if request.as_at is not None else parse_exact_date(result.temporal_hint)
+        )
         if request.as_at is None and result.temporal_hint:
             as_at = hint_as_at(result.temporal_hint)
             if as_at is None:
                 stream(CURRENT_TEXT_NOTICE)
             else:
                 request = dataclasses.replace(request, as_at=as_at)
+        if self.pit_limits is not None and pit_as_at is not None and not result.excluded:
+            partition_filter(result)
+            pit_bound = _minimal([str(c) for c in result.coordinates])
+            if len(pit_bound) == 1:
+                pit_row = self.pit_limits.lookup(pit_bound[0], pit_as_at)
+                if pit_row is not None:
+                    self._answer_pit_limit(stream, result, pit_bound[0], pit_as_at, pit_row)
+                    return
         read = self._read(request, result)
         version_dates = {
             c: (v if isinstance(v := inst.get("version_date"), str) else None)
@@ -1777,6 +1798,40 @@ class Pipeline:
                 render_citation(pid, window.coordinate, inst, provisions.get(window.coordinate))
             )
         return tuple(out)
+
+    def _answer_pit_limit(
+        self,
+        stream: _Stream,
+        result: RouteResult,
+        bound_coordinate: Coordinate,
+        as_at: date,
+        row: PitLimitRow,
+    ) -> None:
+        window = build_pit_window(row)
+        sentence = render_pit_sentence(row, as_at)
+        citation = render_pit_citation(row)
+        version_dates: dict[Coordinate, str | None] = {row.si: row.valid_from.isoformat()}
+        inst = self.store.instrument(bound_coordinate)
+        if inst is not None:
+            inst_coord = str(inst.get("coordinate") or instrument_coordinate(bound_coordinate))
+            version_dates[inst_coord] = (
+                v if isinstance(v := inst.get("version_date"), str) else None
+            )
+        stream.outcome.windows_total = 1
+        stream.outcome.windows_sent = 1
+        stream.outcome.selection = "pit_limits"
+        stream(SourcesEvent(windows=(window,)))
+        stream(SentenceEvent(sentence=sentence, citations=(citation,)))
+        self._receipt(
+            stream,
+            result,
+            mode="generated",
+            version_dates=version_dates,
+            passages={window.passage_id: window.coordinate},
+            spans={},
+            sentences=(sentence,),
+            calls=(),
+        )
 
     # ------------------------------------------------------------------ receipt
 

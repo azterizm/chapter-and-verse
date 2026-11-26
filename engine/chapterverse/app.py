@@ -61,6 +61,7 @@ Extra environment variables (``config.Settings`` holds the shared ones):
 ``MODAL_TOKENIZER_JSON``    Path of the pinned revision's ``tokenizer.json``;            unset
                             unset: downloaded once from Hugging Face at the revision
 ``CLARIFY_PRIOR_PATH``      Path of ``clarify_prior.json`` (off when unset)            unset
+``PIT_LIMITS_PATH``         Path of ``limits.json`` (off when unset)                   unset
 ``LOG_LEVEL``               Python log level for ``chapterverse``                       INFO
 ==========================  ========================================================  =======
 """
@@ -122,6 +123,7 @@ from chapterverse.pipeline import (
     PipelineConfig,
     StreamClosed,
 )
+from chapterverse.pit_limits import PitLimits, load_pit_limits
 from chapterverse.providers.ledger import CallUsage, GroqLimits
 from chapterverse.providers.openai_compat import OpenAICompatProvider
 from chapterverse.providers.pinning import PinCheck, apply_checks, check_provider, is_conclusive
@@ -737,6 +739,28 @@ def _load_clarify_prior(env: Mapping[str, str], *, router_snapshot: str) -> Clar
     return prior
 
 
+def _load_pit_limits(env: Mapping[str, str], *, router_snapshot: str) -> PitLimits | None:
+    raw = _env(env, "PIT_LIMITS_PATH")
+    if raw is None:
+        log.info("pit limits off: PIT_LIMITS_PATH unset")
+        return None
+    path = Path(raw)
+    if not path.is_file():
+        log.info("pit limits off: %s absent", path)
+        return None
+    limits = load_pit_limits(path, router_snapshot=router_snapshot)
+    if limits is None:
+        log.info("pit limits off: %s invalid, checksum mismatch, or snapshot mismatch", path)
+        return None
+    log.info(
+        "pit limits on: %s (%d rows, snapshot %s)",
+        path,
+        len(limits.rows),
+        limits.snapshot,
+    )
+    return limits
+
+
 def _init_colbert_scorer(
     env: Mapping[str, str],
 ) -> ColbertScorer | None:
@@ -845,6 +869,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         colbert=colbert_scorer,
         bound_ranker=bound_ranker,
         clarify_prior=clarify_prior,
+        pit_limits=_load_pit_limits(env, router_snapshot=router.index.snapshot),
     )
     limiter = TokenBucket(
         per_minute=_env_number(env, "RATE_LIMIT_PER_MINUTE", 10.0),

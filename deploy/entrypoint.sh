@@ -65,6 +65,13 @@ else
   echo "warning: $STORE_DIR/clarify/clarify_prior.json not found; running with clarify prior off" >&2
 fi
 
+if [ -f "$STORE_DIR/pit/limits.json" ]; then
+  PIT_LIMITS_PATH="$STORE_DIR/pit/limits.json"
+  export PIT_LIMITS_PATH
+else
+  echo "warning: $STORE_DIR/pit/limits.json not found; running with pit limits off" >&2
+fi
+
 export STORE_DIR ROUTER_INDEX CONCEPTS_INDEX
 
 exec uvicorn chapterverse.app:app \

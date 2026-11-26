@@ -262,7 +262,7 @@ Artefact environment variables (`fetch_artefacts.py`):
 | `HF_REVISION` | 40-hex dataset commit. A branch name is refused unless `ARTEFACTS_ALLOW_BRANCH=1` |
 | `MANIFEST_SHA256` | Pin of `corpus-manifest.json` itself. Recommended |
 | `MANIFEST_NAME` | Default `corpus-manifest.json` |
-| `EXTRA_MANIFESTS` | Default `index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json,dense/dense-manifest.json,models/models-files-manifest.json,clarify/clarify-manifest.json`. Empty for none |
+| `EXTRA_MANIFESTS` | Default `index/index-manifest.json,concepts/concepts-manifest.json,symspell/symspell-manifest.json,dense/dense-manifest.json,models/models-files-manifest.json,clarify/clarify-manifest.json,pit/pit-manifest.json`. Empty for none |
 | `ARTEFACTS_WORKERS` | Parallel downloads, default 4 |
 
 Dataset layout, which is also the layout of `/data`:
@@ -276,6 +276,7 @@ Dataset layout, which is also the layout of `/data`:
 | `dense/dense-manifest.json` and its files | Dense vector index | `DENSE_DIR=/data/dense` (via entrypoint.sh) |
 | `models/models-files-manifest.json` and its files | Query model weights and `models-manifest.json` | `DENSE_MODEL_DIR=/data/models` (via entrypoint.sh) |
 | `clarify/clarify-manifest.json` and its files | Clarify ranking prior | `CLARIFY_PRIOR_PATH=/data/clarify/clarify_prior.json` (via entrypoint.sh) |
+| `pit/pit-manifest.json` and its files | Point-in-time statutory limits | `PIT_LIMITS_PATH=/data/pit/limits.json` (via entrypoint.sh) |
 
 `MANIFEST_SHA256` pins the store manifest. The router manifests are fetched at the pinned dataset commit, their hashes are recorded in `/data/.artefacts-source.json`, and every file they list is checked. `build/publish_dataset.py` uploads the store only, so `index/` and `concepts/` must be uploaded to the same dataset commit by another step.
 

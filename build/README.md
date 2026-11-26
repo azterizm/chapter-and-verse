@@ -162,4 +162,5 @@ reads it:
 | `dense/dense-manifest.json` and the files it lists | The dense index |
 | `models/models-files-manifest.json` and the files it lists | The query model |
 | `clarify/clarify-manifest.json` and the files it lists | The clarify ranking prior |
+| `pit/pit-manifest.json` and the files it lists | Verified point-in-time statutory limits |
 | `README.md` | The dataset card |

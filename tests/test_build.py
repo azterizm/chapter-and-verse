@@ -352,6 +352,44 @@ def make_clarify_fixture(store_path: Path, out: Path) -> Path:
     return out
 
 
+def make_pit_fixture(store_path: Path, out: Path) -> Path:
+    manifest = read_manifest(store_path)
+    snap = str(manifest["snapshot"])
+    out.mkdir(parents=True, exist_ok=True)
+    limits_bytes = canonical_json(
+        [
+            {
+                "coordinate": "uk/ukpga/1996/18/s124",
+                "amount": "£68,400",
+                "valid_from": "2011-02-01",
+                "valid_to": "2012-02-01",
+                "si": "uk/uksi/2010/2926",
+                "title": "The Employment Rights (Increase of Limits) Order 2010",
+                "made": "2010-12-07",
+                "provision": "Section 124(1) of the 1996 Act",
+                "previous_amount": "£65,300",
+                "commencement": "Comes into force on 1st February 2011.",
+                "transitional": "Does not have effect before 1st February 2011.",
+                "caveat": None,
+                "source_url": "https://www.legislation.gov.uk/uksi/2010/2926/made/data.xml",
+                "xml_sha256": "9ddabadebfa743b2aaa7f4deb001e46db23b86b68de8c4181dc49bc635d78b97",
+            }
+        ]
+    )
+    (out / "limits.json").write_bytes(limits_bytes)
+    pit_manifest = {
+        "snapshot": snap,
+        "files": {
+            "limits.json": {
+                "sha256": hashlib.sha256(limits_bytes).hexdigest(),
+                "size": len(limits_bytes),
+            }
+        },
+    }
+    (out / "pit-manifest.json").write_bytes(canonical_json(pit_manifest))
+    return out
+
+
 def publish(built: Path, data: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     extra_list = list(extra)
     if "--dense" not in extra_list:
@@ -389,6 +427,11 @@ def publish(built: Path, data: Path, *extra: str) -> subprocess.CompletedProcess
         if not (clarify_dir / "clarify-manifest.json").is_file():
             make_clarify_fixture(built, clarify_dir)
         extra_list.extend(["--clarify", str(clarify_dir)])
+    if "--pit" not in extra_list:
+        pit_dir = built.parent / "pit"
+        if not (pit_dir / "pit-manifest.json").is_file():
+            make_pit_fixture(built, pit_dir)
+        extra_list.extend(["--pit", str(pit_dir)])
     return run(
         "publish_dataset.py", "--store", str(built), "--data", str(data), *extra_list, check=False
     )
@@ -403,6 +446,7 @@ def _verify_dry_run_files(
     dense_dir: Path,
     models_dir: Path,
     clarify_dir: Path,
+    pit_dir: Path,
     expected_names: set[str],
 ) -> None:
     names = [f["path"] for f in plan["files"]]
@@ -423,6 +467,9 @@ def _verify_dry_run_files(
             assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
         elif p.startswith("clarify/"):
             local = clarify_dir / Path(p).name
+            assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
+        elif p.startswith("pit/"):
+            local = pit_dir / Path(p).name
             assert entry["sha256"] == hashlib.sha256(local.read_bytes()).hexdigest()
         elif "/" in p:
             local = fixture_data_root / p
@@ -484,6 +531,12 @@ def test_publish_is_a_dry_run_by_default(
     assert plan["extra_manifests"]["clarify/clarify-manifest.json"] == clarify_digest
     clarify_names = {"clarify/clarify-manifest.json", "clarify/clarify_prior.json"}
 
+    pit_dir = built.parent / "pit"
+    pit_manifest_path = pit_dir / "pit-manifest.json"
+    pit_digest = hashlib.sha256(pit_manifest_path.read_bytes()).hexdigest()
+    assert plan["extra_manifests"]["pit/pit-manifest.json"] == pit_digest
+    pit_names = {"pit/pit-manifest.json", "pit/limits.json"}
+
     all_names = (
         store_names
         | router_names
@@ -491,6 +544,7 @@ def test_publish_is_a_dry_run_by_default(
         | dense_names
         | model_file_names
         | clarify_names
+        | pit_names
         | {"README.md"}
     )
     _verify_dry_run_files(
@@ -501,6 +555,7 @@ def test_publish_is_a_dry_run_by_default(
         dense_dir=dense_dir,
         models_dir=models_dir,
         clarify_dir=clarify_dir,
+        pit_dir=pit_dir,
         expected_names=all_names,
     )
     assert "license_name: ogl-3.0" in card
@@ -510,6 +565,7 @@ def test_publish_is_a_dry_run_by_default(
     assert "| `dense/` |" in card
     assert "| `models/` |" in card
     assert "| `clarify/` |" in card
+    assert "| `pit/` |" in card
     assert "Model licence: MIT" in card
     assert not _FORBIDDEN.search(card)
     assert "**" not in card
@@ -539,6 +595,32 @@ def test_publish_refuses_a_damaged_clarify_file(
     result = publish(built, fixture_data_root, "--clarify", str(clarify_copy))
     assert result.returncode == 1
     assert "clarify/clarify_prior.json: does not match clarify-manifest.json" in result.stderr
+
+
+def test_publish_refuses_pit_of_another_snapshot(
+    built: Path, fixture_data_root: Path, tmp_path: Path
+) -> None:
+    pit_copy = tmp_path / "pit"
+    make_pit_fixture(built, pit_copy)
+    mpath = pit_copy / "pit-manifest.json"
+    manifest = json.loads(mpath.read_bytes())
+    manifest["snapshot"] = "2020-01-01"
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    result = publish(built, fixture_data_root, "--pit", str(pit_copy))
+    assert result.returncode == 1
+    assert "pit/pit-manifest.json has snapshot" in result.stderr
+
+
+def test_publish_refuses_a_damaged_pit_file(
+    built: Path, fixture_data_root: Path, tmp_path: Path
+) -> None:
+    pit_copy = tmp_path / "pit"
+    make_pit_fixture(built, pit_copy)
+    lpath = pit_copy / "limits.json"
+    lpath.write_bytes(lpath.read_bytes() + b"extra")
+    result = publish(built, fixture_data_root, "--pit", str(pit_copy))
+    assert result.returncode == 1
+    assert "pit/limits.json: does not match pit-manifest.json" in result.stderr
 
 
 def test_publish_refuses_symspell_of_another_corpus_id(

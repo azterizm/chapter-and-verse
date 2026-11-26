@@ -175,6 +175,21 @@ def _prepare_test_data_dir(
     }
     (clarify_dir / "clarify-manifest.json").write_bytes(canonical_json(clarify_manifest))
 
+    pit_dir = data_dir / "pit"
+    pit_dir.mkdir()
+    pit_bytes = canonical_json([])
+    (pit_dir / "limits.json").write_bytes(pit_bytes)
+    pit_manifest = {
+        "snapshot": store.snapshot,
+        "files": {
+            "limits.json": {
+                "sha256": hashlib.sha256(pit_bytes).hexdigest(),
+                "size": len(pit_bytes),
+            }
+        },
+    }
+    (pit_dir / "pit-manifest.json").write_bytes(canonical_json(pit_manifest))
+
     return doc_count, dense_dir, models_dir, vecs_file
 
 

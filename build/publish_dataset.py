@@ -13,6 +13,7 @@ Layout of the dataset (what ``deploy/fetch_artefacts.py`` fetches for one boot):
     dense/dense-manifest.json, ...          the dense index
     models/models-files-manifest.json, ...  the query model
     clarify/clarify-manifest.json, ...      the clarify ranking prior and manifest
+    pit/pit-manifest.json, ...              verified point-in-time statutory limits
     README.md                               the dataset card
 
 ``--data`` (default ``$LEGAL_DATA_ROOT``) is the data root holding ``index/`` and
@@ -21,10 +22,11 @@ dictionary and manifest. ``--dense`` (default ``artefacts/dense/index``) holds t
 quantised dense index. ``--models`` (default ``artefacts/models``) holds the ONNX
 models directory and ``models-manifest.json``. ``--dense-model`` (default
 ``bge-small-en-v1.5``) chooses which query model to package. ``--clarify`` (default
-``artefacts/clarify``) holds the clarify ranking prior and manifest.
+``artefacts/clarify``) holds the clarify ranking prior and manifest. ``--pit`` (default
+``artefacts/pit``) holds the point-in-time statutory limits and manifest.
 
-Every file is checked against its own manifest first; the router, symspell, dense and
-clarify manifests must carry the store's snapshot date, and the symspell and dense
+Every file is checked against its own manifest first; the router, symspell, dense, clarify,
+and pit manifests must carry the store's snapshot date, and the symspell and dense
 manifests must carry the store's corpus_id.
 
 Without ``--yes`` it is a dry run: it runs the checks and prints what would be uploaded and the
@@ -223,6 +225,18 @@ def clarify_dir(data: Path, snapshot: str) -> RouterDir:
     manifest, files = _load_dir_manifest(path, name, manifest_name, snapshot, err_root=data)
     if not isinstance(files.get("clarify_prior.json"), dict):
         raise PublishError(f"{name}/{manifest_name} has no entry for clarify_prior.json")
+    uploads = _verify_dir_uploads(data, path, name, manifest_name, files)
+    return RouterDir(name, manifest_name, manifest, tuple(uploads))
+
+
+def pit_dir(data: Path, snapshot: str) -> RouterDir:
+    """The point-in-time limits directory, checked against pit-manifest.json and snapshot."""
+    name = "pit"
+    manifest_name = "pit-manifest.json"
+    path = data / manifest_name
+    manifest, files = _load_dir_manifest(path, name, manifest_name, snapshot, err_root=data)
+    if not isinstance(files.get("limits.json"), dict):
+        raise PublishError(f"{name}/{manifest_name} has no entry for limits.json")
     uploads = _verify_dir_uploads(data, path, name, manifest_name, files)
     return RouterDir(name, manifest_name, manifest, tuple(uploads))
 
@@ -456,6 +470,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=Path("artefacts/clarify"),
         help="clarify prior directory (defaults to artefacts/clarify)",
     )
+    parser.add_argument(
+        "--pit",
+        type=Path,
+        default=Path("artefacts/pit"),
+        help="point-in-time limits directory (defaults to artefacts/pit)",
+    )
     parser.add_argument("--repo", help="dataset repository, OWNER/NAME")
     parser.add_argument("--yes", action="store_true", help="really upload (needs --repo)")
     parser.add_argument(
@@ -479,7 +499,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         dense = dense_dir(args.dense, str(manifest["snapshot"]), cid)
         models, model_repo, model_rev = models_dir(args.models, args.dense_model)
         clarify = clarify_dir(args.clarify, str(manifest["snapshot"]))
-        all_dirs = [*routers, symspell, dense, models, clarify]
+        pit = pit_dir(args.pit, str(manifest["snapshot"]))
+        all_dirs = [*routers, symspell, dense, models, clarify, pit]
     except PublishError as exc:
         print(f"check failed: {exc}", file=sys.stderr)
         return 1
