@@ -10,6 +10,7 @@ import dataclasses
 import logging
 import time
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -57,6 +58,7 @@ from chapterverse.ratelimit import DailyBudgetCounts, InMemoryDailyBudget, InMem
 from chapterverse.templates import clarify_event
 
 if TYPE_CHECKING:  # mypy sees tests/ as the package "tests"; pytest puts tests/ on sys.path
+    from tests.conftest import JsonlTextStore
     from tests.test_pipeline_fakes import (
         AMBIGUOUS_QUERY,
         CITED,
@@ -70,6 +72,7 @@ if TYPE_CHECKING:  # mypy sees tests/ as the package "tests"; pytest puts tests/
         unavailable,
     )
 else:
+    from conftest import JsonlTextStore
     from test_pipeline_fakes import (
         AMBIGUOUS_QUERY,
         CITED,
@@ -1085,3 +1088,122 @@ def test_auto_select_falls_back_to_clarify_if_reroute_does_not_bind(
     assert outcome.mode == "clarify"
     assert len(of(events, ClarifyEvent)) == 1
     assert of(events, SourcesEvent) == []
+
+
+def test_selected_coordinate_rewrites_embedded_title_and_checks_provision(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    pipeline = make(fixture_router, store, FakeRotation())
+    events, outcome = run(
+        pipeline,
+        "Under Section 14B of the UK Employment Rights Act 1996, what applies? "
+        "(Employment Rights Act 1996)",
+        selected_coordinate="uk/ukpga/1996/18",
+    )
+    assert outcome.mode == "refusal"
+    (refusal,) = of(events, RefusalEvent)
+    assert refusal.kind == RouteStatus.PROVISION_NOT_FOUND.value
+    assert "s.14B" in refusal.message
+
+
+def test_selected_coordinate_binds_valid_provision_from_embedded_title(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    rotation = FakeRotation([(GOOD1, "stop")])
+    pipeline = make(fixture_router, store, rotation)
+    events, outcome = run(
+        pipeline,
+        "Under Section 124 of the UK Employment Rights Act 1996, what is the limit? "
+        "(Employment Rights Act 1996)",
+        selected_coordinate="uk/ukpga/1996/18",
+    )
+    assert outcome.mode == "generated"
+    assert outcome.fact is not None
+    assert outcome.fact.coordinates == ("uk/ukpga/1996/18/s124",)
+    assert store.gets == ["uk/ukpga/1996/18/s124"]
+    assert len(of(events, SentenceEvent)) == 1
+
+
+def test_selected_coordinate_binds_bare_section_clarify(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    rotation = FakeRotation([(GOOD1, "stop")])
+    pipeline = make(fixture_router, store, rotation)
+    events, outcome = run(
+        pipeline,
+        "What does section 124 say? (s.124 Employment Rights Act 1996)",
+        selected_coordinate="uk/ukpga/1996/18/s124",
+    )
+    assert outcome.mode == "generated"
+    assert outcome.fact is not None
+    assert outcome.fact.coordinates == ("uk/ukpga/1996/18/s124",)
+    assert len(of(events, SentenceEvent)) == 1
+
+
+@pytest.mark.parametrize("bad_coord", ["uk/ukpga/9999/999", "not-a-coord"])
+def test_selected_coordinate_rejects_unindexed_or_invalid_coordinate(
+    fixture_router: Router, store: CountingStore, bad_coord: str
+) -> None:
+    pipeline = make(fixture_router, store, FakeRotation())
+    events, outcome = run(
+        pipeline,
+        "Under Section 124 of the UK Employment Rights Act 1996, what is the limit?",
+        selected_coordinate=bad_coord,
+    )
+    assert outcome.mode == "refusal"
+    (refusal,) = of(events, RefusalEvent)
+    assert refusal.kind == RouteStatus.INSTRUMENT_NOT_FOUND.value
+
+
+def test_without_selected_coordinate_embedded_title_with_trailing_choice_still_refuses(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    pipeline = make(fixture_router, store, FakeRotation())
+    events, outcome = run(
+        pipeline,
+        "Under Section 14B of the UK Employment Rights Act 1996, what applies? "
+        "(Employment Rights Act 1996)",
+    )
+    assert outcome.mode == "refusal"
+    (refusal,) = of(events, RefusalEvent)
+    assert refusal.kind == RouteStatus.INSTRUMENT_NOT_FOUND.value
+
+
+@pytest.mark.data
+def test_selected_coordinate_real_corpus_consumer_rights_and_education(
+    real_data_root: Path,
+) -> None:
+    router = Router.from_path(real_data_root / "index", concepts=real_data_root / "concepts")
+    store = JsonlTextStore(real_data_root, snapshot=router.index.snapshot)
+    pipeline = make(router, store, FakeRotation(names=()))
+
+    s14b_events, s14b_out = run(
+        pipeline,
+        "Under Section 14B of the UK Consumer Rights Act 2015, what is the statutory "
+        "cooling-off period for an in-store retail purchase of non-defective goods, and "
+        "how does a consumer exercise it? (Consumer Rights Act 2015)",
+        selected_coordinate="uk/ukpga/2015/15",
+    )
+    assert s14b_out.mode == "refusal"
+    (s14b_refusal,) = of(s14b_events, RefusalEvent)
+    assert s14b_refusal.kind == RouteStatus.PROVISION_NOT_FOUND.value
+    assert "Consumer Rights Act 2015 has no s.14B" in s14b_refusal.message
+
+    s9_events, s9_out = run(
+        pipeline,
+        "Under Section 9 of the UK Consumer Rights Act 2015, what must goods be? "
+        "(Consumer Rights Act 2015)",
+        selected_coordinate="uk/ukpga/2015/15",
+    )
+    assert s9_out.fact is not None
+    assert s9_out.fact.coordinates == ("uk/ukpga/2015/15/s9",)
+    assert of(s9_events, RefusalEvent) == []
+
+    ed_events, ed_out = run(
+        pipeline,
+        "What does section 1 of the Education Act say? (s.1 Education Act 1996)",
+        selected_coordinate="uk/ukpga/1996/56/s1",
+    )
+    assert ed_out.fact is not None
+    assert ed_out.fact.coordinates == ("uk/ukpga/1996/56/s1",)
+    assert of(ed_events, RefusalEvent) == []

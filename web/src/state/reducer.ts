@@ -3,6 +3,7 @@ import { candidateCitation } from "../text";
 import type {
   AnswerFactObject,
   ClarifyEvent,
+  Coordinate,
   CvEvent,
   ExtractiveEvent,
   LabelledCoordinate,
@@ -33,6 +34,7 @@ export interface TurnError {
 
 export interface TurnChoice {
   citation: string;
+  coordinate?: Coordinate;
   alternatives: LabelledCoordinate[];
 }
 
@@ -125,6 +127,7 @@ export function applyEvent(turn: Turn, event: CvEvent, raw: string): Turn {
         event.selected && (turn.choice === undefined || turn.choice === null)
           ? {
               citation: candidateCitation(event.selected.label),
+              coordinate: event.selected.coordinate,
               alternatives: event.alternatives ?? [],
             }
           : turn.choice;

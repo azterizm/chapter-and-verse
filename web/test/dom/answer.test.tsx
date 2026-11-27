@@ -1005,6 +1005,7 @@ describe("Refusal, clarify, and error cards", () => {
       question: "What is the limit?",
       choice: {
         citation: "s.124 Employment Rights Act 1996",
+        coordinate: "uk/ukpga/1996/18/s124",
         alternatives: candidates,
       },
     });
@@ -1016,6 +1017,7 @@ describe("Refusal, clarify, and error cards", () => {
       question: "What is the limit?",
       choice: {
         citation: "Arbitration Act 1996",
+        coordinate: "uk/ukpga/1996/23",
         alternatives: [],
       },
     });

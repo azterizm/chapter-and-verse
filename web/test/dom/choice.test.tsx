@@ -176,6 +176,7 @@ describe("Choice, Change, Retry, and Conversation State (S1-S7)", () => {
   it("replaces clarify turn in place with original heading, Using line, composed query, no coordinates, no action row on clarify, and updates sources and focus", async () => {
     const user = userEvent.setup();
     const sentQueries: string[] = [];
+    const sentCoords: Array<string | undefined> = [];
 
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -186,8 +187,12 @@ describe("Choice, Change, Retry, and Conversation State (S1-S7)", () => {
         );
       }
       if (url.endsWith("/api/ask")) {
-        const body = JSON.parse(String(init?.body ?? "{}")) as { query: string };
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          query: string;
+          selected_coordinate?: string;
+        };
         sentQueries.push(body.query);
+        sentCoords.push(body.selected_coordinate);
 
         if (body.query === "How long do I have to sue in tort?") {
           return sseResponse([
@@ -326,6 +331,11 @@ describe("Choice, Change, Retry, and Conversation State (S1-S7)", () => {
       "How long do I have to sue in tort? (s.2 Limitation Act 1980)",
       "How long do I have to sue in tort? (s.11 Limitation Act 1980)",
     ]);
+    expect(sentCoords).toEqual([
+      undefined,
+      FIRST_CANDIDATE.coordinate,
+      SECOND_CANDIDATE.coordinate,
+    ]);
     expect(screen.getAllByRole("heading", { level: 2, name: /How long do I have to sue in tort\?/ })).toHaveLength(1);
     expect(screen.getByText(usingCitationText("s.11 Limitation Act 1980"))).toBeInTheDocument();
     expect(sourcesCol).toHaveTextContent("Source text for s.11 Limitation Act 1980.");
@@ -446,6 +456,7 @@ describe("Choice, Change, Retry, and Conversation State (S1-S7)", () => {
   it("replaces a refusal turn in place when choosing a suggestion without displaying coordinates or Change for a single suggestion", async () => {
     const user = userEvent.setup();
     const sentQueries: string[] = [];
+    const sentCoords: Array<string | undefined> = [];
 
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -456,8 +467,12 @@ describe("Choice, Change, Retry, and Conversation State (S1-S7)", () => {
         );
       }
       if (url.endsWith("/api/ask")) {
-        const body = JSON.parse(String(init?.body ?? "{}")) as { query: string };
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          query: string;
+          selected_coordinate?: string;
+        };
         sentQueries.push(body.query);
+        sentCoords.push(body.selected_coordinate);
 
         if (body.query === "What does Marchwood Arbitration Act say?") {
           return sseResponse([
@@ -542,11 +557,169 @@ describe("Choice, Change, Retry, and Conversation State (S1-S7)", () => {
       "What does Marchwood Arbitration Act say?",
       "What does Marchwood Arbitration Act say? (Arbitration Act 1996)",
     ]);
+    expect(sentCoords).toEqual([undefined, "uk/ukpga/1996/23"]);
     expect(screen.getAllByRole("heading", { level: 2, name: /What does Marchwood Arbitration Act say\?/ })).toHaveLength(
       1,
     );
     expect(screen.getByText(usingCitationText("Arbitration Act 1996"))).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: ACTION_CHANGE })).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("uk/ukpga/");
+  });
+
+  it("sends selected_coordinate when clicking a refusal suggestion and transitions from No such instrument to No such provision", async () => {
+    const user = userEvent.setup();
+    const sentBodies: Array<{ query: string; selected_coordinate: string | undefined }> = [];
+    const originalQuestion =
+      "Under Section 14B of the UK Consumer Rights Act 2015, what is the statutory cooling-off period for an in-store retail purchase of non-defective goods, and how does a consumer exercise it?";
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) {
+        return new Response(
+          JSON.stringify({ status: "ok", corpus_id: "ukpga", snapshot: "2026-09-28" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/ask")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          query: string;
+          selected_coordinate?: string;
+        };
+        sentBodies.push({ query: body.query, selected_coordinate: body.selected_coordinate });
+
+        if (!body.selected_coordinate) {
+          return sseResponse([
+            {
+              event: "route",
+              data: {
+                type: "route",
+                status: "EPISTEMIC_ABSTENTION_INSTRUMENT_NOT_FOUND",
+                next_action: "REFUSE",
+                coordinates: [],
+                corrections: [],
+                messages: [
+                  'No instrument "UK Consumer Rights Act 2015" is in the UK statute book as of the index snapshot 2026-09-28.',
+                ],
+                index_snapshot: "2026-09-28",
+              },
+            },
+            {
+              event: "refusal",
+              data: {
+                type: "refusal",
+                kind: "EPISTEMIC_ABSTENTION_INSTRUMENT_NOT_FOUND",
+                message:
+                  'The cited legislation was not found. No answer is given. No instrument "UK Consumer Rights Act 2015" is in the UK statute book as of the index snapshot 2026-09-28.',
+                suggestions: [{ coordinate: "uk/ukpga/2015/15", label: "Consumer Rights Act 2015" }],
+                snapshot: "2026-09-28",
+                link: null,
+              },
+            },
+            {
+              event: "receipt",
+              data: {
+                type: "receipt",
+                answer_id: "c".repeat(64),
+                fact: {
+                  schema: 1,
+                  mode: "refusal",
+                  corpus_id: "ukpga",
+                  policy_hash: "ph",
+                  query_sha256: "qh",
+                  route_status: "EPISTEMIC_ABSTENTION_INSTRUMENT_NOT_FOUND",
+                  coordinates: [],
+                  passages: {},
+                  version_dates: {},
+                  spans: {},
+                  sentences: [],
+                  calls: [],
+                },
+              },
+            },
+            {
+              event: "done",
+              data: { type: "done", timings: { first_source_ms: null, first_sentence_ms: null, total_ms: 10 } },
+            },
+          ]);
+        }
+
+        return sseResponse([
+          {
+            event: "route",
+            data: {
+              type: "route",
+              status: "EPISTEMIC_ABSTENTION_PROVISION_NOT_FOUND",
+              next_action: "REFUSE",
+              coordinates: [],
+              corrections: [],
+              messages: ["Consumer Rights Act 2015 has no s.14B (index snapshot 2026-09-28)."],
+              index_snapshot: "2026-09-28",
+            },
+          },
+          {
+            event: "refusal",
+            data: {
+              type: "refusal",
+              kind: "EPISTEMIC_ABSTENTION_PROVISION_NOT_FOUND",
+              message:
+                "The cited provision was not found in that legislation. No answer is given. Consumer Rights Act 2015 has no s.14B (index snapshot 2026-09-28).",
+              suggestions: [],
+              snapshot: "2026-09-28",
+              link: null,
+            },
+          },
+          {
+            event: "receipt",
+            data: {
+              type: "receipt",
+              answer_id: "d".repeat(64),
+              fact: {
+                schema: 1,
+                mode: "refusal",
+                corpus_id: "ukpga",
+                policy_hash: "ph",
+                query_sha256: "qh",
+                route_status: "EPISTEMIC_ABSTENTION_PROVISION_NOT_FOUND",
+                coordinates: [],
+                passages: {},
+                version_dates: {},
+                spans: {},
+                sentences: [],
+                calls: [],
+              },
+            },
+          },
+          {
+            event: "done",
+            data: { type: "done", timings: { first_source_ms: null, first_sentence_ms: null, total_ms: 10 } },
+          },
+        ]);
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    render(<App />);
+    const textarea = screen.getByPlaceholderText(COMPOSER_PLACEHOLDER);
+
+    await user.type(textarea, `${originalQuestion}{Enter}`);
+    await screen.findByText("No such instrument");
+
+    await user.click(screen.getByRole("button", { name: "Consumer Rights Act 2015" }));
+    await screen.findByText("No such provision");
+
+    expect(sentBodies).toEqual([
+      { query: originalQuestion, selected_coordinate: undefined },
+      {
+        query: `${originalQuestion} (Consumer Rights Act 2015)`,
+        selected_coordinate: "uk/ukpga/2015/15",
+      },
+    ]);
+    expect(screen.getByText(usingCitationText("Consumer Rights Act 2015"))).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The cited provision was not found in that legislation. No answer is given. Consumer Rights Act 2015 has no s.14B (index snapshot 2026-09-28).",
+      ),
+    ).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("uk/ukpga/");
   });
 

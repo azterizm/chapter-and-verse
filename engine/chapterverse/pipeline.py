@@ -62,7 +62,14 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from legal_rag_router import RouteContext, Router, RouteResult, RouteStatus, partition_filter
+from legal_rag_router import (
+    ParsedCitation,
+    RouteContext,
+    Router,
+    RouteResult,
+    RouteStatus,
+    partition_filter,
+)
 from legal_rag_router.coordinate import Coordinate as RouterCoordinate
 from legal_rag_verifier.citations import find_citations, is_relative
 from legal_rag_verifier.corpus import instrument_coordinate
@@ -239,6 +246,7 @@ class AskRequest:
     query: str
     as_at: date | None = None
     context: tuple[Coordinate, ...] = ()
+    selected_coordinate: Coordinate | None = None
     started: float = field(default_factory=time.perf_counter)
     """``time.perf_counter()`` when the request arrived; timings count from here."""
     client_key: str | None = None
@@ -913,6 +921,79 @@ def _mask_query(text: str, masked: Masked) -> str:
     return out
 
 
+def _strip_trailing_choice(text: str, router: Router) -> str:
+    """Strip a trailing `` (<citation>)`` added by ``composeChoiceQuery`` when it routes."""
+    trimmed = text.rstrip()
+    if not trimmed.endswith(")"):
+        return text
+    depth = 0
+    start = -1
+    for i in range(len(trimmed) - 1, -1, -1):
+        ch = trimmed[i]
+        if ch == ")":
+            depth += 1
+        elif ch == "(":
+            depth -= 1
+            if depth == 0:
+                start = i
+                break
+    if start <= 0 or not trimmed[start - 1].isspace():
+        return text
+    inner = trimmed[start + 1 : -1].strip()
+    if not inner or router.route(inner).status is not RouteStatus.BOUNDED:
+        return text
+    return trimmed[:start].rstrip()
+
+
+def _replace_citation_span(
+    text: str,
+    span: tuple[int, int],
+    title_as_cited: str | None,
+    provision: str | None,
+    replacement: str,
+    *,
+    replace_whole_span: bool,
+) -> str:
+    """Substitute the unresolved citation (or its instrument title) inside ``text``."""
+    start, end = span
+    if replace_whole_span:
+        return text[:start] + replacement + text[end:]
+    segment = text[start:end]
+    if title_as_cited:
+        idx = segment.find(title_as_cited)
+        if idx == -1:
+            idx = segment.lower().find(title_as_cited.lower())
+        if idx != -1:
+            abs_start = start + idx
+            abs_end = abs_start + len(title_as_cited)
+            return text[:abs_start] + replacement + text[abs_end:]
+    if provision is None:
+        return text[:start] + replacement + text[end:]
+    return text[:end] + f" {replacement}" + text[end:]
+
+
+def _select_target_citations(
+    base: str,
+    base_result: RouteResult,
+    sel: RouterCoordinate,
+    router: Router,
+) -> list[ParsedCitation]:
+    """Return the unresolved citations in ``base_result`` targeted by ``sel``."""
+    unresolved = [c for c in base_result.citations if c.resolution in ("not_in_index", "unlinked")]
+    if len(unresolved) <= 1:
+        return unresolved
+    sel_str = str(sel)
+    sel_inst = instrument_coordinate(sel_str)
+    matched: list[ParsedCitation] = []
+    for cit in unresolved:
+        sub = router.route(base[cit.span[0] : cit.span[1]])
+        cand_coords = [str(x.coordinate) for x in (*sub.suggestions, *sub.candidates)]
+        cand_insts = {instrument_coordinate(coord) for coord in cand_coords}
+        if sel_str in cand_coords or sel_inst in cand_insts:
+            matched.append(cit)
+    return matched
+
+
 class Pipeline:
     """Runs the read path for one request at a time per call; one instance serves all
     requests (it holds only shared, thread-safe parts)."""
@@ -1287,20 +1368,96 @@ class Pipeline:
         stream(route_refusal(raw_result))
         self._receipt(stream, raw_result, mode="refusal")
 
+    @staticmethod
+    def _rewrite_citations(
+        base: str,
+        targets: Sequence[ParsedCitation],
+        replacement: str,
+        *,
+        replace_whole_span: bool,
+    ) -> str:
+        out = base
+        for cit in sorted(targets, key=lambda c: c.span[0], reverse=True):
+            out = _replace_citation_span(
+                out,
+                cit.span,
+                cit.title_as_cited,
+                cit.provision,
+                replacement,
+                replace_whole_span=replace_whole_span,
+            )
+        return out
+
+    def _apply_selected_coordinate(
+        self,
+        raw: str,
+        selected_coordinate: Coordinate,
+        context: RouteContext | None,
+    ) -> tuple[str, str, RouteResult] | None:
+        """Rewrite unresolved citations using a validated user-selected coordinate."""
+        try:
+            parsed_sel = RouterCoordinate.parse(selected_coordinate)
+        except ValueError:
+            return None
+        if self.router.route(selected_coordinate).status is not RouteStatus.BOUNDED:
+            return None
+
+        base = _strip_trailing_choice(raw, self.router)
+        base_result = self.router.route(base, context=context)
+        targets = _select_target_citations(base, base_result, parsed_sel, self.router)
+        if not targets:
+            fallback_query = f"{base} ({selected_coordinate})"
+            fallback_res = self.router.route(fallback_query, context=context)
+            return (
+                (fallback_query, raw, fallback_res)
+                if fallback_res.status is RouteStatus.BOUNDED
+                else None
+            )
+
+        if parsed_sel.provision:
+            rewritten = self._rewrite_citations(
+                base, targets, selected_coordinate, replace_whole_span=True
+            )
+            return (rewritten, raw, self.router.route(rewritten, context=context))
+
+        inst = self.store.instrument(selected_coordinate)
+        raw_title = inst.get("title") if isinstance(inst, Mapping) else None
+        title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else None
+        resolved: tuple[str, str, RouteResult] | None = None
+        if title:
+            title_rewritten = self._rewrite_citations(
+                base, targets, title, replace_whole_span=False
+            )
+            title_res = self.router.route(title_rewritten, context=context)
+            if title_res.status in (RouteStatus.BOUNDED, RouteStatus.PROVISION_NOT_FOUND):
+                resolved = (title_rewritten, title_rewritten, title_res)
+
+        if resolved is None:
+            coord_rewritten = self._rewrite_citations(
+                base, targets, selected_coordinate, replace_whole_span=False
+            )
+            resolved = (coord_rewritten, raw, self.router.route(coord_rewritten, context=context))
+        return resolved
+
     def _run(self, request: AskRequest, stream: _Stream, cancelled: Callable[[], bool]) -> None:
         raw = request.query
+        prompt_text = raw
         context = RouteContext(coordinates=request.context) if request.context else None
 
         # R2: Route the RAW query first.
         raw_result = self.router.route(raw, context=context)
+        if raw_result.status is not RouteStatus.BOUNDED and request.selected_coordinate is not None:
+            resolved = self._apply_selected_coordinate(raw, request.selected_coordinate, context)
+            if resolved is not None:
+                raw, prompt_text, raw_result = resolved
 
         # If the raw result is ROUTE_BOUNDED, use it and the raw text;
         # spelling correction is not applied and no corrections notice is sent.
         if raw_result.status is RouteStatus.BOUNDED:
-            raw_result = self._expand_bound_result(raw_result, raw)
+            raw_result = self._expand_bound_result(raw_result, prompt_text)
             stream.outcome.route_status = raw_result.status.value
             stream(RouteEvent.from_route_result(raw_result))
-            self._bounded(request, raw_result, stream, cancelled, norm_text=raw)
+            self._bounded(request, raw_result, stream, cancelled, norm_text=prompt_text)
             return
 
         norm, masked, norm_result = self._normalise_and_route(raw, context)

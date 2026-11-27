@@ -1,4 +1,4 @@
-import type { CvEvent } from "./events";
+import type { Coordinate, CvEvent } from "./events";
 import { readEvents, StreamFault, type StreamItem } from "./sse";
 import { VERIFICATION_FAILED_MESSAGE } from "../turnstileText";
 
@@ -11,6 +11,7 @@ export interface AskRequest {
   query: string;
   as_at?: string;
   session_id?: string;
+  selected_coordinate?: Coordinate;
   turnstile_token?: string;
   sessionToken?: string | null;
 }
@@ -57,6 +58,7 @@ export async function ask(req: AskRequest, handlers: AskHandlers, signal: AbortS
     const payload: Record<string, string> = { query: req.query };
     if (req.as_at !== undefined) payload.as_at = req.as_at;
     if (req.session_id !== undefined) payload.session_id = req.session_id;
+    if (req.selected_coordinate !== undefined) payload.selected_coordinate = req.selected_coordinate;
     if (req.turnstile_token !== undefined) payload.turnstile_token = req.turnstile_token;
     res = await fetch(`${API_BASE}/api/ask`, {
       method: "POST",

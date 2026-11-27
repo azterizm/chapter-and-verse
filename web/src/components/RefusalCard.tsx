@@ -1,11 +1,11 @@
 import { ExternalLink } from "lucide-react";
-import type { RefusalEvent } from "../api/events";
+import type { LabelledCoordinate, RefusalEvent } from "../api/events";
 import { OPENS_NEW_TAB, REFUSAL_LINK_LABEL, refusalSnapshotText, refusalTitle, SUGGESTIONS_LABEL } from "../text";
 import { Chip } from "./ui/chip";
 
 interface Props {
   refusal: RefusalEvent;
-  onChoose(label: string): void;
+  onChoose(suggestion: LabelledCoordinate): void;
   disabled: boolean;
 }
 
@@ -28,7 +28,7 @@ export function RefusalCard({ refusal, onChoose, disabled }: Props) {
           <ul className="mt-2 flex flex-wrap gap-2" aria-labelledby={`sugg-${kind}`}>
             {refusal.suggestions.map((s) => (
               <li key={s.coordinate}>
-                <Chip variant="outline" disabled={disabled} onClick={() => onChoose(s.label)}>
+                <Chip variant="outline" disabled={disabled} onClick={() => onChoose(s)}>
                   {s.label}
                 </Chip>
               </li>

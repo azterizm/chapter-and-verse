@@ -311,13 +311,13 @@ export function Turn({ turn, busy, onReplace, onShowSource, onRevealProvisions }
   const displayQuestion = turn.question ?? turn.query;
   const alternatives = turn.choice?.alternatives ?? [];
 
-  function chooseLabel(label: string, nextAlternatives: LabelledCoordinate[]) {
-    const citation = candidateCitation(label);
+  function chooseCandidate(candidate: LabelledCoordinate, nextAlternatives: LabelledCoordinate[]) {
+    const citation = candidateCitation(candidate.label);
     onReplace({
       oldTurnId: turn.id,
       query: composeChoiceQuery(displayQuestion, citation),
       question: displayQuestion,
-      choice: { citation, alternatives: nextAlternatives },
+      choice: { citation, coordinate: candidate.coordinate, alternatives: nextAlternatives },
     });
   }
 
@@ -380,7 +380,7 @@ export function Turn({ turn, busy, onReplace, onShowSource, onRevealProvisions }
                         disabled={busy || isCurrent}
                         onClick={() => {
                           setChanging(false);
-                          chooseLabel(c.label, alternatives);
+                          chooseCandidate(c, alternatives);
                         }}
                       >
                         {c.label}
@@ -432,7 +432,7 @@ export function Turn({ turn, busy, onReplace, onShowSource, onRevealProvisions }
                   <Chip
                     variant="outline"
                     disabled={busy}
-                    onClick={() => chooseLabel(c.label, candidates)}
+                    onClick={() => chooseCandidate(c, candidates)}
                   >
                     {c.label}
                   </Chip>
@@ -460,7 +460,7 @@ export function Turn({ turn, busy, onReplace, onShowSource, onRevealProvisions }
         return (
           <RefusalCard
             refusal={refusal}
-            onChoose={(label) => chooseLabel(label, refusalAlternatives)}
+            onChoose={(suggestion) => chooseCandidate(suggestion, refusalAlternatives)}
             disabled={busy}
           />
         );

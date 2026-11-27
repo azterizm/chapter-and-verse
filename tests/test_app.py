@@ -345,6 +345,8 @@ def test_oversized_query_is_413_before_routing(
         b'{"query": 5}',
         b'{"query": "x", "as_at": "yesterday"}',
         b'{"query": "x", "context": "uk/ukpga/1996/18"}',
+        b'{"query": "x", "selected_coordinate": 123}',
+        b'{"query": "x", "selected_coordinate": "' + b"a" * 201 + b'"}',
         b'{"query": "\\ud800"}',
     ],
 )
@@ -363,13 +365,25 @@ def test_malformed_body_is_400(
 
 def test_parse_ask_reads_the_optional_fields() -> None:
     body = json.dumps(
-        {"query": "q", "as_at": "2010-01-01", "context": ["uk/ukpga/1996/18"], "session_id": "s"}
+        {
+            "query": "q",
+            "as_at": "2010-01-01",
+            "context": ["uk/ukpga/1996/18"],
+            "selected_coordinate": "uk/ukpga/1996/18/s124",
+            "session_id": "s",
+        }
     ).encode()
     request = parse_ask(body, max_query_bytes=10)
     assert request.as_at is not None
     assert request.as_at.isoformat() == "2010-01-01"
     assert request.context == ("uk/ukpga/1996/18",)
-    assert parse_ask(b'{"query": "q", "as_at": null}', max_query_bytes=10).as_at is None
+    assert request.selected_coordinate == "uk/ukpga/1996/18/s124"
+    bare = parse_ask(
+        b'{"query": "q", "as_at": null, "selected_coordinate": ""}',
+        max_query_bytes=10,
+    )
+    assert bare.as_at is None
+    assert bare.selected_coordinate is None
 
 
 def test_rate_limit_is_429_before_routing(

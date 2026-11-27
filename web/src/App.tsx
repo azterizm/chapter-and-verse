@@ -160,6 +160,7 @@ export function App() {
       const activeSessionToken = sessionTokenRef.current;
       const usedSessionOnly = Boolean(activeSessionToken && !turnstileToken);
       const req: AskRequest = { query, session_id: sessionId.current };
+      if (replaceReq?.choice?.coordinate) req.selected_coordinate = replaceReq.choice.coordinate;
       if (turnstileToken) req.turnstile_token = turnstileToken;
       if (activeSessionToken) req.sessionToken = activeSessionToken;
       if (replaceReq) {

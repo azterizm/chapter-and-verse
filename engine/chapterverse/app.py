@@ -2,8 +2,9 @@
 
 Endpoints:
 
-* ``POST /api/ask``: body ``{"query": str, "as_at"?: "YYYY-MM-DD", "context"?: [coordinate]}``
-  (other fields the web client sends, such as ``session_id``, are ignored). The answer streams
+* ``POST /api/ask``: body ``{"query": str, "as_at"?: "YYYY-MM-DD", "context"?: [coordinate],
+  "selected_coordinate"?: coordinate}`` (other fields the web client sends, such as
+  ``session_id``, are ignored). The answer streams
   as ``text/event-stream``, each event the exact bytes of ``contracts.encode_sse``.
 * ``GET /api/health``: ``{"status", "corpus_id", "snapshot"}``.
 
@@ -171,6 +172,8 @@ NET_CLASS_HEADER: Final = "x-cv-net-class"
 """Network classification ('hosting', etc.); trusted only with valid Access headers."""
 MIN_CAP_SALT_LEN: Final = 32
 """Minimum character length for ``CAP_SALT`` when daily cap is active (requirements R7)."""
+MAX_COORDINATE_LEN: Final = 200
+"""Maximum character length for coordinate strings in ``POST /api/ask``."""
 SSE_HEADERS: Final = {"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"}
 HF_RESOLVE: Final = "https://huggingface.co/{model}/resolve/{revision}/{name}"
 
@@ -1055,13 +1058,20 @@ def parse_ask(
     if (
         not isinstance(raw_context, list)
         or len(raw_context) > MAX_CONTEXT_COORDINATES
-        or not all(isinstance(c, str) and 0 < len(c) <= 200 for c in raw_context)  # noqa: PLR2004
+        or not all(isinstance(c, str) and 0 < len(c) <= MAX_COORDINATE_LEN for c in raw_context)
     ):
         raise _Reject(400, "bad_request", "context must be a short list of coordinates.")
+    selected_coordinate: str | None = None
+    raw_selected = data.get("selected_coordinate")
+    if raw_selected not in (None, ""):
+        if not isinstance(raw_selected, str) or len(raw_selected) > MAX_COORDINATE_LEN:
+            raise _Reject(400, "bad_request", "selected_coordinate must be a coordinate string.")
+        selected_coordinate = raw_selected
     return AskRequest(
         query=query,
         as_at=as_at,
         context=tuple(raw_context),
+        selected_coordinate=selected_coordinate,
         started=time.perf_counter() if started is None else started,
         client_key=client_key,
         net_class=net_class,
