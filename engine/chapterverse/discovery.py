@@ -48,6 +48,7 @@ __all__ = [
     "DiscoveryOutcome",
     "NoEvidence",
     "Suggest",
+    "candidate_citation",
     "check_out_of_scope",
     "check_private_document",
     "discover_step",
@@ -73,6 +74,11 @@ _PRIOR_SEC_RRF_WEIGHT: Final = 0.20
 _PRIOR_SEC_BM25_WEIGHT: Final = 0.30
 _PRIOR_INST_RRF_WEIGHT: Final = 0.05
 _RRF_FLAG_PENALTIES: Final[tuple[float, ...]] = (0.3, 0.4, 0.4, 0.5, 0.3, 1.0)
+_TAIL_PRUNE_MIN_KEEP: Final = 3
+_TAIL_PRUNE_SCORE_RATIO: Final = 0.35
+_AUTO_SELECT_LEAD_RATIO: Final = 1.15
+_AUTO_SELECT_TOP1_AGREE_RATIO: Final = 1.05
+_AUTO_SELECT_DISALLOWED_FLAGS: Final = frozenset({"repealed", "amending", "commencement"})
 
 PRIVATE_DOC_TYPES: Final[tuple[str, ...]] = (
     "Terms and Conditions",
@@ -319,6 +325,7 @@ class Suggest:
     confident: bool
     question: str
     spans: tuple[tuple[int, int], ...] | None = None
+    auto_select: bool = False
     event: ClarifyEvent = field(init=False)
 
     def __post_init__(self) -> None:
@@ -454,6 +461,12 @@ def remove_bare_section(query: str, citations: Sequence[ParsedCitation] = ()) ->
     text = re.sub(r"^[,\s;:]+", "", text)
     text = re.sub(r"[,\s;:]+$", "", text)
     return " ".join(text.split())
+
+
+def candidate_citation(label: str) -> str:
+    """Extract the short citation up to the first ': ' from a candidate label."""
+    idx = label.find(": ")
+    return label if idx == -1 else label[:idx]
 
 
 def format_candidate_label(
@@ -656,6 +669,67 @@ def _flag_multiplier(flags: int, query: object) -> float:
     return mult
 
 
+def _is_whole_instrument_coordinate(coord_str: str) -> bool:
+    parts = coord_str.split("/")
+    return len(parts) <= _provision_start(parts)
+
+
+def _has_disallowed_auto_select_flag(flags: int) -> bool:
+    if not flags:
+        return False
+    return any(
+        (flags >> PRIOR_FLAGS.index(name)) & 1
+        for name in _AUTO_SELECT_DISALLOWED_FLAGS
+        if name in PRIOR_FLAGS
+    )
+
+
+def _prune_tail(
+    scored: Sequence[tuple[float, float, str]],
+    limit: int,
+) -> list[tuple[float, float, str]]:
+    capped = list(scored[:limit])
+    if len(capped) <= _TAIL_PRUNE_MIN_KEEP:
+        return capped
+    top_score = capped[0][0]
+    if top_score <= 0.0:
+        return capped
+    threshold = top_score * _TAIL_PRUNE_SCORE_RATIO
+    return [
+        *capped[:_TAIL_PRUNE_MIN_KEEP],
+        *(item for item in capped[_TAIL_PRUNE_MIN_KEEP:] if item[0] >= threshold),
+    ]
+
+
+def _should_auto_select_rrf(
+    scored: Sequence[tuple[float, float, str]],
+    bm25_rank: Mapping[str, int],
+    dense_rank: Mapping[str, int],
+    coord_flags: Mapping[str, int],
+) -> bool:
+    if not scored:
+        return False
+    top_score, _, top_coord = scored[0]
+    b1 = bm25_rank.get(top_coord)
+    d1 = dense_rank.get(top_coord)
+    if b1 is None or d1 is None or b1 > 3 or d1 > 3:  # noqa: PLR2004
+        return False
+    if b1 != 1 and d1 != 1:
+        return False
+    both_rank1 = b1 == 1 and d1 == 1
+    margin_ok = (
+        len(scored) == 1
+        or top_score >= _AUTO_SELECT_LEAD_RATIO * scored[1][0]
+        or (both_rank1 and top_score >= _AUTO_SELECT_TOP1_AGREE_RATIO * scored[1][0])
+    )
+    if not margin_ok:
+        return False
+    return not (
+        _is_whole_instrument_coordinate(top_coord)
+        or _has_disallowed_auto_select_flag(coord_flags.get(top_coord, 0))
+    )
+
+
 def _rrf_fuse_candidates(
     discovered_candidates: Sequence[Any],
     dense_hits: Sequence[Any],
@@ -666,7 +740,7 @@ def _rrf_fuse_candidates(
     router: Router,
     query: object = "",
     prior: ClarifyPrior | None = None,
-) -> tuple[LabelledCoordinate, ...]:
+) -> tuple[tuple[LabelledCoordinate, ...], bool]:
     bm25_rank: dict[str, int] = {}
     heading_map: dict[str, str | None] = {}
     original_coord: dict[str, Any] = {}
@@ -689,41 +763,40 @@ def _rrf_fuse_candidates(
             original_coord[coord_str] = h.coordinate
 
     dense_weight = _PRIOR_DENSE_WEIGHT if prior is not None else 1.0
-    all_coords = set(bm25_rank.keys()) | set(dense_rank.keys())
     scored: list[tuple[float, float, str]] = []
-    for coord_str in all_coords:
+    coord_flags: dict[str, int] = {}
+    for coord_str in set(bm25_rank) | set(dense_rank):
         b_rank = bm25_rank.get(coord_str)
         d_rank = dense_rank.get(coord_str)
-        score = 0.0
-        if b_rank is not None:
-            score += 1.0 / (rrf_k + b_rank)
-        if d_rank is not None:
-            score += dense_weight / (rrf_k + d_rank)
+        score = (1.0 / (rrf_k + b_rank) if b_rank is not None else 0.0) + (
+            dense_weight / (rrf_k + d_rank) if d_rank is not None else 0.0
+        )
+        flags = _source_flags(coord_str, dense_doc_id.get(coord_str), router)
+        coord_flags[coord_str] = flags
         if prior is not None:
-            flags = _source_flags(coord_str, dense_doc_id.get(coord_str), router)
             score *= _flag_multiplier(flags, query)
             if _is_schedule_coordinate(coord_str):
                 score *= _PRIOR_SCHED_RRF_PENALTY
-            sec_c = prior.section_count(coord_str)
-            if sec_c:
+            if sec_c := prior.section_count(coord_str):
                 score *= 1.0 + _PRIOR_SEC_RRF_WEIGHT * math.log1p(sec_c) / 8.0
-            inst_c = prior.instrument_count(coord_str)
-            if inst_c:
+            if inst_c := prior.instrument_count(coord_str):
                 score *= 1.0 + _PRIOR_INST_RRF_WEIGHT * math.log1p(inst_c) / 5.0
         b_tie = float(b_rank) if b_rank is not None else float("inf")
         scored.append((score, b_tie, coord_str))
 
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
-
-    return tuple(
+    auto_select = _should_auto_select_rrf(scored, bm25_rank, dense_rank, coord_flags)
+    kept = _prune_tail(scored, limit)
+    candidates = tuple(
         LabelledCoordinate(
             coordinate=coord_str,
             label=format_candidate_label(
                 original_coord[coord_str], heading_map.get(coord_str), router
             ),
         )
-        for _, _, coord_str in scored[:limit]
+        for _, _, coord_str in kept
     )
+    return candidates, auto_select
 
 
 def _get_candidate_windows(
@@ -772,15 +845,18 @@ def _get_initial_candidates(
     rrf_k: int,
     router: Router,
     prior: ClarifyPrior | None = None,
-) -> tuple[LabelledCoordinate, ...]:
+) -> tuple[tuple[LabelledCoordinate, ...], bool]:
     if dense is None:
         if prior is None:
-            return tuple(
-                LabelledCoordinate(
-                    coordinate=str(c.coordinate),
-                    label=format_candidate_label(c.coordinate, c.heading, router),
-                )
-                for c in discovered_candidates[:limit]
+            return (
+                tuple(
+                    LabelledCoordinate(
+                        coordinate=str(c.coordinate),
+                        label=format_candidate_label(c.coordinate, c.heading, router),
+                    )
+                    for c in discovered_candidates[:limit]
+                ),
+                False,
             )
         bm25_scored: list[tuple[float, int, Any]] = []
         for rank, c in enumerate(discovered_candidates[:pool], start=1):
@@ -794,12 +870,15 @@ def _get_initial_candidates(
                 score *= 1.0 + _PRIOR_SEC_BM25_WEIGHT * math.log1p(sec_c) / 8.0
             bm25_scored.append((score, rank, c))
         bm25_scored.sort(key=lambda item: (-item[0], item[1], str(item[2].coordinate)))
-        return tuple(
-            LabelledCoordinate(
-                coordinate=str(c.coordinate),
-                label=format_candidate_label(c.coordinate, c.heading, router),
-            )
-            for _, _, c in bm25_scored[:limit]
+        return (
+            tuple(
+                LabelledCoordinate(
+                    coordinate=str(c.coordinate),
+                    label=format_candidate_label(c.coordinate, c.heading, router),
+                )
+                for _, _, c in bm25_scored[:limit]
+            ),
+            False,
         )
     dense_hits = dense.search(str(query), k=pool) if isinstance(query, str) else []
     return _rrf_fuse_candidates(
@@ -876,9 +955,10 @@ def discover_step(
 
     candidates: tuple[LabelledCoordinate, ...]
     spans: tuple[tuple[int, int], ...] | None = None
+    auto_select = False
 
     if colbert is None:
-        candidates = _get_initial_candidates(
+        candidates, rrf_auto = _get_initial_candidates(
             discovered.candidates,
             query,
             limit,
@@ -888,8 +968,9 @@ def discover_step(
             router=router,
             prior=prior,
         )
+        auto_select = bool(discovered.confident) and rrf_auto
     else:
-        initial_cands = _get_initial_candidates(
+        initial_cands, rrf_auto = _get_initial_candidates(
             discovered.candidates,
             query,
             rerank_n,
@@ -915,6 +996,13 @@ def discover_step(
             top_scored = scored[:limit]
             candidates = tuple(item[2] for item in top_scored)
             spans = tuple(item[3] for item in top_scored)
+            top_colbert_matches_rrf = (
+                bool(candidates) and candidates[0].coordinate == initial_cands[0].coordinate
+            )
+            colbert_margin_ok = len(top_scored) == 1 or top_scored[0][0] >= 1.10 * top_scored[1][0]
+            auto_select = bool(discovered.confident) and (
+                (rrf_auto and top_colbert_matches_rrf) or (dense is not None and colbert_margin_ok)
+            )
 
     if discovered.confident:
         question = "Did you mean one of these provisions?"
@@ -926,4 +1014,5 @@ def discover_step(
         confident=discovered.confident,
         question=question,
         spans=spans,
+        auto_select=auto_select,
     )

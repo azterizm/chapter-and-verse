@@ -1,4 +1,5 @@
 import { type AskFailure, factBytesFromRaw } from "../api/client";
+import { candidateCitation } from "../text";
 import type {
   AnswerFactObject,
   ClarifyEvent,
@@ -47,6 +48,7 @@ export interface Turn {
   windows: Window[];
   sentences: SentenceEvent[];
   extractive: ExtractiveEvent | null;
+  provisionsRevealed?: boolean;
   notices: NoticeEvent[];
   receipt: Receipt | null;
   error: TurnError | null;
@@ -75,6 +77,7 @@ export type Action =
   | { type: "failure"; turnId: number; failure: AskFailure }
   | { type: "health"; snapshot: string }
   | { type: "focus"; turnId: number }
+  | { type: "reveal_provisions"; turnId: number }
   | { type: "reset" };
 
 export const initialState: AppState = { turns: [], activeTurnId: null, snapshot: null };
@@ -92,6 +95,7 @@ function newTurn(id: number, query: string, question: string, choice: TurnChoice
     windows: [],
     sentences: [],
     extractive: null,
+    provisionsRevealed: false,
     notices: [],
     receipt: null,
     error: null,
@@ -107,8 +111,16 @@ export function applyEvent(turn: Turn, event: CvEvent, raw: string): Turn {
       return { ...turn, clarify: event };
     case "refusal":
       return { ...turn, refusal: event };
-    case "sources":
-      return { ...turn, windows: event.windows };
+    case "sources": {
+      const choice =
+        event.selected && (turn.choice === undefined || turn.choice === null)
+          ? {
+              citation: candidateCitation(event.selected.label),
+              alternatives: event.alternatives ?? [],
+            }
+          : turn.choice;
+      return { ...turn, windows: event.windows, ...(choice !== undefined ? { choice } : {}) };
+    }
     case "sentence":
       return { ...turn, sentences: [...turn.sentences, event] };
     case "extractive":
@@ -193,9 +205,22 @@ export function reducer(state: AppState, action: Action): AppState {
       return state.snapshot === null ? { ...state, snapshot: action.snapshot } : state;
     case "focus":
       return { ...state, activeTurnId: action.turnId };
+    case "reveal_provisions":
+      return updateTurn(state, action.turnId, (t) => ({
+        ...t,
+        provisionsRevealed: !t.provisionsRevealed,
+      }));
     case "reset":
       return { ...initialState, snapshot: state.snapshot };
   }
+}
+
+export function isFallbackExtractive(turn: Turn): boolean {
+  return turn.extractive !== null && turn.extractive.reason !== "quote_requested";
+}
+
+export function shouldShowProvisions(turn: Turn): boolean {
+  return !isFallbackExtractive(turn) || Boolean(turn.provisionsRevealed);
 }
 
 /** Windows the source panel shows for a turn: extractive windows carry the highlights. */

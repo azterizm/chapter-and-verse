@@ -857,6 +857,9 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         config=PipelineConfig(
             premise_budget_tokens=settings.premise_budget_tokens,
             max_prompt_windows=settings.max_prompt_windows,
+            auto_select=_env_flag(env, "AUTO_SELECT_CLARIFY")
+            if "AUTO_SELECT_CLARIFY" in env
+            else True,
         ),
         modal_kv=modal_kv,
         daily_caps=persistence.daily_caps,
@@ -1246,8 +1249,23 @@ def create_app(
     @application.api_route("/api/health", methods=["GET", "HEAD"])
     async def health(request: Request) -> JSONResponse:
         rt = current(request)
+        rot = rt.pipeline.rotation
+        if isinstance(rot, ProviderRotation):
+            model = rot.model_status()
+        else:
+            model = {
+                "ready": bool(rot.available()),
+                "warming": False,
+                "warming_for_s": None,
+                "estimated_ready_s": None,
+            }
         return JSONResponse(
-            {"status": "ok", "corpus_id": rt.store.corpus_id, "snapshot": rt.store.snapshot},
+            {
+                "status": "ok",
+                "corpus_id": rt.store.corpus_id,
+                "snapshot": rt.store.snapshot,
+                "model": model,
+            },
             headers={"Cache-Control": "no-store"},
         )
 

@@ -160,6 +160,8 @@ export interface RefusalEvent {
 export interface SourcesEvent {
   type: "sources";
   windows: Window[];
+  selected?: LabelledCoordinate | null;
+  alternatives?: LabelledCoordinate[];
 }
 
 export interface SentenceEvent {
@@ -345,6 +347,13 @@ export function parseEventData(eventName: string, data: string): CvEvent {
     case "sources":
       need(Array.isArray(o.windows), "sources: bad payload");
       (o.windows as unknown[]).forEach((w) => checkWindow(w, "sources"));
+      if (o.selected !== undefined && o.selected !== null) {
+        checkLabelled(o.selected, "sources.selected");
+      }
+      if (o.alternatives !== undefined) {
+        need(Array.isArray(o.alternatives), "sources: bad alternatives");
+        (o.alternatives as unknown[]).forEach((c) => checkLabelled(c, "sources.alternatives"));
+      }
       break;
     case "sentence":
       checkSentenceOut(o.sentence);

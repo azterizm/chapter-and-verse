@@ -14,10 +14,18 @@ export interface AskRequest {
   turnstile_token?: string;
 }
 
+export interface ModelStatus {
+  ready: boolean;
+  warming: boolean;
+  warming_for_s: number | null;
+  estimated_ready_s: number | null;
+}
+
 export interface Health {
   status: string;
   corpus_id: string;
   snapshot: string;
+  model?: ModelStatus;
 }
 
 export type AskFailure =
@@ -85,7 +93,24 @@ export async function health(signal?: AbortSignal): Promise<Health | null> {
     if (typeof body !== "object" || body === null) return null;
     const h = body as Record<string, unknown>;
     if (typeof h.status !== "string" || typeof h.snapshot !== "string") return null;
-    return { status: h.status, snapshot: h.snapshot, corpus_id: String(h.corpus_id ?? "") };
+    let model: ModelStatus | undefined;
+    if (typeof h.model === "object" && h.model !== null) {
+      const m = h.model as Record<string, unknown>;
+      if (typeof m.ready === "boolean" && typeof m.warming === "boolean") {
+        model = {
+          ready: m.ready,
+          warming: m.warming,
+          warming_for_s: typeof m.warming_for_s === "number" ? m.warming_for_s : null,
+          estimated_ready_s: typeof m.estimated_ready_s === "number" ? m.estimated_ready_s : null,
+        };
+      }
+    }
+    return {
+      status: h.status,
+      snapshot: h.snapshot,
+      corpus_id: String(h.corpus_id ?? ""),
+      ...(model !== undefined ? { model } : {}),
+    };
   } catch {
     return null;
   }

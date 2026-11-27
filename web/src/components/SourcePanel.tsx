@@ -1,6 +1,6 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
-import { panelWindows, type Turn } from "../state/reducer";
+import { panelWindows, shouldShowProvisions, type Turn } from "../state/reducer";
 import { SOURCE_FINDING, SOURCES_HEADING } from "../text";
 import { SourceCard } from "./SourceCard";
 
@@ -14,7 +14,7 @@ export function SourcePanel({ turn, className }: SourcePanelProps) {
 
   if (turn === null) return null;
 
-  const windows = panelWindows(turn);
+  const windows = shouldShowProvisions(turn) ? panelWindows(turn) : [];
   if (windows.length === 0 && turn.phase !== "streaming") return null;
 
   const labelsByPassage = new Map<string, string>();

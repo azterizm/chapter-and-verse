@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { getResolvedTheme, type ResolvedTheme } from "../lib/theme";
 import { cn } from "../lib/utils";
+import { TURNSTILE_PANEL_LABEL } from "../text";
 
 // Cloudflare Turnstile, loaded only when VITE_TURNSTILE_SITE_KEY is set. The script comes from
 // challenges.cloudflare.com, which the CSP allows; nothing else is loaded from outside.
 
 interface TurnstileApi {
   render(el: HTMLElement, opts: Record<string, unknown>): string;
+  execute(elOrId?: HTMLElement | string): void;
   reset(id?: string): void;
   remove(id?: string): void;
 }
@@ -20,6 +22,7 @@ declare global {
 export const TURNSTILE_SITE_KEY: string = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "";
 export const TURNSTILE_ACTION = "ask";
 export const TURNSTILE_TIMEOUT_MS = 30000;
+export const TURNSTILE_VISIBLE_GRACE_MS = 2000;
 export const TURNSTILE_TIMEOUT_MESSAGE =
   "The bot check did not finish. Click Ask again, or reload the page if it keeps failing.";
 export const TURNSTILE_UNSUPPORTED_MESSAGE = "This browser cannot run the bot check. Try another browser.";
@@ -59,7 +62,8 @@ function measureWidth(el: HTMLElement): number {
 export interface TurnstileRenderOptions {
   sitekey: string;
   action: string;
-  appearance: "always";
+  appearance: "interaction-only";
+  execution: "execute";
   size: TurnstileSize;
   theme: ResolvedTheme;
   callback: (token: string) => void;
@@ -67,6 +71,8 @@ export interface TurnstileRenderOptions {
   "timeout-callback": () => void;
   "error-callback": () => void;
   "unsupported-callback": () => void;
+  "before-interactive-callback": () => void;
+  "after-interactive-callback": () => void;
   [key: string]: unknown;
 }
 
@@ -76,11 +82,14 @@ export function turnstileOptions(
   onTimeout?: () => void,
   containerWidth = 0,
   theme: ResolvedTheme = getResolvedTheme(),
+  onBeforeInteractive?: () => void,
+  onAfterInteractive?: () => void,
 ): TurnstileRenderOptions {
   return {
     sitekey: TURNSTILE_SITE_KEY,
     action: TURNSTILE_ACTION,
-    appearance: "always",
+    appearance: "interaction-only",
+    execution: "execute",
     size: turnstileSize(containerWidth),
     theme,
     callback: (token: string) => onToken(token),
@@ -94,14 +103,19 @@ export function turnstileOptions(
     },
     "error-callback": () => onError("The bot check failed to run. Reload the page."),
     "unsupported-callback": () => onError(TURNSTILE_UNSUPPORTED_MESSAGE),
+    "before-interactive-callback": () => onBeforeInteractive?.(),
+    "after-interactive-callback": () => onAfterInteractive?.(),
   };
 }
 
 export interface TurnstileGateOptions {
   timeoutMs?: number;
+  visibleGraceMs?: number;
   onSend: (query: string, token: string | null) => void;
+  onExecute?: () => void;
   onReset: () => void;
   onStatusChange: (status: string | null) => void;
+  onNeedVisible?: (visible: boolean) => void;
   onError: (error: string) => void;
 }
 
@@ -110,17 +124,24 @@ export class TurnstileGate {
   private pendingQuery: string | null = null;
   private retried = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private visibleTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly timeoutMs: number;
+  private readonly visibleGraceMs: number;
   private readonly onSend: (query: string, token: string | null) => void;
+  private readonly onExecute: (() => void) | undefined;
   private readonly onReset: () => void;
   private readonly onStatusChange: (status: string | null) => void;
+  private readonly onNeedVisible: ((visible: boolean) => void) | undefined;
   private readonly onError: (error: string) => void;
 
   constructor(opts: TurnstileGateOptions) {
     this.timeoutMs = opts.timeoutMs ?? TURNSTILE_TIMEOUT_MS;
+    this.visibleGraceMs = opts.visibleGraceMs ?? TURNSTILE_VISIBLE_GRACE_MS;
     this.onSend = opts.onSend;
+    this.onExecute = opts.onExecute;
     this.onReset = opts.onReset;
     this.onStatusChange = opts.onStatusChange;
+    this.onNeedVisible = opts.onNeedVisible;
     this.onError = opts.onError;
   }
 
@@ -140,6 +161,7 @@ export class TurnstileGate {
     if (this.token) {
       const tok = this.token;
       this.token = null;
+      this.onNeedVisible?.(false);
       this.onReset();
       this.onSend(query, tok);
       return;
@@ -147,8 +169,23 @@ export class TurnstileGate {
     this.pendingQuery = query;
     this.retried = false;
     this.onStatusChange(TURNSTILE_CHECKING_MESSAGE);
-    this.clearTimer();
+    this.onExecute?.();
+    this.clearTimers();
     this.timer = setTimeout(() => this.handleTimeout(), this.timeoutMs);
+    this.visibleTimer = setTimeout(() => {
+      if (this.pendingQuery !== null) {
+        this.onNeedVisible?.(true);
+      }
+    }, this.visibleGraceMs);
+  }
+
+  onBeforeInteractive(): void {
+    this.clearVisibleTimer();
+    this.onNeedVisible?.(true);
+  }
+
+  onAfterInteractive(): void {
+    this.onNeedVisible?.(false);
   }
 
   onToken(token: string | null): void {
@@ -159,7 +196,8 @@ export class TurnstileGate {
     if (this.pendingQuery !== null) {
       const q = this.pendingQuery;
       this.pendingQuery = null;
-      this.clearTimer();
+      this.clearTimers();
+      this.onNeedVisible?.(false);
       this.onStatusChange(null);
       this.token = null;
       this.onReset();
@@ -167,6 +205,7 @@ export class TurnstileGate {
       return;
     }
     this.token = token;
+    this.onNeedVisible?.(false);
   }
 
   onTimeout(): void {
@@ -174,6 +213,7 @@ export class TurnstileGate {
       this.handleTimeout();
     } else {
       this.token = null;
+      this.onNeedVisible?.(false);
       this.onReset();
     }
   }
@@ -183,26 +223,30 @@ export class TurnstileGate {
     if (!this.retried) {
       this.retried = true;
       this.onReset();
+      this.onExecute?.();
       this.clearTimer();
       this.timer = setTimeout(() => this.handleTimeout(), this.timeoutMs);
       return;
     }
-    this.clearTimer();
+    this.clearTimers();
     this.pendingQuery = null;
+    this.onNeedVisible?.(false);
     this.onStatusChange(null);
     this.onError(TURNSTILE_TIMEOUT_MESSAGE);
   }
 
   onFailure(message: string): void {
-    this.clearTimer();
+    this.clearTimers();
     this.pendingQuery = null;
+    this.onNeedVisible?.(false);
     this.onStatusChange(null);
     this.onError(message);
   }
 
   cancel(): void {
-    this.clearTimer();
+    this.clearTimers();
     this.pendingQuery = null;
+    this.onNeedVisible?.(false);
     this.onStatusChange(null);
   }
 
@@ -212,23 +256,53 @@ export class TurnstileGate {
       this.timer = null;
     }
   }
+
+  private clearVisibleTimer(): void {
+    if (this.visibleTimer !== null) {
+      clearTimeout(this.visibleTimer);
+      this.visibleTimer = null;
+    }
+  }
+
+  private clearTimers(): void {
+    this.clearTimer();
+    this.clearVisibleTimer();
+  }
 }
 
 interface Props {
   /** Bumped by the parent to ask for a fresh token. */
   resetKey: number;
+  /** Bumped by the parent when a request needs verification. */
+  executeKey: number;
+  /** Shown as a quiet side card only when interactive verification is needed. */
+  visible: boolean;
   onToken(token: string | null): void;
   onError(message: string): void;
   onTimeout?(): void;
+  onBeforeInteractive?(): void;
+  onAfterInteractive?(): void;
 }
 
-export function Turnstile({ resetKey, onToken, onError, onTimeout }: Props) {
+export function Turnstile({
+  resetKey,
+  executeKey,
+  visible,
+  onToken,
+  onError,
+  onTimeout,
+  onBeforeInteractive,
+  onAfterInteractive,
+}: Props) {
   const el = useRef<HTMLDivElement>(null);
   const widget = useRef<string | null>(null);
+  const pendingExecute = useRef(false);
+  const lastExecutedKey = useRef(0);
+  const lastResetKey = useRef(0);
   const [size, setSize] = useState<TurnstileSize>("flexible");
-  const handlers = useRef({ onToken, onError, onTimeout });
+  const handlers = useRef({ onToken, onError, onTimeout, onBeforeInteractive, onAfterInteractive });
   useEffect(() => {
-    handlers.current = { onToken, onError, onTimeout };
+    handlers.current = { onToken, onError, onTimeout, onBeforeInteractive, onAfterInteractive };
   });
 
   useEffect(() => {
@@ -242,9 +316,15 @@ export function Turnstile({ resetKey, onToken, onError, onTimeout }: Props) {
           () => handlers.current.onTimeout?.(),
           measureWidth(el.current),
           getResolvedTheme(),
+          () => handlers.current.onBeforeInteractive?.(),
+          () => handlers.current.onAfterInteractive?.(),
         );
         setSize(opts.size);
         widget.current = ts.render(el.current, opts);
+        if (pendingExecute.current && widget.current) {
+          pendingExecute.current = false;
+          ts.execute(widget.current);
+        }
       },
       () => live && handlers.current.onError("The bot check could not load. Reload the page."),
     );
@@ -258,16 +338,42 @@ export function Turnstile({ resetKey, onToken, onError, onTimeout }: Props) {
   }, []);
 
   useEffect(() => {
-    if (resetKey > 0 && widget.current && typeof window !== "undefined" && window.turnstile) {
-      handlers.current.onToken(null);
-      window.turnstile.reset(widget.current);
+    if (resetKey > lastResetKey.current) {
+      lastResetKey.current = resetKey;
+      if (widget.current && typeof window !== "undefined" && window.turnstile) {
+        handlers.current.onToken(null);
+        window.turnstile.reset(widget.current);
+      }
     }
   }, [resetKey]);
 
+  useEffect(() => {
+    if (executeKey > lastExecutedKey.current) {
+      lastExecutedKey.current = executeKey;
+      if (widget.current && typeof window !== "undefined" && window.turnstile) {
+        window.turnstile.execute(widget.current);
+      } else {
+        pendingExecute.current = true;
+      }
+    }
+  }, [executeKey]);
+
   return (
     <div
-      className={cn("mb-2 w-full", size === "compact" ? "min-h-[140px]" : "min-h-[65px]")}
-      ref={el}
-    />
+      data-turnstile-panel=""
+      aria-hidden={!visible}
+      className={cn(
+        "fixed bottom-4 right-4 z-40 w-[320px] max-w-[calc(100vw-2rem)] rounded-card border border-border bg-surface p-3 shadow-card transition-all duration-[var(--dur-base)] print:hidden",
+        visible
+          ? "translate-y-0 opacity-100 pointer-events-auto"
+          : "translate-y-2 opacity-0 pointer-events-none",
+      )}
+    >
+      <p className="mb-2 text-caption text-muted-foreground">{TURNSTILE_PANEL_LABEL}</p>
+      <div
+        className={cn("w-full", size === "compact" ? "min-h-[140px]" : "min-h-[65px]")}
+        ref={el}
+      />
+    </div>
   );
 }

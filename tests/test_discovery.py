@@ -400,3 +400,143 @@ def test_dense_off_identical_outputs_fixture_queries(fixture_router: Router) -> 
             assert isinstance(res_none, RefusalEvent)
             assert res_default.kind == res_none.kind
             assert res_default.message == res_none.message
+
+
+def test_rrf_auto_select_and_tail_pruning(fixture_router: Router) -> None:
+    from chapterverse.dense.retriever import DenseHit, DenseRetriever  # noqa: PLC0415
+
+    # 1. Strong agreement on rank 1 with clear lead over #2 -> auto_select=True
+    dense_strong = MagicMock(spec=DenseRetriever)
+    dense_strong.search.return_value = [
+        DenseHit(
+            doc_id=1,
+            coordinate="uk/ukpga/1996/18/s124",
+            heading="Limit of compensatory award etc.",
+            rank=1,
+            score=0.90,
+        ),
+        DenseHit(
+            doc_id=2,
+            coordinate="uk/ukpga/1996/18/s98",
+            heading="General.",
+            rank=10,
+            score=0.40,
+        ),
+    ]
+    cands = [
+        MagicMock(
+            coordinate=Coordinate.parse("uk/ukpga/1996/18/s124"), heading="Limit", score=12.0
+        ),
+        MagicMock(
+            coordinate=Coordinate.parse("uk/ukpga/1996/18/s118"), heading="General", score=6.0
+        ),
+        MagicMock(
+            coordinate=Coordinate.parse("uk/ukpga/1996/18/s119"), heading="Basic", score=5.0
+        ),
+        MagicMock(
+            coordinate=Coordinate.parse("uk/ukpga/1996/18/s120"), heading="Min", score=4.0
+        ),
+    ]
+    mock_router = MagicMock(spec=Router)
+    mock_router.index = fixture_router.index
+    mock_router.discover.return_value = MagicMock(
+        candidates=tuple(cands),
+        confident=True,
+        reason=None,
+        index_snapshot=fixture_router.index.snapshot,
+    )
+    out = discover_step(mock_router, "compensatory award limit", dense=dense_strong, limit=10)
+    assert isinstance(out, Suggest)
+    assert out.auto_select is True
+    assert out.candidates[0].coordinate == "uk/ukpga/1996/18/s124"
+
+    # 2. Disagreement or tie -> auto_select=False
+    dense_tie = MagicMock(spec=DenseRetriever)
+    dense_tie.search.return_value = [
+        DenseHit(
+            doc_id=2, coordinate="uk/ukpga/1996/18/s118", heading="General", rank=1, score=0.80
+        ),
+        DenseHit(
+            doc_id=1, coordinate="uk/ukpga/1996/18/s124", heading="Limit", rank=2, score=0.79
+        ),
+    ]
+    out_tie = discover_step(mock_router, "compensatory award limit", dense=dense_tie, limit=10)
+    assert isinstance(out_tie, Suggest)
+    assert out_tie.auto_select is False
+
+    # 3. confident=False -> auto_select=False even with strong RRF lead
+    mock_router.discover.return_value = MagicMock(
+        candidates=tuple(cands),
+        confident=False,
+        reason="low_confidence",
+        index_snapshot=fixture_router.index.snapshot,
+    )
+    out_low = discover_step(mock_router, "compensatory award limit", dense=dense_strong, limit=10)
+    assert isinstance(out_low, Suggest)
+    assert out_low.auto_select is False
+
+    # 4. Tail pruning drops far-tail noise beyond rank 3 (< 0.35 * top_score)
+    far_tail_cands = [
+        MagicMock(
+            coordinate=Coordinate.parse("uk/ukpga/1996/18/s124"), heading="Limit", score=12.0
+        ),
+        MagicMock(
+            coordinate=Coordinate.parse("uk/ukpga/1996/18/s118"), heading="General", score=9.0
+        ),
+        MagicMock(
+            coordinate=Coordinate.parse("uk/ukpga/1996/18/s119"), heading="Basic", score=8.0
+        ),
+        *[
+            MagicMock(
+                coordinate=Coordinate.parse(f"uk/ukpga/1996/18/s{120 + i}"),
+                heading=f"Tail {i}",
+                score=1.0,
+            )
+            for i in range(1, 7)
+        ],
+    ]
+    # Add dense hits so top score is high, while rank 40+ tail is < 0.35 * top
+    mock_router.discover.return_value = MagicMock(
+        candidates=(
+            *far_tail_cands[:3],
+            *[
+                MagicMock(
+                    coordinate=Coordinate.parse("uk/ukpga/1996/18/s125"),
+                    heading="Filler",
+                    score=1.0,
+                )
+                for _ in range(45)
+            ],
+            MagicMock(
+                coordinate=Coordinate.parse("uk/ukpga/1996/18/s126"),
+                heading="Far tail",
+                score=0.5,
+            ),
+        ),
+        confident=True,
+        reason=None,
+        index_snapshot=fixture_router.index.snapshot,
+    )
+    dense_far = MagicMock(spec=DenseRetriever)
+    dense_far.search.return_value = [
+        DenseHit(
+            doc_id=1, coordinate="uk/ukpga/1996/18/s124", heading="Limit", rank=1, score=0.95
+        ),
+        DenseHit(
+            doc_id=2, coordinate="uk/ukpga/1996/18/s118", heading="General", rank=2, score=0.70
+        ),
+        DenseHit(
+            doc_id=3, coordinate="uk/ukpga/1996/18/s119", heading="Basic", rank=3, score=0.60
+        ),
+    ]
+    out_pruned = discover_step(
+        mock_router, "compensatory award limit", dense=dense_far, limit=10, rrf_k=20
+    )
+    assert isinstance(out_pruned, Suggest)
+    coords = [c.coordinate for c in out_pruned.candidates]
+    assert coords[:3] == [
+        "uk/ukpga/1996/18/s124",
+        "uk/ukpga/1996/18/s118",
+        "uk/ukpga/1996/18/s119",
+    ]
+    assert "uk/ukpga/1996/18/s126" not in coords

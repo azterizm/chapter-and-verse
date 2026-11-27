@@ -25,12 +25,9 @@ export const REFUSAL_TITLE: Record<string, string> = {
 export const refusalTitle = (kind: string): string => REFUSAL_TITLE[kind] ?? "No answer";
 
 export const EXTRACTIVE_REASON: Record<ExtractiveReason, string> = {
-  providers_unavailable:
-    "Every language model provider is at its limit or failing, so no written answer was made. " +
-    "The provision text is shown instead, with the relevant words marked. Ask again later for a written answer.",
+  providers_unavailable: "Every language model provider is temporarily at its limit or unavailable.",
   provider_warming:
-    "The model server is starting up, so no written answer was made. " +
-    "The provision text is shown instead, with the relevant words marked. Ask again in a minute for a written answer.",
+    "The verification model is waking up. Your answer will appear here automatically once it is ready.",
   quote_requested: "Statutory text, quoted from legislation.gov.uk.",
 };
 
@@ -50,10 +47,8 @@ export const NOTICE_TITLE: Record<string, string> = {
 
 /** Deterministic notice wording by notice code (requirements R4). */
 export const NOTICE_MESSAGE: Record<string, string> = {
-  daily_cap:
-    "Daily limit reached for generated answers. The provision text is shown instead. It resets at 00:00 UTC.",
-  global_budget:
-    "Today's generated answers are used up. The provision text is shown instead. It resets at 00:00 UTC.",
+  daily_cap: "Daily limit reached for generated answers. Resets at 00:00 UTC.",
+  global_budget: "Today's generated answers are used up. Resets at 00:00 UTC.",
   providers_unavailable:
     "The model became unavailable while writing. Every sentence shown was checked; there may have been more to say.",
 };
@@ -154,6 +149,17 @@ export const ERROR_CLIENT_TITLE = "This answer failed";
 export const ACTION_RETRY = "Retry";
 export const ACTION_CHANGE = "Change";
 export const ACTION_DETAILS = "Details";
+export const WARMING_TITLE = "Starting the model";
+export const WARMING_BODY =
+  "The verification model is waking up. Your answer will appear here automatically once it is ready.";
+export const WARMING_TIMEOUT_BODY = "The model is taking longer than expected to start.";
+export const WARMING_CANCEL_LABEL = "Stop waiting";
+export const ACTION_SHOW_PROVISIONS = "Show statutory text";
+export const ACTION_SHOW_PROVISIONS_WHILE_WAITING = "View statutory text while waiting";
+export const ACTION_HIDE_PROVISIONS = "Hide statutory text";
+export const CLARIFY_SHOW_MORE = (n: number): string => `Show ${n} more`;
+export const CLARIFY_SHOW_LESS = "Show fewer";
+export const TURNSTILE_PANEL_LABEL = "Quick verification";
 export const SUGGESTIONS_LABEL = "Did you mean";
 export const REFUSAL_LINK_LABEL = "Read on legislation.gov.uk";
 export const OPENS_NEW_TAB = " (opens in a new tab)";

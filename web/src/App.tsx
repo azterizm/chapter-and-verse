@@ -15,7 +15,7 @@ import { Chip } from "./components/ui/chip";
 import { ToastProvider } from "./components/ui/toast";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { cn } from "./lib/utils";
-import { initialState, panelWindows, reducer, windowAnchor } from "./state/reducer";
+import { initialState, panelWindows, reducer, shouldShowProvisions, windowAnchor } from "./state/reducer";
 import {
   EXAMPLE_QUESTIONS,
   EXAMPLES_LABEL,
@@ -69,6 +69,8 @@ export function App() {
   const [checking, setChecking] = useState<string | null>(null);
   const [botError, setBotError] = useState<string | null>(null);
   const [resetKey, setResetKey] = useState(0);
+  const [executeKey, setExecuteKey] = useState(0);
+  const [turnstileVisible, setTurnstileVisible] = useState(false);
   const [prefill, setPrefill] = useState<QueryPrefill | null>(null);
   const [scrolled, setScrolled] = useState(false);
   const [wordmarkEntering, setWordmarkEntering] = useState(false);
@@ -204,8 +206,10 @@ export function App() {
           pendingReplaceRef.current = null;
           executeAsk(query, token, replaceReq);
         },
+        onExecute: () => setExecuteKey((k) => k + 1),
         onReset: () => setResetKey((k) => k + 1),
         onStatusChange: (status) => setChecking(status),
+        onNeedVisible: (v) => setTurnstileVisible(v),
         onError: (err) => {
           pendingReplaceRef.current = null;
           setBotError(err);
@@ -276,6 +280,10 @@ export function App() {
     });
   }, []);
 
+  const revealProvisions = useCallback((turnId: number) => {
+    dispatch({ type: "reveal_provisions", turnId });
+  }, []);
+
   let blocked: string | null = null;
   if (botError) {
     blocked = botError;
@@ -285,8 +293,8 @@ export function App() {
 
   const isBlocked = busy || (blocked !== null && blocked !== TURNSTILE_TIMEOUT_MESSAGE);
   const active = state.turns.find((t) => t.id === state.activeTurnId) ?? null;
-  const activeIsQuote = active !== null && isQuoteAnswer(active);
-  const showSourcesColumn = hasTurns && !activeIsQuote;
+  const activeHidesSources = active !== null && (isQuoteAnswer(active) || !shouldShowProvisions(active));
+  const showSourcesColumn = hasTurns && !activeHidesSources;
   const showHero = !hasTurns || heroFading;
 
   const composerDock = (
@@ -305,21 +313,6 @@ export function App() {
         />
       )}
       <div className={cn("bg-background", hasTurns && "pb-[max(1rem,env(safe-area-inset-bottom))]")}>
-        {TURNSTILE_SITE_KEY && (
-          <Turnstile
-            resetKey={resetKey}
-            onToken={(t) => {
-              getGate().onToken(t);
-              if (t) setBotError(null);
-            }}
-            onError={(err) => {
-              getGate().onFailure(err);
-            }}
-            onTimeout={() => {
-              getGate().onTimeout();
-            }}
-          />
-        )}
         <QueryBox busy={busy} blocked={blocked} onAsk={askQuery} inputRef={input} prefill={prefill} />
       </div>
     </div>
@@ -429,6 +422,7 @@ export function App() {
                     {state.turns.map((t) => {
                       const showInlineSources =
                         !isQuoteAnswer(t) &&
+                        shouldShowProvisions(t) &&
                         ((!isDesktop && (t.id === active?.id || panelWindows(t).length > 0)) ||
                           (isDesktop && t.id !== active?.id && panelWindows(t).length > 0));
                       return (
@@ -441,6 +435,7 @@ export function App() {
                             busy={isBlocked}
                             onReplace={replaceTurn}
                             onShowSource={showSource}
+                            onRevealProvisions={revealProvisions}
                           />
                           {showInlineSources && (
                             <div>
@@ -468,6 +463,29 @@ export function App() {
           </div>
 
           <Footer snapshot={state.snapshot} wide={showSourcesColumn} />
+          {TURNSTILE_SITE_KEY && (
+            <Turnstile
+              resetKey={resetKey}
+              executeKey={executeKey}
+              visible={turnstileVisible}
+              onToken={(t) => {
+                getGate().onToken(t);
+                if (t) setBotError(null);
+              }}
+              onError={(err) => {
+                getGate().onFailure(err);
+              }}
+              onTimeout={() => {
+                getGate().onTimeout();
+              }}
+              onBeforeInteractive={() => {
+                getGate().onBeforeInteractive();
+              }}
+              onAfterInteractive={() => {
+                getGate().onAfterInteractive();
+              }}
+            />
+          )}
         </div>
       </TooltipProvider>
     </ToastProvider>

@@ -45,6 +45,7 @@ from chapterverse.providers.ledger import (
 )
 from chapterverse.providers.openai_compat import (
     GEMINI_MODEL,
+    MODAL_COLD_START_ESTIMATE_S,
     VERCEL_MODEL,
     ProviderWarming,
     make_cloudflare,
@@ -296,6 +297,7 @@ class ProviderRotation:
         shared = ledger if ledger is not None else InMemoryLedger()
         kw = dict(provider_kwargs)
         kw.setdefault("sleep", sleep)
+        kw.setdefault("auto_warm_poll", True)
         built: list[ChatProvider] = []
         for name in config.providers:
             if name == "groq":
@@ -378,6 +380,27 @@ class ProviderRotation:
     def warming(self) -> list[str]:
         """Providers known to be cold-starting (the pipeline shows ``provider_warming``)."""
         return [n for n, p in self._providers.items() if getattr(p, "warming", False) is True]
+
+    def model_status(self) -> dict[str, Any]:
+        """Current readiness and warming status across generation and judge providers."""
+        warming_names = self.warming()
+        warming = bool(warming_names)
+        warming_for_s: float | None = None
+        if warming:
+            waits = [
+                w
+                for name in warming_names
+                if (w := getattr(self._providers.get(name), "warming_for_s", None)) is not None
+            ]
+            if waits:
+                warming_for_s = round(max(waits), 1)
+        ready = bool(self.available("generate")) and bool(self.available("judge"))
+        return {
+            "ready": ready,
+            "warming": warming,
+            "warming_for_s": warming_for_s,
+            "estimated_ready_s": MODAL_COLD_START_ESTIMATE_S if warming else None,
+        }
 
     def available(self, purpose: Purpose | None = None) -> list[str]:
         """Names in rotation now: pinned, circuit not open, quota left, not warming.

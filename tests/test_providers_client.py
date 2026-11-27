@@ -1008,3 +1008,73 @@ def test_thinking_off_effort_overrides_for_vercel_and_gemini() -> None:
     )
     make_gemini(environ=VG_ENV, sleep=lambda _s: None, thinking_off_effort="off").complete(short())
     assert "reasoning_effort" not in sent(g_omit_route)
+
+
+@respx.mock
+def test_modal_warm_poller_recovers_without_double_billing() -> None:
+    import time as _time  # noqa: PLC0415
+
+    clock = Clock()
+    ledger = InMemoryLedger()
+    health = respx.get(MODAL_HEALTH).mock(
+        side_effect=[
+            httpx.Response(503),
+            httpx.Response(503),
+            httpx.Response(200),
+        ]
+    )
+    provider = make_modal(
+        MODAL,
+        ledger=ledger,
+        environ={"MODAL_API_KEY": "modal_test"},
+        clock=clock,
+        warm_poll_interval_s=0.01,
+        warm_max_wait_s=10.0,
+        auto_warm_poll=True,
+    )
+    try:
+        with pytest.raises(ProviderWarming):
+            provider.complete(short())
+        assert provider.warming
+        initial_usd = ledger.snapshot()["modal"]["usd_session"]
+        assert initial_usd > 0.0
+
+        deadline = _time.monotonic() + 2.0
+        while provider.warming and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+
+        assert not provider.warming
+        assert health.call_count == 3
+        # Background polls must not add extra ledger entries or cold-start charges.
+        assert ledger.snapshot()["modal"]["usd_session"] == initial_usd
+    finally:
+        provider.close()
+
+
+@respx.mock
+def test_modal_warm_poller_clears_on_max_wait() -> None:
+    import time as _time  # noqa: PLC0415
+
+    clock = Clock()
+    respx.get(MODAL_HEALTH).mock(return_value=httpx.Response(503))
+    provider = make_modal(
+        MODAL,
+        environ={"MODAL_API_KEY": "modal_test"},
+        clock=clock,
+        warm_poll_interval_s=0.01,
+        warm_max_wait_s=0.5,
+        auto_warm_poll=True,
+    )
+    try:
+        with pytest.raises(ProviderWarming):
+            provider.complete(short())
+        assert provider.warming
+        clock.now += 1.0
+
+        deadline = _time.monotonic() + 2.0
+        while provider.warming and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+
+        assert not provider.warming
+    finally:
+        provider.close()

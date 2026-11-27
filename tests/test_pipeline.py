@@ -1007,3 +1007,81 @@ def test_quote_request_respects_repealed_and_prospective_status(
     assert pro_out.mode == "refusal"
     assert of(pro_events, ExtractiveEvent) == []
     assert of(pro_events, RefusalEvent)[0].kind == TemporalStatus.NOT_YET_IN_FORCE.value
+
+
+def test_auto_select_citationless_query_routes_and_answers(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    from chapterverse.contracts import validate_order  # noqa: PLC0415
+    from chapterverse.dense.retriever import DenseHit, DenseRetriever  # noqa: PLC0415
+
+    dense = MagicMock(spec=DenseRetriever)
+    dense.search.return_value = [
+        DenseHit(
+            doc_id=1,
+            coordinate="uk/ukpga/1996/18/s124",
+            heading="Limit of compensatory award etc.",
+            rank=1,
+            score=0.92,
+        ),
+        DenseHit(
+            doc_id=2,
+            coordinate="uk/ukpga/1996/18/s123",
+            heading="Compensatory award.",
+            rank=5,
+            score=0.45,
+        ),
+    ]
+    rotation = FakeRotation(
+        [("The compensatory award is capped [P1].", "stop")],
+        rules=[("compensatory award", "supported", "capped")],
+    )
+    pipeline = Pipeline(
+        router=fixture_router,
+        store=store,
+        rotation=rotation,
+        policy=build_policy(JUDGE_PRESET_NAME),
+        config=PipelineConfig(auto_select=True),
+        dense=dense,
+    )
+    events, outcome = run(pipeline, "compensatory award limit")
+    assert validate_order([e.type for e in events])
+    assert outcome.mode == "generated"
+    assert of(events, ClarifyEvent) == []
+    (sources,) = of(events, SourcesEvent)
+    assert sources.selected is not None
+    assert sources.selected.coordinate == "uk/ukpga/1996/18/s124"
+    assert len(sources.alternatives) >= 1
+    assert len(of(events, SentenceEvent)) == 1
+
+
+def test_auto_select_falls_back_to_clarify_if_reroute_does_not_bind(
+    fixture_router: Router, store: CountingStore
+) -> None:
+    from chapterverse.contracts import LabelledCoordinate, validate_order  # noqa: PLC0415
+    from chapterverse.discovery import Suggest  # noqa: PLC0415
+
+    pipeline = Pipeline(
+        router=fixture_router,
+        store=store,
+        rotation=_FailIfCalledRotation(),
+        policy=build_policy(JUDGE_PRESET_NAME),
+        config=PipelineConfig(auto_select=True),
+    )
+    fake_suggest = Suggest(
+        candidates=(
+            LabelledCoordinate(coordinate="uk/ukpga/1996/18/s999", label="Nonexistent Act 2099"),
+        ),
+        confident=True,
+        question="Did you mean one of these provisions?",
+        auto_select=True,
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("chapterverse.pipeline.discover_step", lambda *a, **kw: fake_suggest)
+        events, outcome = run(pipeline, "limit on compensatory award")
+    assert validate_order([e.type for e in events])
+    assert outcome.mode == "clarify"
+    assert len(of(events, ClarifyEvent)) == 1
+    assert of(events, SourcesEvent) == []

@@ -77,8 +77,11 @@ __all__ = [
     "GEMINI_MODEL",
     "GROQ_BASE_URL",
     "GROQ_MODEL",
+    "MODAL_COLD_START_ESTIMATE_S",
     "VERCEL_BASE_URL",
     "VERCEL_MODEL",
+    "WARM_MAX_WAIT_S",
+    "WARM_POLL_INTERVAL_S",
     "Adapter",
     "CloudflareAdapter",
     "GeminiAdapter",
@@ -138,6 +141,9 @@ def _thinking_off_fields(effort: str | None, *, default: str) -> dict[str, Any]:
 
 
 _MINUTE_S: Final = 60.0
+WARM_POLL_INTERVAL_S: Final = 10.0
+WARM_MAX_WAIT_S: Final = 900.0
+MODAL_COLD_START_ESTIMATE_S: Final = 406
 ErrorOutcome = tuple[UnavailableKind, float | None, float | None]
 """(kind, retry_after_s, ledger block_s)."""
 
@@ -652,6 +658,9 @@ class OpenAICompatProvider:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        warm_poll_interval_s: float = WARM_POLL_INTERVAL_S,
+        warm_max_wait_s: float = WARM_MAX_WAIT_S,
+        auto_warm_poll: bool = False,
     ) -> None:
         self.adapter = adapter
         self.ledger = ledger
@@ -666,10 +675,15 @@ class OpenAICompatProvider:
         self._sleep = sleep
         self._clock = clock
         self._wall = wall_clock
+        self.warm_poll_interval_s = warm_poll_interval_s
+        self.warm_max_wait_s = warm_max_wait_s
+        self._auto_warm_poll = auto_warm_poll
         self._lock = threading.Lock()
         self._prefill_enabled = adapter.native_prefill
         self._last_ok: float | None = None
         self._warming_since: float | None = None
+        self._warm_poll_stop = threading.Event()
+        self._warm_poll_thread: threading.Thread | None = None
 
     def __repr__(self) -> str:
         return f"OpenAICompatProvider({self.adapter!r})"
@@ -711,6 +725,12 @@ class OpenAICompatProvider:
         return None if since is None else self._clock() - since
 
     def close(self) -> None:
+        self._warm_poll_stop.set()
+        with self._lock:
+            th = self._warm_poll_thread
+            self._warm_poll_thread = None
+        if th is not None and th.is_alive() and th is not threading.current_thread():
+            th.join(timeout=1.0)
         if self._owns_client:
             self._client.close()
 
@@ -834,9 +854,69 @@ class OpenAICompatProvider:
             self._warming_since = None
 
     def _mark_warming(self) -> None:
+        start_poller = False
+        th: threading.Thread | None = None
         with self._lock:
             if self._warming_since is None:
                 self._warming_since = self._clock()
+            if (
+                self._auto_warm_poll
+                and self.adapter.health_url() is not None
+                and not self._warm_poll_stop.is_set()
+                and (self._warm_poll_thread is None or not self._warm_poll_thread.is_alive())
+            ):
+                th = threading.Thread(
+                    target=self._warm_poll_loop,
+                    name=f"warm-poll-{self.name}",
+                    daemon=True,
+                )
+                self._warm_poll_thread = th
+                start_poller = True
+        if start_poller and th is not None:
+            th.start()
+
+    def _health_check_once(self, key: str) -> bool:
+        """Lightweight health check without ledger reserve/record (used while warming)."""
+        url = self.adapter.health_url()
+        if url is None:
+            return True
+        try:
+            response = self._client.get(
+                url, headers=self._headers(key), timeout=self.probe_timeout_s
+            )
+            status = response.status_code
+        except httpx.HTTPError:
+            return False
+        if status in {200, 404}:
+            self._mark_ok()
+            return True
+        return False
+
+    def _warm_poll_loop(self) -> None:
+        while not self._warm_poll_stop.wait(self.warm_poll_interval_s):
+            if not self.warming:
+                return
+            elapsed = self.warming_for_s
+            if elapsed is not None and elapsed >= self.warm_max_wait_s:
+                with self._lock:
+                    self._warming_since = None
+                return
+            try:
+                key = self._key()
+                if self._health_check_once(key):
+                    return
+            except Exception:  # noqa: BLE001 - background poller must never raise
+                return
+
+    def probe_if_warming(self) -> bool:
+        """If currently marked warming, run one lightweight health check and clear if ready."""
+        if not self.warming:
+            return True
+        try:
+            key = self._key()
+        except ProviderUnavailable:
+            return False
+        return self._health_check_once(key)
 
     def _record(self, usage: CallUsage) -> None:
         if self.ledger is not None:

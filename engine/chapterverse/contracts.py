@@ -756,6 +756,8 @@ class SourcesEvent:
     """The windows the answer is built from, before any sentence."""
 
     windows: tuple[Window, ...]
+    selected: LabelledCoordinate | None = None
+    alternatives: tuple[LabelledCoordinate, ...] = ()
     type: Literal["sources"] = field(default="sources", init=False)
 
 

@@ -442,7 +442,48 @@ def test_health(fixture_data_root: Path, spy: SpyRouter, fixture_text_store: Tex
     rt = runtime(fixture_data_root, spy, fixture_text_store, FakeRotation())
     with TestClient(create_app(rt)) as client:
         response = client.get("/api/health")
-    assert response.json() == {"status": "ok", "corpus_id": "fixture", "snapshot": "2026-09-28"}
+    assert response.json() == {
+        "status": "ok",
+        "corpus_id": "fixture",
+        "snapshot": "2026-09-28",
+        "model": {
+            "ready": True,
+            "warming": False,
+            "warming_for_s": None,
+            "estimated_ready_s": None,
+        },
+    }
+
+
+def test_health_reports_model_warming_then_ready(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+) -> None:
+    modal_provider = make_modal(
+        "https://modal.example",
+        environ={"MODAL_API_KEY": "modal_test"},
+        auto_warm_poll=False,
+    )
+    rot = ProviderRotation([modal_provider], generate=["modal"], judge=["modal"])
+    rt = runtime(fixture_data_root, spy, fixture_text_store, rot)
+    try:
+        with TestClient(create_app(rt)) as client:
+            modal_provider._mark_warming()
+            warming_body = client.get("/api/health").json()
+            assert warming_body["model"]["ready"] is False
+            assert warming_body["model"]["warming"] is True
+            assert isinstance(warming_body["model"]["warming_for_s"], float)
+            assert warming_body["model"]["estimated_ready_s"] == 406
+
+            modal_provider._mark_ok()
+            ready_body = client.get("/api/health").json()
+            assert ready_body["model"] == {
+                "ready": True,
+                "warming": False,
+                "warming_for_s": None,
+                "estimated_ready_s": None,
+            }
+    finally:
+        modal_provider.close()
 
 
 def test_cors_allows_only_the_configured_origins(
@@ -676,8 +717,25 @@ def test_build_runtime_wires_layer1_groq_limits_and_pipeline_config(
         )
         assert rt.pipeline.config.premise_budget_tokens == 4000
         assert rt.pipeline.config.max_prompt_windows == 12
+        assert rt.pipeline.config.auto_select is True
     finally:
         rt.shutdown()
+
+    from chapterverse.providers import RotationConfig  # noqa: PLC0415
+
+    rot = ProviderRotation.from_config(
+        RotationConfig.from_env(
+            {
+                "GEN_PROVIDERS": "modal",
+                "JUDGE_PROVIDERS": "modal",
+                "MODAL_URL": "https://modal.example",
+                "MODAL_API_KEY": "modal_test",
+            }
+        )
+    )
+    modal_p = rot.providers["modal"]
+    assert getattr(modal_p, "_auto_warm_poll", False) is True
+    modal_p.close()  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------- pin check

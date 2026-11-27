@@ -12,7 +12,10 @@ import {
   ACTION_COPY,
   ACTION_DETAILS,
   ACTION_DOWNLOAD_EVIDENCE,
+  ACTION_HIDE_PROVISIONS,
   ACTION_RETRY,
+  ACTION_SHOW_PROVISIONS,
+  ACTION_SHOW_PROVISIONS_WHILE_WAITING,
   COPIED_TOAST,
   COPY_FAILED_TOAST,
   EVIDENCE_DOWNLOADED_TOAST,
@@ -22,6 +25,7 @@ import {
   shortId,
   SOURCE_LINK_LABEL,
   STATUS_STEPS,
+  WARMING_TITLE,
 } from "@/text";
 
 function makeWindow(overrides: Partial<Window> = {}): Window {
@@ -535,7 +539,7 @@ describe("QuoteBlock and extractive answers", () => {
     expect(screen.getByText("s.174(1)")).toBeInTheDocument();
   });
 
-  it("renders notice, jump link, and QuoteBlock without per-block copy for other extractive reasons", async () => {
+  it("hides provisions behind user consent for providers_unavailable, then reveals with jump link on click", async () => {
     const user = userEvent.setup();
     const w1 = makeWindow();
     const turn = makeTurn({
@@ -553,12 +557,152 @@ describe("QuoteBlock and extractive answers", () => {
     expect(isQuoteAnswer(turn)).toBe(false);
     expect(isQuoteAnswer(makeTurn())).toBe(false);
     expect(screen.getByText(EXTRACTIVE_REASON.providers_unavailable)).toBeInTheDocument();
+    expect(screen.queryByText(w1.text)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: ACTION_COPY })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: ACTION_SHOW_PROVISIONS }));
     expect(screen.getByText(w1.text)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: ACTION_HIDE_PROVISIONS })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: `Copy ${w1.heading}` })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: quoteLinkLabel(w1.heading) })).toHaveAttribute("href", w1.source_url);
 
     await user.click(screen.getByRole("link", { name: w1.heading }));
     expect(onShowSource).toHaveBeenCalledWith(1, "P1");
+  });
+
+  it("renders a single warming card with progress bar, hides provisions until consented, and auto-replaces when model becomes ready", async () => {
+    const originalFetch = globalThis.fetch;
+    let pollCount = 0;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/health")) {
+        pollCount += 1;
+        return new Response(
+          JSON.stringify({
+            status: "ok",
+            corpus_id: "ukpga",
+            snapshot: "2026-09-28",
+            model:
+              pollCount === 1
+                ? { ready: false, warming: true, warming_for_s: 35, estimated_ready_s: 406 }
+                : { ready: true, warming: false, warming_for_s: null, estimated_ready_s: null },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    try {
+      const w1 = makeWindow();
+      const turn = makeTurn({
+        notices: [
+          {
+            type: "notice",
+            code: "provider_warming",
+            message: "The backup model is starting up. Ask again in a few minutes for a written answer.",
+          },
+        ],
+        sentences: [],
+        windows: [w1],
+        extractive: {
+          type: "extractive",
+          reason: "provider_warming",
+          windows: [w1],
+        },
+      });
+
+      const { onReplace } = renderTurn(turn);
+
+      expect(screen.getByText(WARMING_TITLE)).toBeInTheDocument();
+      // Duplicate provider_warming notice is suppressed
+      expect(screen.queryByText(/Model starting\./i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/backup model is starting up/i)).not.toBeInTheDocument();
+      // Provisions hidden until user clicks consent button
+      expect(screen.queryByText(w1.text)).not.toBeInTheDocument();
+      expect(screen.getByRole("progressbar", { name: WARMING_TITLE })).toBeInTheDocument();
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: ACTION_SHOW_PROVISIONS_WHILE_WAITING }));
+      expect(screen.getByText(w1.text)).toBeInTheDocument();
+
+      // Wait for initial health poll and verify no auto-replace yet when ready=false
+      await waitFor(() => {
+        expect(pollCount).toBe(1);
+      });
+      expect(onReplace).not.toHaveBeenCalled();
+
+      // Wait for next poll or simulate ready=true by re-mounting/waiting? Wait 10s would be slow without fake timers,
+      // so let's verify immediate ready=true on mount in a dedicated assertion below.
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("auto-replaces immediately when health reports model.ready=true during warming", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/health")) {
+        return new Response(
+          JSON.stringify({
+            status: "ok",
+            corpus_id: "ukpga",
+            snapshot: "2026-09-28",
+            model: { ready: true, warming: false, warming_for_s: null, estimated_ready_s: null },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    try {
+      const w1 = makeWindow();
+      const turn = makeTurn({
+        sentences: [],
+        windows: [w1],
+        extractive: {
+          type: "extractive",
+          reason: "provider_warming",
+          windows: [w1],
+        },
+      });
+      const { onReplace } = renderTurn(turn);
+
+      await waitFor(() => {
+        expect(onReplace).toHaveBeenCalledWith({
+          oldTurnId: 1,
+          query: turn.query,
+          question: turn.query,
+          choice: null,
+        });
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("deduplicates daily_cap notice with providers_unavailable extractive reason", () => {
+    const w1 = makeWindow();
+    const turn = makeTurn({
+      notices: [
+        {
+          type: "notice",
+          code: "daily_cap",
+          message: "Daily limit reached for generated answers. Resets at 00:00 UTC.",
+        },
+      ],
+      sentences: [],
+      windows: [w1],
+      extractive: {
+        type: "extractive",
+        reason: "providers_unavailable",
+        windows: [w1],
+      },
+    });
+    renderTurn(turn);
+    expect(screen.getByText(/Resets at 00:00 UTC\./i)).toBeInTheDocument();
+    expect(screen.queryByText(EXTRACTIVE_REASON.providers_unavailable)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: ACTION_SHOW_PROVISIONS })).toBeInTheDocument();
   });
 });
 

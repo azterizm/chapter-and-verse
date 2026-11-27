@@ -94,6 +94,7 @@ from chapterverse.contracts import (
     Event,
     ExtractiveEvent,
     ExtractiveReason,
+    LabelledCoordinate,
     NoticeEvent,
     Policy,
     ProviderCall,
@@ -117,6 +118,7 @@ from chapterverse.discovery import (
     ClarifyPrior,
     NoEvidence,
     Suggest,
+    candidate_citation,
     check_out_of_scope,
     discover_step,
     is_named_private_document,
@@ -255,6 +257,7 @@ class PipelineConfig:
     max_prompt_windows: int = MAX_PROMPT_WINDOWS
     mode: ChatMode = "short"
     generation: GenerationSettings = field(default_factory=GenerationSettings)
+    auto_select: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1140,7 +1143,15 @@ class Pipeline:
         stream.done()
 
     def _discover_or_refuse(
-        self, stream: _Stream, raw: str, norm_text: str, norm_result: RouteResult
+        self,
+        stream: _Stream,
+        raw: str,
+        norm_text: str,
+        norm_result: RouteResult,
+        *,
+        request: AskRequest,
+        cancelled: Callable[[], bool],
+        masked: Masked | None = None,
     ) -> None:
         router_index = getattr(self.router, "index", None)
         snapshot = getattr(router_index, "snapshot", "") or self.store.snapshot
@@ -1176,6 +1187,23 @@ class Pipeline:
             self._receipt(stream, norm_result, mode="refusal")
             return
         if isinstance(outcome, Suggest):
+            if self.config.auto_select and outcome.auto_select and outcome.candidates:
+                top = outcome.candidates[0]
+                citation = candidate_citation(top.label)
+                bound_result = self.router.route(f"{norm_text} ({citation})")
+                if bound_result.status is RouteStatus.BOUNDED:
+                    bound_result = self._expand_bound_result(bound_result, raw)
+                    self._bounded(
+                        request,
+                        bound_result,
+                        stream,
+                        cancelled,
+                        masked=masked,
+                        norm_text=norm_text,
+                        selected=top,
+                        alternatives=outcome.candidates,
+                    )
+                    return
             stream.outcome.mode = "clarify"
             stream(outcome.clarify_event)
             stream.done()
@@ -1188,6 +1216,10 @@ class Pipeline:
         norm_text: str,
         norm_result: RouteResult,
         norm_corrections: Sequence[tuple[str, str]],
+        *,
+        request: AskRequest,
+        cancelled: Callable[[], bool],
+        masked: Masked | None = None,
     ) -> None:
         self._emit_route_with_corrections(stream, norm_result, norm_corrections)
 
@@ -1218,7 +1250,15 @@ class Pipeline:
                 self._handle_bare_section(stream, norm_text, norm_result)
                 return
 
-            self._discover_or_refuse(stream, raw, norm_text, norm_result)
+            self._discover_or_refuse(
+                stream,
+                raw,
+                norm_text,
+                norm_result,
+                request=request,
+                cancelled=cancelled,
+                masked=masked,
+            )
             return
 
         stream(route_refusal(norm_result))
@@ -1277,7 +1317,16 @@ class Pipeline:
             return
 
         if raw_result.status is RouteStatus.UNRESOLVED:
-            self._handle_unresolved(stream, raw, norm.text, norm_result, norm.corrections)
+            self._handle_unresolved(
+                stream,
+                raw,
+                norm.text,
+                norm_result,
+                norm.corrections,
+                request=request,
+                cancelled=cancelled,
+                masked=masked,
+            )
             return
 
         self._handle_raw_fallback(stream, raw_result)
@@ -1354,6 +1403,8 @@ class Pipeline:
         *,
         masked: Masked | None = None,
         norm_text: str | None = None,
+        selected: LabelledCoordinate | None = None,
+        alternatives: tuple[LabelledCoordinate, ...] = (),
     ) -> None:
         if masked is None:
             citation_spans = find_protected_spans(request.query)
@@ -1413,7 +1464,7 @@ class Pipeline:
             stream.outcome.windows_total = len(windows)
             stream.outcome.windows_sent = len(shown)
             stream.outcome.selection = "quote"
-            stream(SourcesEvent(windows=shown))
+            stream(SourcesEvent(windows=shown, selected=selected, alternatives=alternatives))
             stream(ExtractiveEvent(reason="quote_requested", windows=shown))
             if len(windows) > MAX_EXTRACTIVE_WINDOWS:
                 stream(quote_truncated_notice(len(shown), len(windows)))
@@ -1431,7 +1482,7 @@ class Pipeline:
         stream.outcome.windows_sent = len(selection.windows)
         stream.outcome.selection = selection.strategy
         shown = selection.windows
-        stream(SourcesEvent(windows=shown))
+        stream(SourcesEvent(windows=shown, selected=selected, alternatives=alternatives))
         model_windows = tuple(w for w in shown if w.status is TemporalStatus.IN_FORCE)
         spans = {w.coordinate: w.highlight for w in shown if w.highlight is not None}
         passage_map = {w.passage_id: w.coordinate for w in shown}

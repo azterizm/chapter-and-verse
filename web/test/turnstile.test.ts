@@ -137,13 +137,14 @@ describe("Turnstile on every question", () => {
     expect(fetchCalls[0]!.headers.get("X-Turnstile-Token")).toBeNull();
   });
 
-  it("render options include appearance: \"always\" and action: \"ask\"", () => {
+  it("render options include appearance: \"interaction-only\", execution: \"execute\", and action: \"ask\"", () => {
     expect(TURNSTILE_ACTION).toBe("ask");
     const onToken = vi.fn();
     const onError = vi.fn();
     const opts = turnstileOptions(onToken, onError, undefined, 680, "light");
     expect(opts.action).toBe("ask");
-    expect(opts.appearance).toBe("always");
+    expect(opts.appearance).toBe("interaction-only");
+    expect(opts.execution).toBe("execute");
     expect(opts.size).toBe("flexible");
     expect(opts.theme).toBe("light");
 
@@ -152,7 +153,7 @@ describe("Turnstile on every question", () => {
     mockTs.render({} as HTMLElement, opts);
     expect(renderMock).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ action: "ask", appearance: "always" }),
+      expect.objectContaining({ action: "ask", appearance: "interaction-only", execution: "execute" }),
     );
   });
 
@@ -162,7 +163,7 @@ describe("Turnstile on every question", () => {
 
     const desktopOpts = turnstileOptions(onToken, onError, undefined, 680, "light");
     expect(desktopOpts.size).toBe("flexible");
-    expect(desktopOpts.appearance).toBe("always");
+    expect(desktopOpts.appearance).toBe("interaction-only");
     expect(desktopOpts.action).toBe("ask");
 
     const boundaryOpts = turnstileOptions(onToken, onError, undefined, 300, "light");
@@ -170,7 +171,7 @@ describe("Turnstile on every question", () => {
 
     const narrowOpts = turnstileOptions(onToken, onError, undefined, 288, "light");
     expect(narrowOpts.size).toBe("compact");
-    expect(narrowOpts.appearance).toBe("always");
+    expect(narrowOpts.appearance).toBe("interaction-only");
     expect(narrowOpts.action).toBe("ask");
   });
 
@@ -180,13 +181,13 @@ describe("Turnstile on every question", () => {
 
     const lightOpts = turnstileOptions(onToken, onError, undefined, 680, "light");
     expect(lightOpts.theme).toBe("light");
-    expect(lightOpts.appearance).toBe("always");
+    expect(lightOpts.appearance).toBe("interaction-only");
     expect(lightOpts.action).toBe("ask");
 
     const darkOpts = turnstileOptions(onToken, onError, undefined, 288, "dark");
     expect(darkOpts.theme).toBe("dark");
     expect(darkOpts.size).toBe("compact");
-    expect(darkOpts.appearance).toBe("always");
+    expect(darkOpts.appearance).toBe("interaction-only");
     expect(darkOpts.action).toBe("ask");
   });
 
@@ -502,5 +503,52 @@ describe("Turnstile on every question", () => {
     expect(sent).toHaveLength(0);
     expect(errors).toEqual(["The bot check failed to run. Reload the page."]);
     expect(gate.isWaiting()).toBe(false);
+  });
+
+  it("executes on demand and only reveals widget when interactive or slow", () => {
+    vi.useFakeTimers();
+    try {
+      const sent: Array<{ query: string; token: string | null }> = [];
+      const visibleStates: boolean[] = [];
+      let executes = 0;
+
+      const gate = new TurnstileGate({
+        visibleGraceMs: 2000,
+        onSend: (query, token) => sent.push({ query, token }),
+        onExecute: () => executes++,
+        onReset: vi.fn(),
+        onStatusChange: vi.fn(),
+        onNeedVisible: (v) => visibleStates.push(v),
+        onError: vi.fn(),
+      });
+
+      // Fast silent verification stays invisible
+      gate.ask("first question");
+      expect(executes).toBe(1);
+      expect(visibleStates).toEqual([]);
+      vi.advanceTimersByTime(500);
+      gate.onToken("fast-tok");
+      expect(sent).toEqual([{ query: "first question", token: "fast-tok" }]);
+      expect(visibleStates).toEqual([false]);
+
+      // Interactive/slow check shows widget after grace or onBeforeInteractive, then hides on token
+      gate.ask("second question");
+      expect(executes).toBe(2);
+      vi.advanceTimersByTime(2000);
+      expect(visibleStates).toEqual([false, true]);
+      gate.onToken("slow-tok");
+      expect(visibleStates).toEqual([false, true, false]);
+
+      // Explicit before/after interactive callbacks
+      gate.ask("third question");
+      gate.onBeforeInteractive();
+      expect(visibleStates).toEqual([false, true, false, true]);
+      gate.onAfterInteractive();
+      expect(visibleStates).toEqual([false, true, false, true, false]);
+      gate.onToken("interactive-tok");
+      expect(sent).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

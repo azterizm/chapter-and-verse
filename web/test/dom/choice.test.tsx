@@ -11,7 +11,10 @@ import {
   ACTION_DETAILS,
   ACTION_DOWNLOAD_EVIDENCE,
   ACTION_RETRY,
+  ACTION_SHOW_PROVISIONS,
   CLARIFY_ARIA_LABEL,
+  CLARIFY_SHOW_LESS,
+  CLARIFY_SHOW_MORE,
   CLARIFY_TITLE,
   COMPOSER_PLACEHOLDER,
   ERROR_SERVER_TITLE,
@@ -545,5 +548,188 @@ describe("Choice, Change, Retry, and Conversation State (S1-S7)", () => {
     expect(screen.getByText(usingCitationText("Arbitration Act 1996"))).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: ACTION_CHANGE })).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("uk/ukpga/");
+  });
+
+  it("shows top 3 clarify candidates initially and reveals the rest on Show more", async () => {
+    const user = userEvent.setup();
+    const sixCandidates = [
+      { coordinate: "uk/ukpga/1980/58/s2", label: "s.2 Limitation Act 1980: Tort" },
+      { coordinate: "uk/ukpga/1980/58/s5", label: "s.5 Limitation Act 1980: Contract" },
+      { coordinate: "uk/ukpga/1980/58/s11", label: "s.11 Limitation Act 1980: Personal injury" },
+      { coordinate: "uk/ukpga/1980/58/s14A", label: "s.14A Limitation Act 1980: Negligence" },
+      { coordinate: "uk/ukpga/1980/58/s32", label: "s.32 Limitation Act 1980: Fraud" },
+      { coordinate: "uk/ukpga/1980/58/s33", label: "s.33 Limitation Act 1980: Discretion" },
+    ] as const;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) {
+        return new Response(
+          JSON.stringify({ status: "ok", corpus_id: "ukpga", snapshot: "2026-09-28" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/ask")) {
+        return sseResponse([
+          {
+            event: "route",
+            data: {
+              type: "route",
+              status: "ROUTE_UNRESOLVED",
+              next_action: "DISCOVER_THEN_BIND",
+              coordinates: [],
+              corrections: [],
+              messages: [],
+              index_snapshot: "2026-09-28",
+            },
+          },
+          {
+            event: "clarify",
+            data: {
+              type: "clarify",
+              question: "Did you mean one of these provisions?",
+              candidates: sixCandidates,
+            },
+          },
+          {
+            event: "done",
+            data: { type: "done", timings: { first_source_ms: null, first_sentence_ms: null, total_ms: 10 } },
+          },
+        ]);
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    render(<App />);
+    await user.type(screen.getByPlaceholderText(COMPOSER_PLACEHOLDER), "time limit{Enter}");
+    await screen.findByText(CLARIFY_TITLE);
+
+    expect(screen.getByRole("button", { name: sixCandidates[0].label })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: sixCandidates[2].label })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: sixCandidates[3].label })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: CLARIFY_SHOW_MORE(3) }));
+    expect(screen.getByRole("button", { name: sixCandidates[3].label })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: sixCandidates[5].label })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: CLARIFY_SHOW_LESS }));
+    expect(screen.queryByRole("button", { name: sixCandidates[3].label })).not.toBeInTheDocument();
+  });
+
+  it("displays Using + Change bar when an answer is auto-selected via SourcesEvent", async () => {
+    const user = userEvent.setup();
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) {
+        return new Response(
+          JSON.stringify({ status: "ok", corpus_id: "ukpga", snapshot: "2026-09-28" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/ask")) {
+        const events = answerEvents(
+          "auto",
+          FIRST_CANDIDATE.coordinate,
+          "s.2 Limitation Act 1980",
+          "An action founded on tort must be brought within six years.",
+        );
+        const sourcesEv = events[1];
+        if (sourcesEv) {
+          (sourcesEv.data as Record<string, unknown>).selected = FIRST_CANDIDATE;
+          (sourcesEv.data as Record<string, unknown>).alternatives = TORT_CANDIDATES;
+        }
+        return sseResponse(events);
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    render(<App />);
+    await user.type(screen.getByPlaceholderText(COMPOSER_PLACEHOLDER), "How long to sue in tort?{Enter}");
+    await screen.findByText("An action founded on tort must be brought within six years.");
+
+    expect(screen.getByText(usingCitationText("s.2 Limitation Act 1980"))).toBeInTheDocument();
+    const changeBtn = screen.getByRole("button", { name: ACTION_CHANGE });
+    await user.click(changeBtn);
+    expect(screen.getByRole("button", { name: SECOND_CANDIDATE.label })).toBeInTheDocument();
+  });
+
+  it("hides both QuoteBlock and SourcePanel on fallback extractive until user clicks Show statutory text", async () => {
+    const user = userEvent.setup();
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) {
+        return new Response(
+          JSON.stringify({ status: "ok", corpus_id: "ukpga", snapshot: "2026-09-28" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/ask")) {
+        const w = {
+          passage_id: "P1",
+          coordinate: "uk/ukpga/1996/18/s47B",
+          heading: "Employment Rights Act 1996, section 47B",
+          text: "A worker has the right not to be subjected to any detriment for making a protected disclosure.",
+          status: "IN_FORCE",
+          version_date: "1999-07-02",
+          source_url: "https://www.legislation.gov.uk/ukpga/1996/18/section/47B",
+          highlight: [0, 20],
+        };
+        return sseResponse([
+          {
+            event: "route",
+            data: {
+              type: "route",
+              status: "ROUTE_BOUNDED",
+              next_action: "RETRIEVE_BOUNDED",
+              coordinates: ["uk/ukpga/1996/18/s47B"],
+              corrections: [],
+              messages: [],
+              index_snapshot: "2026-09-28",
+            },
+          },
+          { event: "sources", data: { type: "sources", windows: [w] } },
+          {
+            event: "extractive",
+            data: { type: "extractive", reason: "providers_unavailable", windows: [w] },
+          },
+          {
+            event: "receipt",
+            data: {
+              type: "receipt",
+              answer_id: "e".repeat(64),
+              fact: {
+                schema: 1,
+                mode: "extractive",
+                corpus_id: "ukpga",
+                policy_hash: "ph",
+                query_sha256: "qh",
+                route_status: "ROUTE_BOUNDED",
+                coordinates: ["uk/ukpga/1996/18/s47B"],
+                passages: { P1: "uk/ukpga/1996/18/s47B" },
+                version_dates: {},
+                spans: {},
+                sentences: [],
+                calls: [],
+              },
+            },
+          },
+          {
+            event: "done",
+            data: { type: "done", timings: { first_source_ms: 10, first_sentence_ms: null, total_ms: 20 } },
+          },
+        ]);
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    render(<App />);
+    await user.type(screen.getByPlaceholderText(COMPOSER_PLACEHOLDER), "whistleblowing protection{Enter}");
+    await screen.findByRole("button", { name: ACTION_SHOW_PROVISIONS });
+
+    expect(document.querySelector("[data-sources-column]")).toBeNull();
+    expect(screen.queryByText(/protected disclosure/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: ACTION_SHOW_PROVISIONS }));
+    expect(document.querySelector("[data-sources-column]")).not.toBeNull();
+    expect(screen.getAllByText(/protected disclosure/i).length).toBeGreaterThanOrEqual(1);
   });
 });

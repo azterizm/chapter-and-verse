@@ -1,13 +1,19 @@
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { health } from "../api/client";
 import type { LabelledCoordinate, SentenceEvent } from "../api/events";
 import { cn } from "../lib/utils";
-import type { Turn as TurnData, TurnChoice } from "../state/reducer";
+import { isFallbackExtractive, type Turn as TurnData, type TurnChoice } from "../state/reducer";
 import {
   ACTION_CHANGE,
+  ACTION_HIDE_PROVISIONS,
   ACTION_RETRY,
+  ACTION_SHOW_PROVISIONS,
+  ACTION_SHOW_PROVISIONS_WHILE_WAITING,
   candidateCitation,
   citationInstrumentKey,
   CLARIFY_ARIA_LABEL,
+  CLARIFY_SHOW_LESS,
+  CLARIFY_SHOW_MORE,
   CLARIFY_TITLE,
   composeChoiceQuery,
   EMPTY_ANSWER_TEXT,
@@ -20,6 +26,10 @@ import {
   QUESTION_LABEL,
   STOPPED_TEXT,
   usingCitationText,
+  WARMING_BODY,
+  WARMING_CANCEL_LABEL,
+  WARMING_TIMEOUT_BODY,
+  WARMING_TITLE,
 } from "../text";
 import { ActionRow, hasAnswerContent } from "./ActionRow";
 import { Citation } from "./Citation";
@@ -42,6 +52,169 @@ interface Props {
   busy: boolean;
   onReplace(req: ReplaceRequest): void;
   onShowSource(turnId: number, passageId: string): void;
+  onRevealProvisions?(turnId: number): void;
+}
+
+const INITIAL_CLARIFY_COUNT = 3;
+const INITIAL_CHANGE_COUNT = 5;
+const WARMING_POLL_INTERVAL_MS = 10_000;
+const WARMING_TIMEOUT_MS = 600_000;
+const DEFAULT_WARMING_ESTIMATE_S = 406;
+
+const PROGRESS_WIDTH_CLASSES: readonly string[] = [
+  "w-[5%]",
+  "w-[10%]",
+  "w-[15%]",
+  "w-[20%]",
+  "w-[25%]",
+  "w-[30%]",
+  "w-[35%]",
+  "w-[40%]",
+  "w-[45%]",
+  "w-[50%]",
+  "w-[55%]",
+  "w-[60%]",
+  "w-[65%]",
+  "w-[70%]",
+  "w-[75%]",
+  "w-[80%]",
+  "w-[85%]",
+  "w-[90%]",
+  "w-[95%]",
+];
+
+function progressWidthClass(pct: number): string {
+  const step = Math.min(PROGRESS_WIDTH_CLASSES.length - 1, Math.max(0, Math.round(pct / 5) - 1));
+  return PROGRESS_WIDTH_CLASSES[step] ?? "w-[5%]";
+}
+
+function formatTimer(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const mins = Math.floor(s / 60);
+  const secs = s % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+function WarmingCard({
+  busy,
+  revealed,
+  onReady,
+  onToggleProvisions,
+}: {
+  busy: boolean;
+  revealed: boolean;
+  onReady: () => void;
+  onToggleProvisions: () => void;
+}) {
+  const [elapsedS, setElapsedS] = useState(0);
+  const [estimateS, setEstimateS] = useState(DEFAULT_WARMING_ESTIMATE_S);
+  const [cancelled, setCancelled] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const triggeredRef = useRef(false);
+  const onReadyRef = useRef(onReady);
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  });
+
+  useEffect(() => {
+    if (cancelled || timedOut) return;
+    let active = true;
+    const ctl = new AbortController();
+    const startedAt = Date.now();
+
+    const checkHealth = async () => {
+      const h = await health(ctl.signal);
+      if (!active || !h?.model) return;
+      if (typeof h.model.estimated_ready_s === "number" && h.model.estimated_ready_s > 0) {
+        setEstimateS(h.model.estimated_ready_s);
+      }
+      if (typeof h.model.warming_for_s === "number") {
+        const serverElapsed = Math.floor(h.model.warming_for_s);
+        setElapsedS((prev) => Math.max(prev, serverElapsed));
+      }
+      if (h.model.ready && !triggeredRef.current) {
+        triggeredRef.current = true;
+        onReadyRef.current();
+      }
+    };
+
+    void checkHealth();
+    const pollId = window.setInterval(() => {
+      if (Date.now() - startedAt >= WARMING_TIMEOUT_MS) {
+        setTimedOut(true);
+        return;
+      }
+      void checkHealth();
+    }, WARMING_POLL_INTERVAL_MS);
+
+    const tickId = window.setInterval(() => {
+      setElapsedS((prev) => prev + 1);
+    }, 1000);
+
+    return () => {
+      active = false;
+      ctl.abort();
+      window.clearInterval(pollId);
+      window.clearInterval(tickId);
+    };
+  }, [cancelled, timedOut]);
+
+  const pct = Math.min(95, Math.max(4, Math.round((elapsedS / Math.max(1, estimateS)) * 100)));
+  const remainingMin = Math.max(1, Math.ceil((estimateS - elapsedS) / 60));
+  const estimateNote = elapsedS >= estimateS ? "Almost ready" : `~${remainingMin} min remaining`;
+
+  return (
+    <section className="rounded-card border border-border bg-surface p-4" aria-live="polite">
+      <h3 className="text-ui font-bold text-foreground">{WARMING_TITLE}</h3>
+      <p className="mt-1.5 text-ui text-muted-foreground">{timedOut ? WARMING_TIMEOUT_BODY : WARMING_BODY}</p>
+
+      {!cancelled && !timedOut && (
+        <div className="mt-3 space-y-1.5">
+          <div
+            role="progressbar"
+            aria-label={WARMING_TITLE}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={pct}
+            className="h-1.5 w-full overflow-hidden rounded-full bg-primary-soft"
+          >
+            <div
+              className={cn(
+                "h-full rounded-full bg-primary transition-[width] duration-[var(--dur-base)]",
+                progressWidthClass(pct),
+              )}
+            />
+          </div>
+          <p className="text-caption text-muted-foreground tabular-nums">
+            {formatTimer(elapsedS)} elapsed · {estimateNote}
+          </p>
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {cancelled || timedOut ? (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              triggeredRef.current = true;
+              onReadyRef.current();
+            }}
+          >
+            {ACTION_RETRY}
+          </Button>
+        ) : (
+          <Button variant="ghost" size="sm" onClick={() => setCancelled(true)}>
+            {WARMING_CANCEL_LABEL}
+          </Button>
+        )}
+        <Button variant="outline" size="sm" onClick={onToggleProvisions}>
+          {revealed ? ACTION_HIDE_PROVISIONS : ACTION_SHOW_PROVISIONS_WHILE_WAITING}
+        </Button>
+      </div>
+    </section>
+  );
 }
 
 function StreamingDots() {
@@ -82,14 +255,30 @@ export function isQuoteAnswer(turn: TurnData): boolean {
   return turn.extractive?.reason === "quote_requested";
 }
 
-export function Turn({ turn, busy, onReplace, onShowSource }: Props) {
+export function Turn({ turn, busy, onReplace, onShowSource, onRevealProvisions }: Props) {
   const quoteGroupHeadingId = useId();
   const changeListId = useId();
   const changeBtnRef = useRef<HTMLButtonElement>(null);
   const [changing, setChanging] = useState(false);
+  const [clarifyExpanded, setClarifyExpanded] = useState(false);
+  const [changeExpanded, setChangeExpanded] = useState(false);
+  const [localRevealed, setLocalRevealed] = useState(false);
 
   const answered = turn.sentences.length > 0;
   const quoteAnswer = isQuoteAnswer(turn);
+  const fallbackExtractive = isFallbackExtractive(turn);
+  const provisionsRevealed = onRevealProvisions
+    ? Boolean(turn.provisionsRevealed)
+    : localRevealed || Boolean(turn.provisionsRevealed);
+  const showExtractiveBlocks = quoteAnswer || provisionsRevealed;
+  const toggleProvisions = () => {
+    if (onRevealProvisions) {
+      onRevealProvisions(turn.id);
+    } else {
+      setLocalRevealed((v) => !v);
+    }
+  };
+
   const quoteLabels = quoteAnswer && turn.extractive ? groupQuoteLabels(turn.extractive.windows) : null;
   const emptyAnswer =
     turn.phase === "done" &&
@@ -98,7 +287,11 @@ export function Turn({ turn, busy, onReplace, onShowSource }: Props) {
     turn.extractive === null &&
     turn.error === null;
 
-  const inlineNotices = turn.notices.filter((n) => n.code !== "provider_fallback");
+  const isWarmingFallback = turn.extractive?.reason === "provider_warming";
+  const hasBudgetNotice = turn.notices.some((n) => n.code === "daily_cap" || n.code === "global_budget");
+  const inlineNotices = turn.notices.filter(
+    (n) => n.code !== "provider_fallback" && !(isWarmingFallback && n.code === "provider_warming"),
+  );
   const instruments = new Set<string>();
   for (const ev of turn.sentences) {
     if (ev.sentence.verdict === "refused") continue;
@@ -167,27 +360,40 @@ export function Turn({ turn, busy, onReplace, onShowSource }: Props) {
             )}
           </div>
           {changing && alternatives.length > 0 && (
-            <ul id={changeListId} className="mt-2 flex flex-wrap gap-2" aria-label={CLARIFY_ARIA_LABEL}>
-              {alternatives.map((c) => {
-                const citation = candidateCitation(c.label);
-                const isCurrent = citation === turn.choice?.citation;
-                return (
-                  <li key={c.coordinate}>
-                    <Chip
-                      variant="outline"
-                      selected={isCurrent}
-                      disabled={busy || isCurrent}
-                      onClick={() => {
-                        setChanging(false);
-                        chooseLabel(c.label, alternatives);
-                      }}
-                    >
-                      {c.label}
-                    </Chip>
-                  </li>
-                );
-              })}
-            </ul>
+            <div id={changeListId} className="mt-2 space-y-2">
+              <ul className="flex flex-wrap gap-2" aria-label={CLARIFY_ARIA_LABEL}>
+                {(changeExpanded ? alternatives : alternatives.slice(0, INITIAL_CHANGE_COUNT)).map((c) => {
+                  const citation = candidateCitation(c.label);
+                  const isCurrent = citation === turn.choice?.citation;
+                  return (
+                    <li key={c.coordinate}>
+                      <Chip
+                        variant="outline"
+                        selected={isCurrent}
+                        disabled={busy || isCurrent}
+                        onClick={() => {
+                          setChanging(false);
+                          chooseLabel(c.label, alternatives);
+                        }}
+                      >
+                        {c.label}
+                      </Chip>
+                    </li>
+                  );
+                })}
+              </ul>
+              {alternatives.length > INITIAL_CHANGE_COUNT && (
+                <button
+                  type="button"
+                  onClick={() => setChangeExpanded((v) => !v)}
+                  className="cursor-pointer rounded-sm text-caption text-primary hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                >
+                  {changeExpanded
+                    ? CLARIFY_SHOW_LESS
+                    : CLARIFY_SHOW_MORE(alternatives.length - INITIAL_CHANGE_COUNT)}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -204,6 +410,8 @@ export function Turn({ turn, busy, onReplace, onShowSource }: Props) {
 
       {turn.clarify && (() => {
         const { question, candidates } = turn.clarify;
+        const visibleCandidates = clarifyExpanded ? candidates : candidates.slice(0, INITIAL_CLARIFY_COUNT);
+        const hiddenCount = candidates.length - INITIAL_CLARIFY_COUNT;
         return (
           <section
             className="mb-4 rounded-card border border-border bg-surface p-4"
@@ -212,7 +420,7 @@ export function Turn({ turn, busy, onReplace, onShowSource }: Props) {
             <h3 className="text-ui font-bold text-foreground">{CLARIFY_TITLE}</h3>
             <p className="mt-1.5 text-ui text-muted-foreground">{question}</p>
             <ul className="mt-3 flex flex-wrap gap-2">
-              {candidates.map((c) => (
+              {visibleCandidates.map((c) => (
                 <li key={c.coordinate}>
                   <Chip
                     variant="outline"
@@ -224,6 +432,17 @@ export function Turn({ turn, busy, onReplace, onShowSource }: Props) {
                 </li>
               ))}
             </ul>
+            {hiddenCount > 0 && (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={() => setClarifyExpanded((v) => !v)}
+                  className="cursor-pointer rounded-sm text-caption text-primary hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                >
+                  {clarifyExpanded ? CLARIFY_SHOW_LESS : CLARIFY_SHOW_MORE(hiddenCount)}
+                </button>
+              </div>
+            )}
           </section>
         );
       })()}
@@ -246,31 +465,76 @@ export function Turn({ turn, busy, onReplace, onShowSource }: Props) {
           aria-labelledby={quoteLabels?.groupHeading ? quoteGroupHeadingId : undefined}
           aria-label={quoteLabels?.groupHeading ? undefined : EXTRACTIVE_ARIA_LABEL}
         >
-          {!quoteAnswer && (
-            <Notice
-              notice={{
-                type: "notice",
-                code: turn.extractive.reason,
-                message: EXTRACTIVE_REASON[turn.extractive.reason],
-              }}
+          {isWarmingFallback && turn.phase === "done" && (
+            <WarmingCard
+              busy={busy}
+              revealed={provisionsRevealed}
+              onReady={() =>
+                onReplace({
+                  oldTurnId: turn.id,
+                  query: turn.query,
+                  question: displayQuestion,
+                  choice: turn.choice ?? null,
+                })
+              }
+              onToggleProvisions={toggleProvisions}
             />
           )}
-          {quoteLabels?.groupHeading && (
-            <h3 id={quoteGroupHeadingId} className="text-ui font-bold text-foreground tabular-nums">
-              {quoteLabels.groupHeading}
-            </h3>
+          {fallbackExtractive && !isWarmingFallback && (
+            <div className="space-y-2.5">
+              {!hasBudgetNotice && (
+                <Notice
+                  notice={{
+                    type: "notice",
+                    code: turn.extractive.reason,
+                    message: EXTRACTIVE_REASON[turn.extractive.reason],
+                  }}
+                />
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="outline" size="sm" onClick={toggleProvisions}>
+                  {provisionsRevealed ? ACTION_HIDE_PROVISIONS : ACTION_SHOW_PROVISIONS}
+                </Button>
+                {!hasBudgetNotice && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() =>
+                      onReplace({
+                        oldTurnId: turn.id,
+                        query: turn.query,
+                        question: displayQuestion,
+                        choice: turn.choice ?? null,
+                      })
+                    }
+                  >
+                    {ACTION_RETRY}
+                  </Button>
+                )}
+              </div>
+            </div>
           )}
-          {turn.extractive.windows.map((w, i) => (
-            <QuoteBlock
-              key={w.passage_id}
-              window={w}
-              turnId={turn.id}
-              label={quoteLabels?.blockLabels[i]}
-              grouped={Boolean(quoteLabels?.groupHeading)}
-              allowCopy={quoteAnswer}
-              onShowSource={quoteAnswer ? undefined : onShowSource}
-            />
-          ))}
+          {showExtractiveBlocks && (
+            <>
+              {quoteLabels?.groupHeading && (
+                <h3 id={quoteGroupHeadingId} className="text-ui font-bold text-foreground tabular-nums">
+                  {quoteLabels.groupHeading}
+                </h3>
+              )}
+              {turn.extractive.windows.map((w, i) => (
+                <QuoteBlock
+                  key={w.passage_id}
+                  window={w}
+                  turnId={turn.id}
+                  label={quoteLabels?.blockLabels[i]}
+                  grouped={Boolean(quoteLabels?.groupHeading)}
+                  allowCopy={quoteAnswer}
+                  onShowSource={quoteAnswer ? undefined : onShowSource}
+                />
+              ))}
+            </>
+          )}
         </section>
       )}
 

@@ -2,7 +2,7 @@ import { Check, CircleAlert, Copy, Download, Info } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { copyText } from "../lib/clipboard";
 import { cn } from "../lib/utils";
-import { panelWindows, type Turn as TurnData } from "../state/reducer";
+import { panelWindows, shouldShowProvisions, type Turn as TurnData } from "../state/reducer";
 import {
   ACTION_COPY,
   ACTION_DETAILS,
@@ -82,7 +82,10 @@ export function formatAnswerCopyText(turn: TurnData): string {
 
 /** Whether a turn has a generated or extractive answer eligible for the action row. */
 export function hasAnswerContent(turn: TurnData): boolean {
-  return turn.sentences.length > 0 || (turn.extractive !== null && turn.extractive.windows.length > 0);
+  return (
+    turn.sentences.length > 0 ||
+    (turn.extractive !== null && turn.extractive.windows.length > 0 && shouldShowProvisions(turn))
+  );
 }
 
 /** Post-answer action row: Copy, Download evidence, and Details toggle. */
