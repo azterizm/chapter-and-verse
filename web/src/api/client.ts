@@ -12,6 +12,7 @@ export interface AskRequest {
   as_at?: string;
   session_id?: string;
   turnstile_token?: string;
+  sessionToken?: string | null;
 }
 
 export interface ModelStatus {
@@ -37,6 +38,7 @@ export type AskFailure =
 export interface AskHandlers {
   onEvent(event: CvEvent, raw: string): void;
   onFailure(failure: AskFailure): void;
+  onSessionToken?(token: string): void;
 }
 
 export const byteLength = (s: string): number => new TextEncoder().encode(s).length;
@@ -49,10 +51,17 @@ export async function ask(req: AskRequest, handlers: AskHandlers, signal: AbortS
     if (req.turnstile_token) {
       headers["X-Turnstile-Token"] = req.turnstile_token;
     }
+    if (req.sessionToken) {
+      headers["X-Session-Token"] = req.sessionToken;
+    }
+    const payload: Record<string, string> = { query: req.query };
+    if (req.as_at !== undefined) payload.as_at = req.as_at;
+    if (req.session_id !== undefined) payload.session_id = req.session_id;
+    if (req.turnstile_token !== undefined) payload.turnstile_token = req.turnstile_token;
     res = await fetch(`${API_BASE}/api/ask`, {
       method: "POST",
       headers,
-      body: JSON.stringify(req),
+      body: JSON.stringify(payload),
       signal,
       credentials: "omit",
       cache: "no-store",
@@ -61,6 +70,11 @@ export async function ask(req: AskRequest, handlers: AskHandlers, signal: AbortS
   } catch (e) {
     handlers.onFailure(signal.aborted ? { kind: "aborted" } : { kind: "network", message: networkMessage(e) });
     return;
+  }
+
+  const mintedSession = res.headers.get("X-Session-Token");
+  if (mintedSession) {
+    handlers.onSessionToken?.(mintedSession);
   }
 
   const type = res.headers.get("Content-Type") ?? "";

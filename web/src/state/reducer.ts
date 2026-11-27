@@ -49,6 +49,7 @@ export interface Turn {
   sentences: SentenceEvent[];
   extractive: ExtractiveEvent | null;
   provisionsRevealed?: boolean;
+  autoRetryCount?: number;
   notices: NoticeEvent[];
   receipt: Receipt | null;
   error: TurnError | null;
@@ -72,6 +73,7 @@ export type Action =
       query: string;
       question: string;
       choice: TurnChoice | null;
+      autoRetry?: boolean;
     }
   | { type: "event"; turnId: number; event: CvEvent; raw: string }
   | { type: "failure"; turnId: number; failure: AskFailure }
@@ -82,7 +84,13 @@ export type Action =
 
 export const initialState: AppState = { turns: [], activeTurnId: null, snapshot: null };
 
-function newTurn(id: number, query: string, question: string, choice: TurnChoice | null): Turn {
+function newTurn(
+  id: number,
+  query: string,
+  question: string,
+  choice: TurnChoice | null,
+  autoRetryCount = 0,
+): Turn {
   return {
     id,
     query,
@@ -96,6 +104,7 @@ function newTurn(id: number, query: string, question: string, choice: TurnChoice
     sentences: [],
     extractive: null,
     provisionsRevealed: false,
+    autoRetryCount,
     notices: [],
     receipt: null,
     error: null,
@@ -181,7 +190,8 @@ export function reducer(state: AppState, action: Action): AppState {
     case "replace": {
       const idx = state.turns.findIndex((t) => t.id === action.oldTurnId);
       if (idx === -1) return state;
-      const replacement = newTurn(action.turnId, action.query, action.question, action.choice);
+      const nextRetryCount = action.autoRetry ? (state.turns[idx]?.autoRetryCount ?? 0) + 1 : 0;
+      const replacement = newTurn(action.turnId, action.query, action.question, action.choice, nextRetryCount);
       const turns = state.turns.map((t, i) => (i === idx ? replacement : t));
       return {
         ...state,

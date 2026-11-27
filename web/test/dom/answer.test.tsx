@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatAnswerCopyText } from "@/components/ActionRow";
@@ -25,6 +25,7 @@ import {
   shortId,
   SOURCE_LINK_LABEL,
   STATUS_STEPS,
+  WARMING_TIMEOUT_BODY,
   WARMING_TITLE,
 } from "@/text";
 
@@ -570,7 +571,7 @@ describe("QuoteBlock and extractive answers", () => {
     expect(onShowSource).toHaveBeenCalledWith(1, "P1");
   });
 
-  it("renders a single warming card with progress bar, hides provisions until consented, and auto-replaces when model becomes ready", async () => {
+  it("renders a single warming card, hides provisions until consented, and does not auto-replace on mount sync", async () => {
     const originalFetch = globalThis.fetch;
     let pollCount = 0;
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -581,10 +582,7 @@ describe("QuoteBlock and extractive answers", () => {
             status: "ok",
             corpus_id: "ukpga",
             snapshot: "2026-09-28",
-            model:
-              pollCount === 1
-                ? { ready: false, warming: true, warming_for_s: 35, estimated_ready_s: 406 }
-                : { ready: true, warming: false, warming_for_s: null, estimated_ready_s: null },
+            model: { ready: true, warming: false, warming_for_s: 35, estimated_ready_s: 406 },
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -625,29 +623,31 @@ describe("QuoteBlock and extractive answers", () => {
       await user.click(screen.getByRole("button", { name: ACTION_SHOW_PROVISIONS_WHILE_WAITING }));
       expect(screen.getByText(w1.text)).toBeInTheDocument();
 
-      // Wait for initial health poll and verify no auto-replace yet when ready=false
+      // Mount sync updates timer from server, but must NOT immediately bounce back via auto-replace.
       await waitFor(() => {
         expect(pollCount).toBe(1);
       });
       expect(onReplace).not.toHaveBeenCalled();
-
-      // Wait for next poll or simulate ready=true by re-mounting/waiting? Wait 10s would be slow without fake timers,
-      // so let's verify immediate ready=true on mount in a dedicated assertion below.
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 
-  it("auto-replaces immediately when health reports model.ready=true during warming", async () => {
+  it("polls every 10s, skips auto-retry while warming=true, and auto-replaces once ready && !warming", async () => {
     const originalFetch = globalThis.fetch;
+    let pollCount = 0;
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       if (String(input).endsWith("/api/health")) {
+        pollCount += 1;
         return new Response(
           JSON.stringify({
             status: "ok",
             corpus_id: "ukpga",
             snapshot: "2026-09-28",
-            model: { ready: true, warming: false, warming_for_s: null, estimated_ready_s: null },
+            model:
+              pollCount <= 2
+                ? { ready: true, warming: true, warming_for_s: 35, estimated_ready_s: 406 }
+                : { ready: true, warming: false, warming_for_s: null, estimated_ready_s: null },
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -655,6 +655,7 @@ describe("QuoteBlock and extractive answers", () => {
       return new Response("Not found", { status: 404 });
     });
 
+    vi.useFakeTimers();
     try {
       const w1 = makeWindow();
       const turn = makeTurn({
@@ -668,13 +669,69 @@ describe("QuoteBlock and extractive answers", () => {
       });
       const { onReplace } = renderTurn(turn);
 
-      await waitFor(() => {
-        expect(onReplace).toHaveBeenCalledWith({
-          oldTurnId: 1,
-          query: turn.query,
-          question: turn.query,
-          choice: null,
-        });
+      // Flush initial mount health sync (pollCount=1): must not trigger onReplace.
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(pollCount).toBe(1);
+      expect(onReplace).not.toHaveBeenCalled();
+
+      // Advance 10s (pollCount=2): ready=true, warming=true must STILL not auto-replace.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(pollCount).toBe(2);
+      expect(onReplace).not.toHaveBeenCalled();
+
+      // Advance 10s (pollCount=3): ready=true, warming=false triggers auto-replace with autoRetry=true.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(pollCount).toBe(3);
+      expect(onReplace).toHaveBeenCalledTimes(1);
+      expect(onReplace).toHaveBeenCalledWith({
+        oldTurnId: 1,
+        query: turn.query,
+        question: turn.query,
+        choice: null,
+        autoRetry: true,
+      });
+    } finally {
+      vi.useRealTimers();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("caps warming auto-retries at 2 and shows manual Try again button", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => new Response("Not found", { status: 404 }));
+    globalThis.fetch = fetchMock;
+
+    try {
+      const w1 = makeWindow();
+      const turn = makeTurn({
+        autoRetryCount: 2,
+        sentences: [],
+        windows: [w1],
+        extractive: {
+          type: "extractive",
+          reason: "provider_warming",
+          windows: [w1],
+        },
+      });
+      const { onReplace } = renderTurn(turn);
+
+      expect(screen.getByText(WARMING_TIMEOUT_BODY)).toBeInTheDocument();
+      expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: ACTION_RETRY }));
+      expect(onReplace).toHaveBeenCalledWith({
+        oldTurnId: 1,
+        query: turn.query,
+        question: turn.query,
+        choice: null,
       });
     } finally {
       globalThis.fetch = originalFetch;

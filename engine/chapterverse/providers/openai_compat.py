@@ -766,6 +766,8 @@ class OpenAICompatProvider:
         """
         key = self._key()
         if self.adapter.health_url() is not None and not self._recently_ok():
+            if self._auto_warm_poll and self.warming:
+                raise self._warming_error("cold start in progress")
             self._probe_or_raise(key)
         body, prefill = self.build_body(req, native_prefill=native_prefill)
         est = estimate_tokens(req.messages, req.prefill)

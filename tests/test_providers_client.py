@@ -1078,3 +1078,27 @@ def test_modal_warm_poller_clears_on_max_wait() -> None:
         assert not provider.warming
     finally:
         provider.close()
+
+
+@respx.mock
+def test_modal_warm_poller_fast_fails_without_extra_health_probe() -> None:
+    health = respx.get(MODAL_HEALTH).mock(return_value=httpx.Response(503))
+    provider = make_modal(
+        MODAL,
+        environ={"MODAL_API_KEY": "modal_test"},
+        warm_poll_interval_s=60.0,
+        warm_max_wait_s=900.0,
+        auto_warm_poll=True,
+    )
+    try:
+        with pytest.raises(ProviderWarming):
+            provider.complete(short())
+        assert provider.warming
+        assert health.call_count == 1
+
+        # A second complete() with auto_warm_poll=True fast-fails without another probe.
+        with pytest.raises(ProviderWarming):
+            provider.complete(short())
+        assert health.call_count == 1
+    finally:
+        provider.close()

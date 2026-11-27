@@ -486,6 +486,53 @@ def test_health_reports_model_warming_then_ready(
         modal_provider.close()
 
 
+def test_health_stays_not_ready_when_half_open_or_warming(
+    fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
+) -> None:
+    clock_t = [0.0]
+    groq_provider = make_groq(environ={"GROQ_API_KEY": "gsk_test"})
+    modal_provider = make_modal(
+        "https://modal.example",
+        environ={"MODAL_API_KEY": "modal_test"},
+        auto_warm_poll=False,
+    )
+    rot = ProviderRotation(
+        [groq_provider, modal_provider],
+        generate=["groq", "modal"],
+        judge=["groq", "modal"],
+        clock=lambda: clock_t[0],
+    )
+    rt = runtime(fixture_data_root, spy, fixture_text_store, rot)
+    try:
+        with TestClient(create_app(rt)) as client:
+            # Brief 429 opens groq breaker, and modal is warming.
+            rot.breaker("groq").trip(10.0)
+            modal_provider._mark_warming()
+            body_open = client.get("/api/health").json()
+            assert body_open["model"]["ready"] is False
+            assert body_open["model"]["warming"] is True
+
+            # After cooldown expires to half_open, ready remains False while warming/unverified.
+            clock_t[0] = 15.0
+            assert rot.breaker("groq").state == "half_open"
+            body_half = client.get("/api/health").json()
+            assert body_half["model"]["ready"] is False
+            assert body_half["model"]["warming"] is True
+
+            # Once modal finishes warming, ready flips to True and warming to False.
+            modal_provider._mark_ok()
+            body_ready = client.get("/api/health").json()
+            assert body_ready["model"] == {
+                "ready": True,
+                "warming": False,
+                "warming_for_s": None,
+                "estimated_ready_s": None,
+            }
+    finally:
+        groq_provider.close()
+        modal_provider.close()
+
+
 def test_cors_allows_only_the_configured_origins(
     fixture_data_root: Path, spy: SpyRouter, fixture_text_store: TextStore
 ) -> None:

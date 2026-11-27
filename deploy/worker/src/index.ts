@@ -6,10 +6,11 @@
  *   2. per-IP rate limit (all requests; POST also has the stricter question limit);
  *   3. POST only: JSON content type, body at most MAX_BODY_BYTES (12288; the engine caps the
  *      query itself at MAX_QUERY_BYTES, 4096);
- *   4. POST only: on POST /api/ask, a fresh Turnstile token that passes siteverify is required
- *      for every question (missing, invalid or reused: 403). Session token (X-Session-Token) is verified
- *      if present for conversation state or a new one minted, but never skips Turnstile.
- *      Other POST routes require an existing session token;
+ *   4. POST only: on POST /api/ask, a valid unexpired session token (X-Session-Token) lets
+ *      consecutive requests in the same tab proceed without re-running Turnstile; when absent,
+ *      invalid, or expired, a fresh Turnstile token that passes siteverify is required and a new
+ *      X-Session-Token is minted (missing, invalid, or reused: 403). Other POST routes require an
+ *      existing session token;
  *   5. forward to the origin with the Access service token and a short header timeout,
  *      streaming the response (SSE) back. No token configured: 503, nothing is forwarded.
  */
@@ -218,6 +219,8 @@ async function resolveSession(
     return { error: (c) => jsonError(401, "session_required", "Start by asking a question.", c) };
   }
 
+  if (existing) return { sid: existing.sid, newToken: null };
+
   let token = request.headers.get(TURNSTILE_HEADER);
   if (!token && body && body.length > 0) {
     try {
@@ -245,7 +248,6 @@ async function resolveSession(
     console.log(JSON.stringify({ event: "turnstile_failed", reason: check.reason }));
     return { error: (c) => jsonError(403, "turnstile_failed", "The check did not pass. Reload and try again.", c) };
   }
-  if (existing) return { sid: existing.sid, newToken: null };
   const minted = await mintSession(config.sessionKey, nowS, config.sessionTtlSeconds);
   return { sid: minted.claims.sid, newToken: minted.token };
 }

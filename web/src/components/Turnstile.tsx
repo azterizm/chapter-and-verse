@@ -22,7 +22,6 @@ declare global {
 export const TURNSTILE_SITE_KEY: string = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "";
 export const TURNSTILE_ACTION = "ask";
 export const TURNSTILE_TIMEOUT_MS = 30000;
-export const TURNSTILE_VISIBLE_GRACE_MS = 2000;
 export const TURNSTILE_TIMEOUT_MESSAGE =
   "The bot check did not finish. Click Ask again, or reload the page if it keeps failing.";
 export const TURNSTILE_UNSUPPORTED_MESSAGE = "This browser cannot run the bot check. Try another browser.";
@@ -110,7 +109,6 @@ export function turnstileOptions(
 
 export interface TurnstileGateOptions {
   timeoutMs?: number;
-  visibleGraceMs?: number;
   onSend: (query: string, token: string | null) => void;
   onExecute?: () => void;
   onReset: () => void;
@@ -124,9 +122,7 @@ export class TurnstileGate {
   private pendingQuery: string | null = null;
   private retried = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private visibleTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly timeoutMs: number;
-  private readonly visibleGraceMs: number;
   private readonly onSend: (query: string, token: string | null) => void;
   private readonly onExecute: (() => void) | undefined;
   private readonly onReset: () => void;
@@ -136,7 +132,6 @@ export class TurnstileGate {
 
   constructor(opts: TurnstileGateOptions) {
     this.timeoutMs = opts.timeoutMs ?? TURNSTILE_TIMEOUT_MS;
-    this.visibleGraceMs = opts.visibleGraceMs ?? TURNSTILE_VISIBLE_GRACE_MS;
     this.onSend = opts.onSend;
     this.onExecute = opts.onExecute;
     this.onReset = opts.onReset;
@@ -172,15 +167,9 @@ export class TurnstileGate {
     this.onExecute?.();
     this.clearTimers();
     this.timer = setTimeout(() => this.handleTimeout(), this.timeoutMs);
-    this.visibleTimer = setTimeout(() => {
-      if (this.pendingQuery !== null) {
-        this.onNeedVisible?.(true);
-      }
-    }, this.visibleGraceMs);
   }
 
   onBeforeInteractive(): void {
-    this.clearVisibleTimer();
     this.onNeedVisible?.(true);
   }
 
@@ -257,16 +246,8 @@ export class TurnstileGate {
     }
   }
 
-  private clearVisibleTimer(): void {
-    if (this.visibleTimer !== null) {
-      clearTimeout(this.visibleTimer);
-      this.visibleTimer = null;
-    }
-  }
-
   private clearTimers(): void {
     this.clearTimer();
-    this.clearVisibleTimer();
   }
 }
 

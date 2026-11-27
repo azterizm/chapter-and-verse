@@ -381,6 +381,26 @@ class ProviderRotation:
         """Providers known to be cold-starting (the pipeline shows ``provider_warming``)."""
         return [n for n, p in self._providers.items() if getattr(p, "warming", False) is True]
 
+    def _strictly_ready(self, purpose: Purpose) -> bool:
+        """True if a provider for ``purpose`` is pinned, closed-circuit, warm, and funded."""
+        for name in self._orders[purpose]:
+            if not self.is_pinned(name) or self._breakers[name].state != "closed":
+                continue
+            if getattr(self._providers[name], "warming", False) is True:
+                continue
+            if self.ledger is not None:
+                if not self.ledger.available(name):
+                    continue
+                if name == "groq":
+                    wait_fn = getattr(self.ledger, "window_wait", None)
+                    if (
+                        callable(wait_fn)
+                        and wait_fn(name, 2000, max_output_tokens=64) is not None
+                    ):
+                        continue
+            return True
+        return False
+
     def model_status(self) -> dict[str, Any]:
         """Current readiness and warming status across generation and judge providers."""
         warming_names = self.warming()
@@ -394,7 +414,11 @@ class ProviderRotation:
             ]
             if waits:
                 warming_for_s = round(max(waits), 1)
-        ready = bool(self.available("generate")) and bool(self.available("judge"))
+        ready = (
+            (not warming)
+            and self._strictly_ready("generate")
+            and self._strictly_ready("judge")
+        )
         return {
             "ready": ready,
             "warming": warming,

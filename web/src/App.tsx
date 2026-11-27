@@ -54,11 +54,13 @@ function useIsDesktop(): boolean {
 
 export function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
-  // Session id and bot-check token live in memory only: no cookies, no storage.
+  // Session id, signed session token, and bot-check token live in memory only: no cookies, no storage.
   const sessionId = useRef<string>(newSessionId());
+  const sessionTokenRef = useRef<string | null>(null);
   const nextTurnId = useRef(1);
   const abort = useRef<AbortController | null>(null);
   const pendingReplaceRef = useRef<ReplaceRequest | null>(null);
+  const reverifyRef = useRef<((query: string) => void) | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const heroRef = useRef<HTMLDivElement>(null);
@@ -155,8 +157,11 @@ export function App() {
         }
       }
       const turnId = nextTurnId.current++;
+      const activeSessionToken = sessionTokenRef.current;
+      const usedSessionOnly = Boolean(activeSessionToken && !turnstileToken);
       const req: AskRequest = { query, session_id: sessionId.current };
       if (turnstileToken) req.turnstile_token = turnstileToken;
+      if (activeSessionToken) req.sessionToken = activeSessionToken;
       if (replaceReq) {
         dispatch({
           type: "replace",
@@ -165,6 +170,7 @@ export function App() {
           query,
           question: replaceReq.question,
           choice: replaceReq.choice,
+          ...(replaceReq.autoRetry !== undefined ? { autoRetry: replaceReq.autoRetry } : {}),
         });
       } else {
         dispatch({ type: "start", turnId, query });
@@ -177,7 +183,24 @@ export function App() {
           onEvent(event, raw) {
             dispatch({ type: "event", turnId, event, raw });
           },
+          onSessionToken(token) {
+            sessionTokenRef.current = token;
+          },
           onFailure(failure) {
+            if (failure.kind === "http" && failure.status === 403) {
+              sessionTokenRef.current = null;
+              if (usedSessionOnly && Boolean(TURNSTILE_SITE_KEY)) {
+                pendingReplaceRef.current = {
+                  oldTurnId: turnId,
+                  query,
+                  question: replaceReq?.question ?? query,
+                  choice: replaceReq?.choice ?? null,
+                  ...(replaceReq?.autoRetry ? { autoRetry: true } : {}),
+                };
+                reverifyRef.current?.(query);
+                return;
+              }
+            }
             dispatch({ type: "failure", turnId, failure });
           },
         },
@@ -220,6 +243,10 @@ export function App() {
   }, [executeAsk]);
 
   useEffect(() => {
+    reverifyRef.current = (query: string) => getGate().ask(query, true);
+  }, [getGate]);
+
+  useEffect(() => {
     return () => {
       gateRef.current?.cancel();
       abort.current?.abort();
@@ -232,7 +259,8 @@ export function App() {
       if (busy || gate.isWaiting()) return;
       pendingReplaceRef.current = null;
       setBotError(null);
-      gate.ask(query, Boolean(TURNSTILE_SITE_KEY));
+      const needsTurnstile = Boolean(TURNSTILE_SITE_KEY) && !sessionTokenRef.current;
+      gate.ask(query, needsTurnstile);
     },
     [busy, getGate],
   );
@@ -243,7 +271,8 @@ export function App() {
       if (gate.isWaiting()) return;
       pendingReplaceRef.current = req;
       setBotError(null);
-      gate.ask(req.query, Boolean(TURNSTILE_SITE_KEY));
+      const needsTurnstile = Boolean(TURNSTILE_SITE_KEY) && !sessionTokenRef.current;
+      gate.ask(req.query, needsTurnstile);
     },
     [getGate],
   );

@@ -45,6 +45,7 @@ export interface ReplaceRequest {
   query: string;
   question: string;
   choice: TurnChoice | null;
+  autoRetry?: boolean;
 }
 
 interface Props {
@@ -60,6 +61,7 @@ const INITIAL_CHANGE_COUNT = 5;
 const WARMING_POLL_INTERVAL_MS = 10_000;
 const WARMING_TIMEOUT_MS = 600_000;
 const DEFAULT_WARMING_ESTIMATE_S = 406;
+const MAX_WARMING_AUTO_RETRIES = 2;
 
 const PROGRESS_WIDTH_CLASSES: readonly string[] = [
   "w-[5%]",
@@ -98,12 +100,14 @@ function formatTimer(totalSeconds: number): string {
 function WarmingCard({
   busy,
   revealed,
+  autoRetryExhausted,
   onReady,
   onToggleProvisions,
 }: {
   busy: boolean;
   revealed: boolean;
-  onReady: () => void;
+  autoRetryExhausted: boolean;
+  onReady: (autoRetry: boolean) => void;
   onToggleProvisions: () => void;
 }) {
   const [elapsedS, setElapsedS] = useState(0);
@@ -117,12 +121,12 @@ function WarmingCard({
   });
 
   useEffect(() => {
-    if (cancelled || timedOut) return;
+    if (cancelled || timedOut || autoRetryExhausted) return;
     let active = true;
     const ctl = new AbortController();
     const startedAt = Date.now();
 
-    const checkHealth = async () => {
+    const checkHealth = async (allowAutoRetry: boolean) => {
       const h = await health(ctl.signal);
       if (!active || !h?.model) return;
       if (typeof h.model.estimated_ready_s === "number" && h.model.estimated_ready_s > 0) {
@@ -132,19 +136,19 @@ function WarmingCard({
         const serverElapsed = Math.floor(h.model.warming_for_s);
         setElapsedS((prev) => Math.max(prev, serverElapsed));
       }
-      if (h.model.ready && !triggeredRef.current) {
+      if (allowAutoRetry && h.model.ready && !h.model.warming && !triggeredRef.current) {
         triggeredRef.current = true;
-        onReadyRef.current();
+        onReadyRef.current(true);
       }
     };
 
-    void checkHealth();
+    void checkHealth(false);
     const pollId = window.setInterval(() => {
       if (Date.now() - startedAt >= WARMING_TIMEOUT_MS) {
         setTimedOut(true);
         return;
       }
-      void checkHealth();
+      void checkHealth(true);
     }, WARMING_POLL_INTERVAL_MS);
 
     const tickId = window.setInterval(() => {
@@ -157,18 +161,21 @@ function WarmingCard({
       window.clearInterval(pollId);
       window.clearInterval(tickId);
     };
-  }, [cancelled, timedOut]);
+  }, [cancelled, timedOut, autoRetryExhausted]);
 
   const pct = Math.min(95, Math.max(4, Math.round((elapsedS / Math.max(1, estimateS)) * 100)));
   const remainingMin = Math.max(1, Math.ceil((estimateS - elapsedS) / 60));
   const estimateNote = elapsedS >= estimateS ? "Almost ready" : `~${remainingMin} min remaining`;
+  const stoppedAutoRetry = cancelled || timedOut || autoRetryExhausted;
 
   return (
     <section className="rounded-card border border-border bg-surface p-4" aria-live="polite">
       <h3 className="text-ui font-bold text-foreground">{WARMING_TITLE}</h3>
-      <p className="mt-1.5 text-ui text-muted-foreground">{timedOut ? WARMING_TIMEOUT_BODY : WARMING_BODY}</p>
+      <p className="mt-1.5 text-ui text-muted-foreground">
+        {timedOut || autoRetryExhausted ? WARMING_TIMEOUT_BODY : WARMING_BODY}
+      </p>
 
-      {!cancelled && !timedOut && (
+      {!stoppedAutoRetry && (
         <div className="mt-3 space-y-1.5">
           <div
             role="progressbar"
@@ -192,14 +199,14 @@ function WarmingCard({
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {cancelled || timedOut ? (
+        {stoppedAutoRetry ? (
           <Button
             variant="outline"
             size="sm"
             disabled={busy}
             onClick={() => {
               triggeredRef.current = true;
-              onReadyRef.current();
+              onReadyRef.current(false);
             }}
           >
             {ACTION_RETRY}
@@ -469,12 +476,14 @@ export function Turn({ turn, busy, onReplace, onShowSource, onRevealProvisions }
             <WarmingCard
               busy={busy}
               revealed={provisionsRevealed}
-              onReady={() =>
+              autoRetryExhausted={(turn.autoRetryCount ?? 0) >= MAX_WARMING_AUTO_RETRIES}
+              onReady={(autoRetry) =>
                 onReplace({
                   oldTurnId: turn.id,
                   query: turn.query,
                   question: displayQuestion,
                   choice: turn.choice ?? null,
+                  ...(autoRetry ? { autoRetry: true } : {}),
                 })
               }
               onToggleProvisions={toggleProvisions}

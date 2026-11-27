@@ -505,7 +505,7 @@ describe("Turnstile on every question", () => {
     expect(gate.isWaiting()).toBe(false);
   });
 
-  it("executes on demand and only reveals widget when interactive or slow", () => {
+  it("executes on demand and stays hidden unless Turnstile requests interaction", () => {
     vi.useFakeTimers();
     try {
       const sent: Array<{ query: string; token: string | null }> = [];
@@ -513,7 +513,6 @@ describe("Turnstile on every question", () => {
       let executes = 0;
 
       const gate = new TurnstileGate({
-        visibleGraceMs: 2000,
         onSend: (query, token) => sent.push({ query, token }),
         onExecute: () => executes++,
         onReset: vi.fn(),
@@ -522,33 +521,66 @@ describe("Turnstile on every question", () => {
         onError: vi.fn(),
       });
 
-      // Fast silent verification stays invisible
+      // Silent verification stays hidden even if it takes >2s
       gate.ask("first question");
       expect(executes).toBe(1);
+      vi.advanceTimersByTime(10000);
       expect(visibleStates).toEqual([]);
-      vi.advanceTimersByTime(500);
       gate.onToken("fast-tok");
       expect(sent).toEqual([{ query: "first question", token: "fast-tok" }]);
       expect(visibleStates).toEqual([false]);
 
-      // Interactive/slow check shows widget after grace or onBeforeInteractive, then hides on token
+      // Explicit before/after interactive callbacks reveal and hide the corner card
       gate.ask("second question");
       expect(executes).toBe(2);
-      vi.advanceTimersByTime(2000);
-      expect(visibleStates).toEqual([false, true]);
-      gate.onToken("slow-tok");
-      expect(visibleStates).toEqual([false, true, false]);
-
-      // Explicit before/after interactive callbacks
-      gate.ask("third question");
+      expect(visibleStates).toEqual([false]);
       gate.onBeforeInteractive();
-      expect(visibleStates).toEqual([false, true, false, true]);
+      expect(visibleStates).toEqual([false, true]);
       gate.onAfterInteractive();
-      expect(visibleStates).toEqual([false, true, false, true, false]);
+      expect(visibleStates).toEqual([false, true, false]);
       gate.onToken("interactive-tok");
-      expect(sent).toHaveLength(3);
+      expect(sent).toHaveLength(2);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("sends X-Session-Token header without putting sessionToken in JSON body and forwards minted token", async () => {
+    const fetchCalls: Array<{ headers: Headers; body: string }> = [];
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push({
+        headers: new Headers(init?.headers),
+        body: typeof init?.body === "string" ? init.body : "",
+      });
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'event: done\ndata: {"type":"done","timings":{"first_source_ms":null,"first_sentence_ms":null,"total_ms":1}}\n\n',
+            ),
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream", "X-Session-Token": "v1.minted.sig" },
+      });
+    });
+
+    const onSessionToken = vi.fn();
+    await ask(
+      { query: "follow-up", session_id: "sid-1", sessionToken: "v1.existing.sig" },
+      { onEvent: vi.fn(), onFailure: vi.fn(), onSessionToken },
+      new AbortController().signal,
+    );
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]!.headers.get("X-Session-Token")).toBe("v1.existing.sig");
+    expect(fetchCalls[0]!.headers.get("X-Turnstile-Token")).toBeNull();
+    const parsedBody = JSON.parse(fetchCalls[0]!.body) as Record<string, unknown>;
+    expect(parsedBody).toEqual({ query: "follow-up", session_id: "sid-1" });
+    expect("sessionToken" in parsedBody).toBe(false);
+    expect(onSessionToken).toHaveBeenCalledWith("v1.minted.sig");
   });
 });
