@@ -1035,15 +1035,15 @@ def test_modal_warm_poller_recovers_without_double_billing() -> None:
     try:
         with pytest.raises(ProviderWarming):
             provider.complete(short())
-        assert provider.warming
+        assert is_warming(provider)
         initial_usd = ledger.snapshot()["modal"]["usd_session"]
         assert initial_usd > 0.0
 
         deadline = _time.monotonic() + 2.0
-        while provider.warming and _time.monotonic() < deadline:
+        while is_warming(provider) and _time.monotonic() < deadline:
             _time.sleep(0.01)
 
-        assert not provider.warming
+        assert not is_warming(provider)
         assert health.call_count == 3
         # Background polls must not add extra ledger entries or cold-start charges.
         assert ledger.snapshot()["modal"]["usd_session"] == initial_usd
@@ -1068,14 +1068,14 @@ def test_modal_warm_poller_clears_on_max_wait() -> None:
     try:
         with pytest.raises(ProviderWarming):
             provider.complete(short())
-        assert provider.warming
+        assert is_warming(provider)
         clock.now += 1.0
 
         deadline = _time.monotonic() + 2.0
-        while provider.warming and _time.monotonic() < deadline:
+        while is_warming(provider) and _time.monotonic() < deadline:
             _time.sleep(0.01)
 
-        assert not provider.warming
+        assert not is_warming(provider)
     finally:
         provider.close()
 
@@ -1093,7 +1093,7 @@ def test_modal_warm_poller_fast_fails_without_extra_health_probe() -> None:
     try:
         with pytest.raises(ProviderWarming):
             provider.complete(short())
-        assert provider.warming
+        assert is_warming(provider)
         assert health.call_count == 1
 
         # A second complete() with auto_warm_poll=True fast-fails without another probe.

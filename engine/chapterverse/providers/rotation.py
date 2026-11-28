@@ -393,10 +393,7 @@ class ProviderRotation:
                     continue
                 if name == "groq":
                     wait_fn = getattr(self.ledger, "window_wait", None)
-                    if (
-                        callable(wait_fn)
-                        and wait_fn(name, 2000, max_output_tokens=64) is not None
-                    ):
+                    if callable(wait_fn) and wait_fn(name, 2000, max_output_tokens=64) is not None:
                         continue
             return True
         return False
@@ -414,11 +411,7 @@ class ProviderRotation:
             ]
             if waits:
                 warming_for_s = round(max(waits), 1)
-        ready = (
-            (not warming)
-            and self._strictly_ready("generate")
-            and self._strictly_ready("judge")
-        )
+        ready = (not warming) and self._strictly_ready("generate") and self._strictly_ready("judge")
         return {
             "ready": ready,
             "warming": warming,

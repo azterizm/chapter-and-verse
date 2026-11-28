@@ -430,12 +430,8 @@ def test_rrf_auto_select_and_tail_pruning(fixture_router: Router) -> None:
         MagicMock(
             coordinate=Coordinate.parse("uk/ukpga/1996/18/s118"), heading="General", score=6.0
         ),
-        MagicMock(
-            coordinate=Coordinate.parse("uk/ukpga/1996/18/s119"), heading="Basic", score=5.0
-        ),
-        MagicMock(
-            coordinate=Coordinate.parse("uk/ukpga/1996/18/s120"), heading="Min", score=4.0
-        ),
+        MagicMock(coordinate=Coordinate.parse("uk/ukpga/1996/18/s119"), heading="Basic", score=5.0),
+        MagicMock(coordinate=Coordinate.parse("uk/ukpga/1996/18/s120"), heading="Min", score=4.0),
     ]
     mock_router = MagicMock(spec=Router)
     mock_router.index = fixture_router.index
@@ -456,9 +452,7 @@ def test_rrf_auto_select_and_tail_pruning(fixture_router: Router) -> None:
         DenseHit(
             doc_id=2, coordinate="uk/ukpga/1996/18/s118", heading="General", rank=1, score=0.80
         ),
-        DenseHit(
-            doc_id=1, coordinate="uk/ukpga/1996/18/s124", heading="Limit", rank=2, score=0.79
-        ),
+        DenseHit(doc_id=1, coordinate="uk/ukpga/1996/18/s124", heading="Limit", rank=2, score=0.79),
     ]
     out_tie = discover_step(mock_router, "compensatory award limit", dense=dense_tie, limit=10)
     assert isinstance(out_tie, Suggest)
@@ -483,9 +477,7 @@ def test_rrf_auto_select_and_tail_pruning(fixture_router: Router) -> None:
         MagicMock(
             coordinate=Coordinate.parse("uk/ukpga/1996/18/s118"), heading="General", score=9.0
         ),
-        MagicMock(
-            coordinate=Coordinate.parse("uk/ukpga/1996/18/s119"), heading="Basic", score=8.0
-        ),
+        MagicMock(coordinate=Coordinate.parse("uk/ukpga/1996/18/s119"), heading="Basic", score=8.0),
         *[
             MagicMock(
                 coordinate=Coordinate.parse(f"uk/ukpga/1996/18/s{120 + i}"),
@@ -519,15 +511,11 @@ def test_rrf_auto_select_and_tail_pruning(fixture_router: Router) -> None:
     )
     dense_far = MagicMock(spec=DenseRetriever)
     dense_far.search.return_value = [
-        DenseHit(
-            doc_id=1, coordinate="uk/ukpga/1996/18/s124", heading="Limit", rank=1, score=0.95
-        ),
+        DenseHit(doc_id=1, coordinate="uk/ukpga/1996/18/s124", heading="Limit", rank=1, score=0.95),
         DenseHit(
             doc_id=2, coordinate="uk/ukpga/1996/18/s118", heading="General", rank=2, score=0.70
         ),
-        DenseHit(
-            doc_id=3, coordinate="uk/ukpga/1996/18/s119", heading="Basic", rank=3, score=0.60
-        ),
+        DenseHit(doc_id=3, coordinate="uk/ukpga/1996/18/s119", heading="Basic", rank=3, score=0.60),
     ]
     out_pruned = discover_step(
         mock_router, "compensatory award limit", dense=dense_far, limit=10, rrf_k=20
